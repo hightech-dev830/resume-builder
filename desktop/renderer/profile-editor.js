@@ -1,0 +1,179 @@
+// Form editor for the base profile JSON. Fields bind to the model through
+// data-path ("work.0.position"); data-kind="lines" / "csv" map text to arrays.
+function createProfileEditor(container, onChange) {
+  let model = {};
+  const openCards = new Set(['basics']);
+
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function getPath(path) {
+    return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), model);
+  }
+
+  function setPath(path, value) {
+    const keys = path.split('.');
+    let o = model;
+    keys.slice(0, -1).forEach((k, i) => {
+      if (o[k] == null) o[k] = /^\d+$/.test(keys[i + 1]) ? [] : {};
+      o = o[k];
+    });
+    o[keys[keys.length - 1]] = value;
+  }
+
+  // ---- field helpers ----
+  function field(label, path, { kind = 'text', placeholder = '', type = 'text', rows = 3, cls = '' } = {}) {
+    const v = getPath(path);
+    let control;
+    if (kind === 'lines') {
+      control = `<textarea data-path="${path}" data-kind="lines" rows="${rows}" placeholder="${esc(placeholder)}">${esc((v || []).join('\n'))}</textarea>`;
+    } else if (kind === 'csv') {
+      control = `<input data-path="${path}" data-kind="csv" value="${esc((v || []).join(', '))}" placeholder="${esc(placeholder)}">`;
+    } else if (kind === 'textarea') {
+      control = `<textarea data-path="${path}" rows="${rows}" placeholder="${esc(placeholder)}">${esc(v)}</textarea>`;
+    } else {
+      control = `<input data-path="${path}" type="${type}" value="${esc(v)}" placeholder="${esc(placeholder)}">`;
+    }
+    return `<label class="${cls}">${label}${control}</label>`;
+  }
+
+  function listControls(listPath, i, len) {
+    return `<span class="item-actions">
+      <button type="button" class="icon-btn" data-act="up" data-list="${listPath}" data-i="${i}" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button>
+      <button type="button" class="icon-btn" data-act="down" data-list="${listPath}" data-i="${i}" ${i === len - 1 ? 'disabled' : ''} title="Move down">↓</button>
+      <button type="button" class="icon-btn danger" data-act="remove" data-list="${listPath}" data-i="${i}" title="Remove">✕</button>
+    </span>`;
+  }
+
+  function card(id, title, body, extra = '') {
+    return `<details class="pe-card" data-card="${id}" ${openCards.has(id) ? 'open' : ''}>
+      <summary><span class="pe-title">${title}</span>${extra}</summary><div class="pe-body">${body}</div></details>`;
+  }
+
+  function addBtn(listPath, label) {
+    return `<button type="button" class="btn small add-btn" data-act="add" data-list="${listPath}">+ ${label}</button>`;
+  }
+
+  // ---- sections ----
+  function renderBasics() {
+    const profiles = model.basics?.profiles || [];
+    const body = `
+      <div class="grid2">${field('Full name', 'basics.name')}${field('Headline / title', 'basics.label')}</div>
+      <div class="grid2">${field('Email', 'basics.email', { type: 'email' })}${field('Phone', 'basics.phone')}</div>
+      <div class="grid3">${field('City', 'basics.location.city')}${field('State / region', 'basics.location.region')}${field('Country', 'basics.location.countryCode')}</div>
+      <div class="sub-title">Profiles / links</div>
+      ${profiles.map((p, i) => `<div class="row-item">
+          <div class="grid-profile">${field('Network', `basics.profiles.${i}.network`, { placeholder: 'LinkedIn' })}${field('URL', `basics.profiles.${i}.url`, { placeholder: 'https://…' })}</div>
+          ${listControls('basics.profiles', i, profiles.length)}</div>`).join('')}
+      ${addBtn('basics.profiles', 'Add link')}
+      ${field('Summary <span class="muted">(blank line = new paragraph)</span>', 'basics.summary', { kind: 'textarea', rows: 7 })}`;
+    return card('basics', 'Contact &amp; summary', body);
+  }
+
+  function renderHighlights() {
+    const list = model.basics?.highlights || [];
+    const body = list.map((h, i) => `<div class="row-item">
+        <div class="grid-hl">${field('Label', `basics.highlights.${i}.name`)}${field('Details', `basics.highlights.${i}.value`)}</div>
+        ${listControls('basics.highlights', i, list.length)}</div>`).join('') + addBtn('basics.highlights', 'Add competency');
+    return card('highlights', 'Core competencies', body, `<span class="pe-count">${list.length}</span>`);
+  }
+
+  function renderWork() {
+    const list = model.work || [];
+    const body = list.map((w, i) => card(`work-${i}`,
+      `${esc(w.position || 'New position')} <span class="muted">· ${esc(w.name || 'Company')}</span>`,
+      `<div class="grid2">${field('Company', `work.${i}.name`)}${field('Company context <span class="muted">(optional)</span>', `work.${i}.context`, { placeholder: 'e.g. Law Firm – Case Management System' })}</div>
+       <div class="grid2">${field('Position', `work.${i}.position`)}${field('Location', `work.${i}.location`)}</div>
+       <div class="grid2">${field('Start', `work.${i}.startDate`, { type: 'month' })}${field('End <span class="muted">(blank = Present)</span>', `work.${i}.endDate`, { type: 'month' })}</div>
+       ${field('Description <span class="muted">(optional intro line)</span>', `work.${i}.description`, { kind: 'textarea', rows: 2 })}
+       ${field('Bullets <span class="muted">(one per line)</span>', `work.${i}.highlights`, { kind: 'lines', rows: 8 })}`,
+      listControls('work', i, list.length))).join('') + addBtn('work', 'Add job');
+    return card('work', 'Work experience', `<div class="nested">${body}</div>`, `<span class="pe-count">${list.length}</span>`);
+  }
+
+  function renderSkills() {
+    const list = model.skills || [];
+    const body = list.map((s, i) => `<div class="row-item">
+        <div class="grid-hl">${field('Group', `skills.${i}.name`)}${field('Skills <span class="muted">(comma separated)</span>', `skills.${i}.keywords`, { kind: 'csv' })}</div>
+        ${listControls('skills', i, list.length)}</div>`).join('') + addBtn('skills', 'Add skill group');
+    return card('skills', 'Skills', body, `<span class="pe-count">${list.length}</span>`);
+  }
+
+  function renderEducation() {
+    const list = model.education || [];
+    const body = list.map((e, i) => `<div class="row-item block">
+        <div class="grid2">${field('Institution', `education.${i}.institution`)}${field('Degree', `education.${i}.studyType`)}</div>
+        <div class="grid3">${field('Field of study', `education.${i}.area`)}${field('Start', `education.${i}.startDate`, { type: 'month' })}${field('End', `education.${i}.endDate`, { type: 'month' })}</div>
+        ${listControls('education', i, list.length)}</div>`).join('') + addBtn('education', 'Add education');
+    return card('education', 'Education', body, `<span class="pe-count">${list.length}</span>`);
+  }
+
+  function renderLanguages() {
+    const list = model.languages || [];
+    const body = list.map((l, i) => `<div class="row-item">
+        <div class="grid2">${field('Language', `languages.${i}.language`)}${field('Fluency', `languages.${i}.fluency`)}</div>
+        ${listControls('languages', i, list.length)}</div>`).join('') + addBtn('languages', 'Add language');
+    return card('languages', 'Languages', body, `<span class="pe-count">${list.length}</span>`);
+  }
+
+  function render() {
+    const scroll = container.scrollTop;
+    container.innerHTML = renderBasics() + renderHighlights() + renderWork() + renderSkills() + renderEducation() + renderLanguages();
+    container.scrollTop = scroll;
+  }
+
+  const TEMPLATES = {
+    'basics.profiles': () => ({ network: '', url: '' }),
+    'basics.highlights': () => ({ name: '', value: '' }),
+    work: () => ({ name: '', position: '', location: '', startDate: '', endDate: '', description: '', highlights: [] }),
+    skills: () => ({ name: '', keywords: [] }),
+    education: () => ({ institution: '', studyType: '', area: '', startDate: '', endDate: '' }),
+    languages: () => ({ language: '', fluency: '' })
+  };
+
+  // ---- events ----
+  container.addEventListener('input', (e) => {
+    const el = e.target.closest('[data-path]');
+    if (!el) return;
+    let v = el.value;
+    if (el.dataset.kind === 'lines') v = v.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (el.dataset.kind === 'csv') v = v.split(',').map((s) => s.trim()).filter(Boolean);
+    setPath(el.dataset.path, v);
+    onChange(model);
+  });
+
+  container.addEventListener('toggle', (e) => {
+    const d = e.target.closest('[data-card]');
+    if (d) d.open ? openCards.add(d.dataset.card) : openCards.delete(d.dataset.card);
+  }, true);
+
+  container.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    e.preventDefault();
+    const path = b.dataset.list;
+    const list = getPath(path) || [];
+    const i = Number(b.dataset.i);
+    if (b.dataset.act === 'add') {
+      list.push(TEMPLATES[path]());
+      setPath(path, list);
+      openCards.add(path === 'work' ? `work-${list.length - 1}` : path.split('.').pop());
+      openCards.add(path === 'work' ? 'work' : path.startsWith('basics.profiles') ? 'basics' : path.split('.').pop());
+    } else if (b.dataset.act === 'remove') {
+      if (!confirm('Remove this item?')) return;
+      list.splice(i, 1);
+    } else {
+      const j = b.dataset.act === 'up' ? i - 1 : i + 1;
+      [list[i], list[j]] = [list[j], list[i]];
+    }
+    render();
+    onChange(model);
+  });
+
+  return {
+    load(data) {
+      model = JSON.parse(JSON.stringify(data || {}));
+      render();
+    },
+    get: () => model
+  };
+}

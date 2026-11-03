@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(node -v)",
+      "PowerShell(npm -v)",
+      "PowerShell(Get-Command psql -ErrorAction SilentlyContinue)",
+      "Read(//c/Program Files/PostgreSQL/**)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "PowerShell(Get-Process -Id 7024 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path; Get-NetTCPConnection -LocalPort 5432 -State Listen | Select-Object LocalAddress,OwningProcess; $c = Get-Content G:\\\\Project\\\\resume-builder\\\\db.config.json -Raw | ConvertFrom-Json; \"user=$\\($c.user\\) host=$\\($c.host\\) db=$\\($c.database\\) pwLen=$\\($c.password.Length\\)\")"
+    ]
+  }
+}

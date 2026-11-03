@@ -1,0 +1,65 @@
+{
+  "name": "resume-builder",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Personal resume & cover letter builder (Electron + PostgreSQL + Claude)",
+  "author": "Kevin Burgess",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "check-db": "node scripts/check-db.js",
+    "samples": "electron scripts/render-samples.js",
+    "electron:build": "electron-builder --win"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "openai": "^7.47.0",
+    "pg": "^8.23.1",
+    "undici": "^6.29.1"
+  },
+  "devDependencies": {
+    "electron": "33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.kevinburgess.resumebuilder",
+    "productName": "Resume Builder",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Resume Builder"
+    },
+    "portable": {
+      "artifactName": "ResumeBuilder-${version}-portable.exe"
+    }
+  }
+}

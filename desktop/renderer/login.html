@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>Resume Builder – Login</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="brand"><span class="logo">R</span> Resume Builder</div>
+    <form id="loginForm">
+      <label>Username<input id="username" autocomplete="username" autofocus></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password"></label>
+      <button class="btn primary block" type="submit" id="loginBtn">Sign in</button>
+      <div class="error" id="loginError"></div>
+    </form>
+
+    <details id="dbDetails">
+      <summary>Database connection</summary>
+      <form id="dbForm" class="db-form">
+        <div class="grid2">
+          <label>Host<input name="host"></label>
+          <label>Port<input name="port" type="number"></label>
+          <label>User<input name="user"></label>
+          <label>Password<input name="password" type="password"></label>
+        </div>
+        <label>Database<input name="database"></label>
+        <button class="btn block" type="submit">Save &amp; test connection</button>
+        <div class="hint" id="dbStatus"></div>
+      </form>
+    </details>
+  </div>
+  <script src="login.js"></script>
+</body>
+</html>

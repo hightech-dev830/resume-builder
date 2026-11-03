@@ -1,0 +1,26 @@
+{
+  "name": "resume-builder-web",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Web version of Resume Builder (Vercel + Supabase)",
+  "type": "commonjs",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "sync": "node scripts/sync.js",
+    "dev": "node scripts/sync.js && node dev-server.js",
+    "check": "node scripts/check-supabase.js",
+    "install:local": "npm install --omit=optional"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "@supabase/supabase-js": "^2.118.0",
+    "openai": "^7.47.0",
+    "puppeteer-core": "^25.16.0",
+    "undici": "^6.29.1"
+  },
+  "optionalDependencies": {
+    "@sparticuz/chromium": "^153.0.0"
+  }
+}

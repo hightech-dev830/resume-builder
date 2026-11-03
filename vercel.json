@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "echo \"static files are pre-synced (npm run sync)\"",
+  "outputDirectory": "public",
+  "functions": {
+    "api/rpc.js": {
+      "maxDuration": 300,
+      "memory": 2048,
+      "includeFiles": "{lib/**,public/fonts/**}"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/login.html"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'">
+  <title>Resume Builder – Login</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="brand"><span class="logo">R</span> Resume Builder</div>
+    <form id="loginForm">
+      <label>Username<input id="username" autocomplete="username" autofocus></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password"></label>
+      <button class="btn primary block" type="submit" id="loginBtn">Sign in</button>
+      <div class="error" id="loginError"></div>
+    </form>
+  </div>
+  <script src="login-web.js"></script>
+</body>
+</html>
