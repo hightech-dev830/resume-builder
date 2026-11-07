@@ -44,7 +44,7 @@ This uses your installed Chrome or Edge for PDFs. Set `CHROME_PATH` if neither i
 ## 4. Deploy to Vercel
 
 1. Push the repo and import it in Vercel.
-2. Set **Root Directory** to `web` (Framework preset: **Other**).
+2. Leave **Root Directory** empty (the repo root). Framework preset: **Other**. Leave Build Command, Output Directory and Install Command on their defaults; `vercel.json` sets them.
 3. Add the environment variables above.
 4. Deploy.
 
@@ -52,19 +52,19 @@ This uses your installed Chrome or Edge for PDFs. Set `CHROME_PATH` if neither i
 
 ## Shared code
 
-`lib/shared/*` and `public/{app.html,app.js,combobox.js,profile-editor.js,styles.css}` are **generated** from the desktop app (`../src`, `../renderer`). After changing those, run:
+`lib/shared/*` and `public/{app.html,app.js,combobox.js,profile-editor.js,styles.css}` are **generated** from the desktop app (`desktop/src`, `desktop/renderer`). After changing those, run:
 
 ```
 npm run sync
 ```
 
-Then commit the result, because Vercel deploys only the `web` folder.
+Then commit the result. Vercel serves the generated copies; `desktop/` itself isn't deployed (see `.vercelignore`).
 
 | File | Purpose |
 |---|---|
 | `api/rpc.js` | single API endpoint, `POST /api/rpc { method, args }` |
-| `lib/methods.js` | the server methods, mirroring the desktop IPC handlers in `../main.js` |
-| `lib/db.js` | Supabase queries (same functions as `../src/db.js`) |
+| `lib/methods.js` | the server methods, mirroring the desktop IPC handlers in `desktop/main.js` |
+| `lib/db.js` | Supabase queries (same functions as `desktop/src/db.js`) |
 | `lib/storage.js` | Supabase Storage in place of local folders |
 | `lib/pdf.js` | HTML → PDF with headless Chromium |
 | `lib/fonts.js` | web font substitution |

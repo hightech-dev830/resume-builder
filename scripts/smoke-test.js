@@ -61,7 +61,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     await js(`for (const [k, v] of Object.entries({ company: 'Web Smoke Co', role: 'Senior Backend Engineer', location: 'Remote (US)',
       job_link: 'https://example.com/jobs/web', jd: 'Test JD' })) { const el = document.querySelector('#f-' + k); el.value = v; el.dispatchEvent(new Event('input')); }`);
     await page.click('#useBaseBtn');
-    await wait(2500);
+    await page.waitForFunction(`document.querySelector('#previewFrame').contentDocument?.body?.innerText.includes('Kevin Burgess')`, { timeout: 20000 }).catch(() => {});
+    await wait(500);
     check('preview rendered with web fonts', await js(`(() => { const d = document.querySelector('#previewFrame').contentDocument;
       return d.body.innerText.includes('Kevin Burgess') && !!d.querySelector('link[href="/fonts/fonts.css"]'); })()`));
 
@@ -73,7 +74,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     check(`PDF stored: ${row?.pdf_path}`, /^\d{4}-\d{2}-\d{2}\/\d+_Web_Smoke_Co\/.+_Resume\.pdf$/.test(row?.pdf_path || ''));
     const pdf = await js(`api.openPath ? fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ method: 'files:url', args: [state.row.pdf_path] }) }).then(r => r.json()) : null`);
-    const pdfHead = pdf?.ok ? await js(`fetch(${JSON.stringify(pdf.data)}).then(r => r.arrayBuffer()).then(b => new TextDecoder().decode(b.slice(0, 5)))`) : '';
+    // download the signed URL from Node: the page's CSP only allows connections to itself
+    const pdfHead = pdf?.ok ? Buffer.from(await (await fetch(pdf.data)).arrayBuffer()).subarray(0, 5).toString() : '';
     check('stored PDF downloads', pdfHead === '%PDF-');
     check('result bar shown', await js(`!document.querySelector('#resultBar').classList.contains('hidden')`));
     await shot('web-builder');
@@ -89,6 +91,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
       folder.ok && ['resume.json', 'job.txt'].every((n) => folder.data.some((f) => f.name === n)));
 
     await tab('history');
+    await page.waitForSelector(`#historyBody tr[data-id="${row?.id}"]`, { timeout: 20000 }).catch(() => {});
     check('history lists bid', await js(`!!document.querySelector('#historyBody tr[data-id="${row?.id}"]')`));
     check('copy link button', await js(`!!document.querySelector('#historyBody [data-copy="https://example.com/jobs/web"]')`));
     check('date filter has days', await js(`[...document.querySelectorAll('#h-date option')].some(o => o.value.startsWith('day:'))`));
