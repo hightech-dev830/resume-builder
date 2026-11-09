@@ -466,6 +466,8 @@ async function snapshotTab(tabId) {
     merged.errors.push(...r.errors);
     merged.text += (r.top ? '' : `\n[frame ${new URL(r.url).host}]\n`) + r.text;
     merged.captcha = merged.captcha || r.captcha;
+    merged.loading = merged.loading || r.loading;
+    merged.steps = merged.steps || r.steps;
     merged.success = merged.success || r.success;
     merged.already = merged.already || r.already;
   }
@@ -508,6 +510,22 @@ async function waitForCaptcha(tabId, s, what) {
   return false;
 }
 
+// Reasons that really need you; everything else the bot decides itself.
+const HARD_STOP = /captcha|robot|human verification|verif\w* (code|link|email)|one[- ]time|otp|sms code|email code|wrong password|incorrect password|invalid password|locked|password.*(incorrect|invalid)/i;
+
+// Snapshot once the page has finished rendering: slow single-page apps (Workday) show a
+// spinner or an empty shell first. Scrolls and re-reads up to ~15 s.
+async function readyPage(tabId) {
+  let snap = await snapshotTab(tabId);
+  for (let i = 0; i < 6 && !snap.success && !snap.already && (snap.loading || (!snap.fields.length && snap.buttons.length <= 2)); i++) {
+    await sleep(2500);
+    await chrome.scripting.executeScript({ target: { tabId }, func: () => window.scrollBy(0, 200) }).catch(() => {});
+    await call(tabId, '__abAgent', 'waitStable', [1000, 6000]).catch(() => {});
+    snap = await snapshotTab(tabId);
+  }
+  return snap;
+}
+
 async function runApplication(startTabId, { job, bid, files, settings: s, tabs }) {
   const profile = await getProfile();
   const aiProfile = profileForAI(profile);
@@ -518,6 +536,8 @@ async function runApplication(startTabId, { job, bid, files, settings: s, tabs }
   let lastKey = '';
   let repeats = 0;
   let captchaWaits = 0;
+  let overrides = 0; // times the bot decided by itself instead of asking you
+  let idle = 0; // pages that looked empty / still loading
 
   for (let step = 1; step <= s.behavior.stepLimit; step++) {
     if (stopRequested) return { status: 'stopped', answers };
@@ -528,7 +548,7 @@ async function runApplication(startTabId, { job, bid, files, settings: s, tabs }
     await settle(tabId);
     if (await acceptCookies(tabId)) await settle(tabId);
 
-    const snap = await snapshotTab(tabId);
+    const snap = await readyPage(tabId);
     if (snap.success && !snap.fields.some((f) => f.required && !f.value)) {
       log(`Confirmation page: "${(snap.text.match(/[^.]*(thank|submitted|received|congratulations)[^.]*/i) || [''])[0].slice(0, 120)}"`);
       return { status: 'applied', answers };
@@ -551,8 +571,28 @@ async function runApplication(startTabId, { job, bid, files, settings: s, tabs }
     if (plan.page_type === 'job_closed') return { status: 'attention', reason: 'the posting is closed', answers };
     if (plan.needs_human) {
       if (plan.page_type === 'captcha' && captchaWaits++ < 2 && (await waitForCaptcha(tabId, s, 'captcha'))) continue;
-      return { status: 'attention', reason: plan.needs_human, answers };
+      // only real blockers stop the bot; anything else it works out itself
+      if (HARD_STOP.test(`${plan.needs_human} ${plan.page_type}`) || overrides >= 3) return { status: 'attention', reason: plan.needs_human, answers };
+      overrides++;
+      log(`  Deciding without you (AI wanted help: ${plan.needs_human.slice(0, 120)})`);
+      history.push(`You asked for a human ("${plan.needs_human.slice(0, 160)}") but that is not allowed here. Decide yourself: choose the most likely button to move forward (Apply, Autofill with Resume, Create Account, Sign In, Continue, Next) or fill what you can.`);
+      if (!plan.actions.length && !plan.next_click) {
+        await sleep(2500);
+        continue;
+      }
     }
+
+    // empty or still-loading page: wait and look again
+    if (!plan.actions.length && !plan.next_click) {
+      if (++idle > 4) return { status: 'attention', reason: 'the page never showed anything to fill or click', answers };
+      log('  Nothing to do yet; waiting for the page');
+      await call(tabId, '__abAgent', 'waitStable', [1500, 10000]).catch(() => {});
+      await sleep(2000);
+      history.push(`${plan.page_type} at ${snap.url.slice(0, 100)}: page looked empty or still loading, waited`);
+      step--; // waiting does not use up a page
+      continue;
+    }
+    idle = 0;
 
     // loop guard: same page, same plan, three times in a row
     const key = `${snap.url}|${plan.page_type}|${plan.actions.map((a) => a.id + a.op).join(',')}|${plan.next_click}`;
@@ -570,6 +610,12 @@ async function runApplication(startTabId, { job, bid, files, settings: s, tabs }
     }
     const failed = results.filter((r) => !r.ok);
     if (failed.length) log(`  ${failed.length} of ${results.length} actions failed: ${failed.slice(0, 3).map((f) => `${f.op} ${f.id} (${f.note})`).join('; ')}`, 'warn');
+    // sites parse an uploaded resume (Workday "Autofill with Resume") before Continue works
+    if (results.some((r) => r.ok && r.op.startsWith('upload'))) {
+      log('  Resume uploaded; waiting for the site to read it');
+      await sleep(3000);
+      await call(tabId, '__abAgent', 'waitStable', [1500, 15000]).catch(() => {});
+    }
 
     let clicked = '';
     if (plan.next_click) {

@@ -166,7 +166,8 @@
       } else if (el.isContentEditable) {
         f.kind = 'richtext';
         f.value = textOf(el).slice(0, 200);
-      } else if (el.getAttribute('role') === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox' || el.getAttribute('aria-autocomplete')) {
+      } else if (el.getAttribute('role') === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox' || el.getAttribute('aria-autocomplete')
+        || el.closest('[data-automation-id*="multiselect" i], [data-uxi-widget-type="selectinput"], [data-automation-id="searchBox"]')) {
         f.kind = 'combobox';
         const shown = el.tagName === 'INPUT' ? el.value : textOf(el);
         const container = el.closest('[class*="select" i], [class*="dropdown" i]');
@@ -222,6 +223,8 @@
     return {
       url: location.href,
       title: document.title,
+      loading: isLoading(),
+      steps: wizardSteps(),
       top: window === window.top,
       area: Math.round(window.innerWidth * window.innerHeight),
       fields: fields.slice(0, 160),
@@ -232,6 +235,25 @@
       success: SUCCESS_RE.test(text) && !fields.some((f) => f.required && !f.value && f.kind !== 'file'),
       already: ALREADY_RE.test(text)
     };
+  }
+
+  // A spinner or busy region means the page is still rendering.
+  function isLoading() {
+    const busy = deepAll('[aria-busy="true"], [data-automation-id="loadingSpinner"], [class*="spinner" i], [class*="loading" i], [role="progressbar"]')
+      .filter((e) => visible(e) && e.getBoundingClientRect().width < window.innerWidth * 0.9);
+    return busy.length > 0 && !/thank you|submitted/i.test(textOf(document.body).slice(0, 2000));
+  }
+
+  // "Autofill with Resume > My Information (current) > …" from a wizard progress bar, if any.
+  function wizardSteps() {
+    const bar = deepAll('[data-automation-id="progressBar"], [class*="progress" i] ol, [class*="stepper" i], [class*="steps" i] ol, nav[aria-label*="step" i] ol')
+      .find((b) => visible(b) && b.children.length >= 3 && b.children.length <= 12);
+    if (!bar) return '';
+    return [...bar.children].map((c) => {
+      const t = textOf(c);
+      const cur = c.getAttribute('aria-current') || /active|current|selected/i.test(c.className) || c.querySelector('[aria-current]');
+      return t ? (cur ? `${t} (current)` : t) : '';
+    }).filter(Boolean).join(' > ').slice(0, 300);
   }
 
   // Only captchas that need a person. The invisible reCAPTCHA badge (bottom-right corner,
@@ -293,7 +315,11 @@
 
   // ---------- acting ----------
 
-  function realClick(el) {
+  function realClick(target) {
+    // Workday covers some buttons (Create Account, Sign In) with a transparent "click_filter" layer
+    const filter = target.querySelector?.('[data-automation-id="click_filter"]')
+      || target.parentElement?.querySelector(':scope > [data-automation-id="click_filter"]');
+    const el = filter && visible(filter) ? filter : target;
     el.scrollIntoView?.({ block: 'center', inline: 'center' });
     const opts = { bubbles: true, cancelable: true, composed: true, view: window };
     try {
@@ -433,13 +459,22 @@
       input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: value, inputType: 'insertText' }));
       fire(input, 'change');
     }
-    for (let i = 0; i < 12; i++) {
+    const OPTION_SEL = '[role="option"], [data-automation-id="promptOption"], [data-automation-id="promptLeafNode"], [class*="option" i]:not(select):not(option), [role="listbox"] li';
+    let entered = false;
+    for (let i = 0; i < 14; i++) {
       await sleep(250 + i * 50);
       const listId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || input.getAttribute?.('aria-controls');
       const scope = listId ? document.getElementById(listId) : null;
-      const opts = (scope ? [...scope.querySelectorAll('[role="option"], li')] : deepAll('[role="option"], [class*="option" i]:not(select):not(option), [role="listbox"] li'))
-        .filter((o) => visible(o) && textOf(o) && textOf(o).length < 200 && !/no (options|results)|loading/i.test(textOf(o)));
-      if (!opts.length) continue;
+      const opts = (scope ? [...scope.querySelectorAll('[role="option"], li')] : deepAll(OPTION_SEL))
+        .filter((o) => visible(o) && textOf(o) && textOf(o).length < 200 && !/no (options|results|items)|loading|searching/i.test(textOf(o)));
+      if (!opts.length) {
+        // search boxes (Workday prompts) only list matches after Enter
+        if (!entered && i >= 3 && input.tagName === 'INPUT') {
+          entered = true;
+          for (const type of ['keydown', 'keypress', 'keyup']) input.dispatchEvent(new KeyboardEvent(type, { bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13 }));
+        }
+        continue;
+      }
       const hit = bestMatch(opts, value, textOf) || (opts.length && i > 6 ? opts[0] : null);
       if (hit) {
         realClick(hit);

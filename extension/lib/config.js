@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS = {
     template: '',          // '' = the web app's default template
     uploadCover: true,
     delaySec: 8,           // pause between bids
-    stepLimit: 25,         // max pages per application
+    stepLimit: 40,         // max pages per application (Workday-style wizards need ~15)
     captchaWaitMin: 3,     // how long to wait for you to solve a captcha
     closeTabs: true        // close the job tabs after a successful bid
   }
@@ -48,6 +48,8 @@ export const SECRET_KEYS = ['password', 'ssn_last4', 'dob'];
 export async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
   const s = settings || {};
+  // 25 was the old default page limit; multi-step sites (Workday) need more
+  if (s.behavior?.stepLimit === 25) s.behavior.stepLimit = DEFAULT_SETTINGS.behavior.stepLimit;
   return {
     ...DEFAULT_SETTINGS, ...s,
     filters: { ...DEFAULT_SETTINGS.filters, ...(s.filters || {}) },
