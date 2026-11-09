@@ -85,8 +85,8 @@ async function getBaseResume() {
 async function aiConfig(over = {}) {
   const s = await db.getAllSettings();
   const provider = over.provider || s.ai_provider || 'anthropic';
-  const keyName = provider === 'openai' ? 'openai_api_key' : 'claude_api_key';
-  const modelName = provider === 'openai' ? 'openai_model' : 'claude_model';
+  const keyName = ai.KEY_SETTING[provider] || 'claude_api_key';
+  const modelName = ai.MODEL_SETTING[provider] || 'claude_model';
   return {
     provider,
     apiKey: over.apiKey ?? s[keyName] ?? '',
@@ -177,6 +177,8 @@ handle('settings:get', async () => {
     claude_model: s.claude_model || ai.PROVIDERS.anthropic.defaultModel,
     openai_api_key: s.openai_api_key || '',
     openai_model: s.openai_model || '',
+    gemini_api_key: s.gemini_api_key || '',
+    gemini_model: s.gemini_model || '',
     claude_proxy: s.claude_proxy || '',
     proxy_enabled: s.proxy_enabled === '0' ? '0' : '1',
     prompt_resume: (s.prompt_resume || '').trim() || ai.DEFAULT_RESUME_PROMPT,
@@ -188,7 +190,7 @@ handle('settings:get', async () => {
 });
 
 handle('settings:save', async (values) => {
-  const allowed = ['ai_provider', 'claude_api_key', 'claude_model', 'openai_api_key', 'openai_model', 'claude_proxy', 'proxy_enabled',
+  const allowed = ['ai_provider', 'claude_api_key', 'claude_model', 'openai_api_key', 'openai_model', 'gemini_api_key', 'gemini_model', 'claude_proxy', 'proxy_enabled',
     'prompt_resume', 'prompt_cover', 'output_dir', 'default_template', 'base_resume'];
   for (const [k, v] of Object.entries(values || {})) {
     if (!allowed.includes(k)) continue;

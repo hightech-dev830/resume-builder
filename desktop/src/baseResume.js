@@ -4,7 +4,7 @@ module.exports = {
   basics: {
     name: 'Kevin Burgess',
     label: 'Senior Software Engineer',
-    email: 'kburgess11@gmail.com',
+    email: 'kcburgess11@gmail.com',
     phone: '310-933-9572',
     location: { city: 'Rolling Hills', region: 'CA', countryCode: 'US' },
     profiles: [

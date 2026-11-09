@@ -32,7 +32,7 @@ module.exports = async function handler(req, res) {
   const { method, args = [] } = body;
 
   try {
-    if (method === 'auth:login') {
+    if (method === 'auth:login' || method === 'auth:token') {
       const [{ username, password } = {}] = args;
       if (!auth.checkCredentials(username, password)) return send(res, 200, { ok: false, error: 'Invalid username or password' });
       initPromise = initPromise || init();
@@ -40,6 +40,8 @@ module.exports = async function handler(req, res) {
         initPromise = null;
         throw new Error(`Database connection failed: ${e.message}`);
       });
+      // auth:token is for the Chrome extension, which keeps the token and sends it as a Bearer header
+      if (method === 'auth:token') return send(res, 200, { ok: true, data: { token: auth.issueToken(60 * 60 * 24 * 365) } });
       return send(res, 200, { ok: true, data: true }, { 'Set-Cookie': auth.sessionCookie(req) });
     }
     if (method === 'auth:logout') return send(res, 200, { ok: true, data: true }, { 'Set-Cookie': auth.clearCookie() });

@@ -7,6 +7,10 @@ The same app as the desktop version, running in the browser:
 - **PDFs:** headless Chromium (`@sparticuz/chromium` on Vercel), from the same templates as the desktop app. Windows fonts are swapped for metric-compatible Google Fonts (Calibri → Carlito, Times New Roman → Tinos, Georgia → Gelasio and so on), so line and page breaks stay close to the desktop output.
 - **AI:** Claude or OpenAI, with the editable prompts and proxy settings, all stored in Supabase.
 
+## Chrome auto-bid extension
+
+[`extension/`](extension/README.md) applies to Jobright jobs automatically and uses this server for AI, PDFs and saving bids. Run [`supabase/migrations/002_auto_bid.sql`](supabase/migrations/002_auto_bid.sql) once for its columns.
+
 ## 1. Create the tables (once)
 
 Supabase dashboard → **SQL Editor** → New query → paste [`supabase/schema.sql`](supabase/schema.sql) → **Run**.

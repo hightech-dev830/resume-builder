@@ -56,6 +56,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
       await tab(t);
       check(`tab ${t}`, (await js(`document.querySelector('.view.active')?.id`)) === `view-${t}`);
     }
+    await page.waitForFunction('fieldOptions.role.length > 5', { timeout: 20000 }).catch(() => {});
     check('dropdown options loaded', (await js(`fieldOptions.role.length`)) > 5);
 
     await js(`for (const [k, v] of Object.entries({ company: 'Web Smoke Co', role: 'Senior Backend Engineer', location: 'Remote (US)',
@@ -74,8 +75,11 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     check(`PDF stored: ${row?.pdf_path}`, /^\d{4}-\d{2}-\d{2}\/\d+_Web_Smoke_Co\/.+_Resume\.pdf$/.test(row?.pdf_path || ''));
     const pdf = await js(`api.openPath ? fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ method: 'files:url', args: [state.row.pdf_path] }) }).then(r => r.json()) : null`);
-    // download the signed URL from Node: the page's CSP only allows connections to itself
-    const pdfHead = pdf?.ok ? Buffer.from(await (await fetch(pdf.data)).arrayBuffer()).subarray(0, 5).toString() : '';
+    // local folder: /api/file link, fetched in the logged-in page; Supabase: signed URL, fetched from Node
+    // (the page's CSP only allows connections to itself)
+    const pdfHead = !pdf?.ok ? '' : pdf.data.startsWith('/')
+      ? await js(`fetch(${JSON.stringify(pdf.data)}).then(r => r.arrayBuffer()).then(b => new TextDecoder().decode(b.slice(0, 5)))`)
+      : Buffer.from(await (await fetch(pdf.data)).arrayBuffer()).subarray(0, 5).toString();
     check('stored PDF downloads', pdfHead === '%PDF-');
     check('result bar shown', await js(`!document.querySelector('#resultBar').classList.contains('hidden')`));
     await shot('web-builder');

@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS resumes (
 ALTER TABLE resumes ADD COLUMN IF NOT EXISTS ai_provider TEXT NOT NULL DEFAULT '';
 ALTER TABLE resumes ADD COLUMN IF NOT EXISTS ai_model    TEXT NOT NULL DEFAULT '';
 ALTER TABLE resumes ADD COLUMN IF NOT EXISTS prompt_used TEXT NOT NULL DEFAULT '';
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS source     TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS apply_url  TEXT NOT NULL DEFAULT '';
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS bot_status TEXT NOT NULL DEFAULT '';
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS bot_log    JSONB;
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS answers    JSONB;
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS resumes_source_url_idx ON resumes (source_url);
+CREATE INDEX IF NOT EXISTS resumes_bot_status_idx ON resumes (bot_status);
 
 CREATE INDEX IF NOT EXISTS resumes_created_at_idx ON resumes (created_at DESC);
 CREATE INDEX IF NOT EXISTS resumes_company_idx ON resumes (lower(company));

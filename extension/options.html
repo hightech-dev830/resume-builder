@@ -1,0 +1,165 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Auto Bid Settings</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { padding: 0 0 60px; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+    header { background: var(--panel); border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+    header .wrap { display: flex; align-items: center; gap: 18px; padding-top: 14px; padding-bottom: 0; }
+    header h1 { font-size: 17px; margin: 0 0 12px; }
+    nav { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
+    nav button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 10px 12px; color: var(--muted); }
+    nav button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+    section.tab { display: none; }
+    section.tab.active { display: block; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
+    .card h2 { font-size: 14px; margin: 0 0 4px; }
+    .card p.hint { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .grid .wide { grid-column: 1 / -1; }
+    .check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 13px; }
+    .check input { width: auto; margin: 0; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+    .bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--panel); border-top: 1px solid var(--line); }
+    .bar .wrap { display: flex; gap: 10px; align-items: center; padding-top: 10px; padding-bottom: 10px; }
+    #status { flex: 1; }
+    .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .seg button { border: 0; border-radius: 0; }
+    .seg button.active { background: var(--accent); color: #fff; }
+    textarea.tall { min-height: 340px; }
+    .secret { font-family: Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>⚡ Auto Bid</h1>
+      <nav id="nav">
+        <button data-tab="connection" class="active">Connection</button>
+        <button data-tab="profile">My info</button>
+        <button data-tab="jobs">Jobs &amp; behavior</button>
+        <button data-tab="ai">AI &amp; prompts</button>
+        <button data-tab="resume">Resume JSON</button>
+      </nav>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <!-- connection -->
+    <section class="tab active" id="tab-connection">
+      <div class="card">
+        <h2>Resume Builder server</h2>
+        <p class="hint">The bot uses your Resume Builder web app for AI, PDFs and saving bids to Supabase. Use <code>http://localhost:3000</code> while <code>npm run dev</code> runs, or your Vercel URL.</p>
+        <div class="grid">
+          <label class="wide">Server URL<input id="serverUrl" placeholder="https://your-app.vercel.app"></label>
+          <label>Username<input id="loginUser" value="jkr" autocomplete="off"></label>
+          <label>Password<input id="loginPass" type="password" autocomplete="off"></label>
+        </div>
+        <div class="row">
+          <button class="primary" id="loginBtn">Sign in</button>
+          <button id="testBtn">Test connection</button>
+          <span id="connStatus" class="muted"></span>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Jobright</h2>
+        <p class="hint">The page the bot reads jobs from. Set your filters (role, Remote, Past 24 hours…) on Jobright itself; the bot also checks remote and posting age.</p>
+        <label>Job list URL<input id="listUrl"></label>
+      </div>
+    </section>
+
+    <!-- profile -->
+    <section class="tab" id="tab-profile">
+      <div class="card">
+        <h2>Personal details</h2>
+        <p class="hint">Typed into application forms. Stored only in this browser. Password, SSN and date of birth are never sent to the AI: it sees placeholders, and the real values are typed straight into the page.</p>
+        <div class="grid" id="profileGrid"></div>
+      </div>
+    </section>
+
+    <!-- jobs & behavior -->
+    <section class="tab" id="tab-jobs">
+      <div class="card">
+        <h2>Which jobs</h2>
+        <div class="grid">
+          <label class="check"><input type="checkbox" id="f-remoteOnly"> Remote jobs only</label>
+          <label>Posted within (hours)<input type="number" id="f-maxAgeHours" min="1"></label>
+          <label>Max applications per run<input type="number" id="f-maxBids" min="1"></label>
+          <label>Minimum Jobright match %<input type="number" id="f-minMatch" min="0" max="100"></label>
+          <label class="wide">Skip titles containing (comma-separated)<input id="f-titleExclude" placeholder="intern, manager, clearance"></label>
+          <label class="wide">Skip companies (comma-separated)<input id="f-companyExclude"></label>
+        </div>
+      </div>
+      <div class="card">
+        <h2>How to apply</h2>
+        <div class="grid">
+          <label>Resume template<select id="b-template"></select></label>
+          <label>Pause between bids (seconds)<input type="number" id="b-delaySec" min="0"></label>
+          <label>Max pages per application<input type="number" id="b-stepLimit" min="3"></label>
+          <label>Wait for you to solve a captcha (minutes)<input type="number" id="b-captchaWaitMin" min="0"></label>
+          <label class="check"><input type="checkbox" id="b-autoSubmit"> Submit automatically (off = stop at the final step for review)</label>
+          <label class="check"><input type="checkbox" id="b-uploadCover"> Attach the cover letter when the form allows it</label>
+          <label class="check"><input type="checkbox" id="b-closeTabs"> Close the job tabs after a successful bid</label>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Where bid files are saved</h2>
+        <p class="hint">Each bid gets a folder <code>&lt;date&gt;/&lt;id&gt;_&lt;Company&gt;/</code> with the resume PDF, cover letter PDF, resume.json, job.txt and cover_letter.txt, like the desktop app. The Resume Builder server writes them, so this works when the server runs on this PC (<code>npm run dev</code>). Leave it empty to keep files in Supabase Storage instead.</p>
+        <label>Folder on this PC<input id="filesDir" placeholder="G:/Document/Resume_bot"></label>
+      </div>
+      <div class="card">
+        <h2>History</h2>
+        <p class="hint">The bot remembers which Jobright jobs it already handled (and the server checks Supabase too), so it never applies twice.</p>
+        <div class="row"><button id="resetDone">Forget handled jobs</button><span id="doneCount" class="muted"></span></div>
+      </div>
+    </section>
+
+    <!-- AI -->
+    <section class="tab" id="tab-ai">
+      <div class="card">
+        <h2>AI provider</h2>
+        <p class="hint">Saved on the server (shared with the Resume Builder web app). The proxy set in the web app applies here too.</p>
+        <div class="seg" id="provider">
+          <button data-p="anthropic">Claude</button><button data-p="openai">OpenAI</button><button data-p="gemini">Gemini</button>
+        </div>
+        <div class="grid" style="margin-top:12px">
+          <label class="wide"><span id="keyLabel">API key</span><input id="aiKey" class="secret" autocomplete="off"></label>
+          <label>Model (resume &amp; cover letter)<select id="aiModel"></select></label>
+          <label>Model for reading application pages<select id="agentModel"></select></label>
+        </div>
+        <div class="row"><button id="loadModels">Load models</button><span id="aiStatus" class="muted"></span></div>
+      </div>
+      <div class="card">
+        <h2>Resume prompt</h2>
+        <textarea id="promptResume" class="tall"></textarea>
+        <div class="row"><button data-reset="resume">Reset to default</button></div>
+      </div>
+      <div class="card">
+        <h2>Cover letter prompt</h2>
+        <textarea id="promptCover" class="tall" style="min-height:220px"></textarea>
+        <div class="row"><button data-reset="cover">Reset to default</button></div>
+      </div>
+    </section>
+
+    <!-- resume -->
+    <section class="tab" id="tab-resume">
+      <div class="card">
+        <h2>Base resume (JSON Resume format)</h2>
+        <p class="hint">The factual skeleton every tailored resume is built from. Saved on the server, same as the web app's Base Profile.</p>
+        <textarea id="baseResume" class="tall" style="min-height:560px"></textarea>
+      </div>
+    </section>
+  </div>
+
+  <div class="bar">
+    <div class="wrap">
+      <span id="status" class="muted"></span>
+      <button class="primary" id="saveBtn">Save</button>
+    </div>
+  </div>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

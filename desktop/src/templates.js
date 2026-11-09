@@ -490,6 +490,116 @@ h2 { font-size: 11.5pt; color: #4c1d95; text-transform: uppercase; letter-spacin
 .sg-name { font-weight: 700; color: #4c1d95; }
 .degree { font-weight: 700; }
 `
+  },
+  {
+    id: 'ats',
+    name: 'ATS Plain',
+    description: 'Plain black Arial, standard headings, no color or columns. Parses cleanly in every applicant tracking system.',
+    opts: { entryStyle: 'role-first', skillsStyle: 'lines', order: ['profile', 'skills', 'work', 'education', 'languages'],
+      titles: { profile: 'Summary', work: 'Experience', skills: 'Skills' }, contactSep: '|' },
+    css: `
+@page { size: Letter; margin: 0.55in 0.65in; }
+body { font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #000; line-height: 1.32; }
+.hd { margin-bottom: 8px; }
+.name { font-size: 19pt; font-weight: 700; }
+.label { font-size: 11pt; font-weight: 700; margin: 1px 0 3px; }
+.contact { font-size: 9.5pt; }
+.sec { margin-top: 11px; }
+h2 { font-size: 10.5pt; font-weight: 700; text-transform: uppercase; border-bottom: 1px solid #000; padding-bottom: 1px; margin-bottom: 6px; }
+.job { margin-bottom: 8px; }
+.position { font-weight: 700; }
+.dates { font-weight: 700; }
+.r2 { justify-content: flex-start; gap: 0; }
+.desc { margin: 1px 0 2px; }
+.sline { margin-bottom: 2px; }
+.degree { font-weight: 700; }
+`
+  },
+  {
+    id: 'harvard',
+    name: 'Harvard',
+    description: 'University career-office style: centered Times header, employer-first entries with dates on the right.',
+    opts: { entryStyle: 'company-first', skillsStyle: 'lines', order: ['profile', 'work', 'skills', 'education', 'languages'],
+      titles: { profile: 'Summary', work: 'Experience', skills: 'Technical Skills' }, contactSep: '•', showContext: false },
+    css: `
+@page { size: Letter; margin: 0.6in 0.7in; }
+body { font-family: 'Times New Roman', Times, serif; font-size: 10.8pt; color: #000; line-height: 1.28; }
+.hd { text-align: center; margin-bottom: 8px; }
+.name { font-size: 20pt; font-weight: 700; }
+.label { font-size: 11pt; margin: 1px 0 3px; }
+.contact { font-size: 10pt; }
+.sec { margin-top: 11px; }
+h2 { font-size: 11pt; font-weight: 700; text-align: center; text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid #000; padding-bottom: 1px; margin-bottom: 6px; }
+.job { margin-bottom: 8px; }
+.company { font-weight: 700; }
+.position { font-style: italic; }
+.loc, .dates { font-style: normal; }
+.desc { margin: 1px 0 2px; }
+.sline { margin-bottom: 2px; }
+.degree { font-weight: 700; }
+`
+  },
+  {
+    id: 'slate',
+    name: 'Slate Sidebar',
+    description: 'Dark slate sidebar with contact, skills and education; white main column for summary and experience.',
+    layout: 'sidebar',
+    opts: { entryStyle: 'role-first', skillsStyle: 'tags', contactStacked: true, compactEducation: true, showHighlights: false,
+      sidebar: ['skills', 'education', 'languages'], main: ['profile', 'work'], titles: { profile: 'Summary', work: 'Experience' } },
+    css: `
+@page { size: Letter; margin: 0; }
+html, body { background: linear-gradient(to right, #1e293b 2.25in, #fff 2.25in); }
+body { font-family: 'Segoe UI', Calibri, Arial, sans-serif; font-size: 9.6pt; color: #1e293b; line-height: 1.4; }
+.grid { display: grid; grid-template-columns: 2.25in 1fr; }
+.hd { grid-column: 1 / -1; display: grid; grid-template-columns: 2.25in 1fr; align-items: stretch; }
+.hd .name { grid-column: 2; font-size: 25pt; font-weight: 700; color: #0f172a; padding: 0.45in 0.5in 0 22px; line-height: 1.05; }
+.hd .label { grid-column: 2; font-size: 12pt; color: #475569; font-weight: 600; padding: 2px 0.5in 10px 22px; }
+.hd .contact { grid-column: 1; grid-row: 1 / span 2; color: #e2e8f0; font-size: 8.8pt; padding: 0.45in 16px 10px 0.4in; }
+.hd .contact div { margin-bottom: 2px; }
+.hd .contact a[href^="http"] { color: #93c5fd; }
+aside { color: #e2e8f0; padding: 4px 16px 0.45in 0.4in; }
+aside .sec { margin-top: 12px; }
+aside h2 { font-size: 9.5pt; color: #93c5fd; text-transform: uppercase; letter-spacing: 1.4px; margin-bottom: 6px; }
+.sg { margin-bottom: 8px; }
+.sg-name { font-weight: 600; font-size: 8.8pt; margin-bottom: 3px; color: #f8fafc; }
+.tag { background: #334155; color: #e2e8f0; border-radius: 3px; padding: 1px 5px; font-size: 8.2pt; }
+.edu { margin-bottom: 6px; }
+.edu .degree { font-weight: 600; color: #f8fafc; }
+.edu .dates, .edu .inst { font-size: 8.8pt; color: #cbd5e1; }
+.langs { display: flex; flex-direction: column; } .langs .sep { display: none; }
+main { padding: 0 0.5in 0.45in 22px; }
+main .sec { margin-top: 12px; }
+main h2 { font-size: 11pt; color: #0f172a; text-transform: uppercase; letter-spacing: 1.2px; border-bottom: 2px solid #1e293b; padding-bottom: 2px; margin-bottom: 7px; }
+.job { margin-bottom: 10px; }
+.position { font-weight: 700; font-size: 10.5pt; }
+.dates { color: #475569; font-weight: 600; font-size: 9pt; }
+.r2 { justify-content: flex-start; gap: 0; color: #334155; font-weight: 600; }
+.desc { color: #475569; font-style: italic; margin: 2px 0; }
+`
+  },
+  {
+    id: 'corporate',
+    name: 'Corporate',
+    description: 'Section titles in a left column beside the content, steel-blue accents. Polished and easy to scan.',
+    opts: { entryStyle: 'role-first', skillsStyle: 'grid', order: ['profile', 'work', 'skills', 'education', 'languages'],
+      titles: { profile: 'Profile', work: 'Experience', skills: 'Skills' } },
+    css: `
+@page { size: Letter; margin: 0.5in 0.6in; }
+body { font-family: Calibri, Carlito, 'Segoe UI', sans-serif; font-size: 10.3pt; color: #1f2937; line-height: 1.36; }
+.hd { margin-bottom: 6px; padding-bottom: 8px; border-bottom: 3px solid #2f5d8a; }
+.name { font-size: 24pt; font-weight: 700; color: #1f3a5a; }
+.label { font-size: 12pt; color: #2f5d8a; font-weight: 700; margin: 1px 0 4px; }
+.contact { font-size: 9.5pt; color: #374151; }
+.sec { display: grid; grid-template-columns: 1.15in 1fr; gap: 14px; margin-top: 11px; }
+h2 { font-size: 10pt; color: #2f5d8a; text-transform: uppercase; letter-spacing: 1px; text-align: right; padding-top: 1px; border-right: 2px solid #c7d6e6; padding-right: 10px; }
+.job { margin-bottom: 9px; }
+.position { font-weight: 700; color: #1f3a5a; }
+.dates { font-weight: 700; color: #2f5d8a; font-size: 9.5pt; }
+.r2 { justify-content: flex-start; gap: 0; color: #4b5563; font-weight: 600; }
+.desc { color: #4b5563; font-style: italic; margin: 2px 0; }
+.sg-name { font-weight: 700; color: #1f3a5a; }
+.degree { font-weight: 700; }
+`
   }
 ];
 
@@ -533,6 +643,9 @@ function renderCoverLetterHtml(resume, letter, templateId, job = {}) {
 .letter { margin-top: 22px; font-size: 1.05em; line-height: 1.5; }
 .letter .meta { margin-bottom: 18px; }
 .letter p { margin: 0 0 11px; }
+${/@page {[^}]*margin: 0;/.test(tpl.css) ? `@page { margin: 0.6in 0.7in; }
+html, body { background: #fff !important; }
+.cl-hd .name, .cl-hd .label, .cl-hd .contact { padding: 0 !important; color: inherit !important; }` : ''}
 </style></head><body class="tpl-${tpl.id}">${header}
 <div class="letter"><div class="meta">${today}${recipient ? `<br><br>${recipient}` : ''}</div>${
     String(letter || '').split(/\n\s*\n/).map((p) => `<p>${esc(p.trim()).replace(/\n/g, '<br>')}</p>`).join('')

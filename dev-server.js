@@ -7,6 +7,7 @@ const { loadEnv } = require('./lib/env');
 
 loadEnv();
 const rpc = require('./api/rpc');
+const fileApi = require('./api/file');
 
 const PUBLIC = path.join(__dirname, 'public');
 const PORT = Number(process.env.PORT) || 3000;
@@ -16,6 +17,7 @@ http
   .createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname === '/api/rpc') return rpc(req, res);
+    if (url.pathname === '/api/file') return fileApi(req, res);
     const rel = url.pathname === '/' ? '/login.html' : decodeURIComponent(url.pathname);
     const file = path.join(PUBLIC, path.normalize(rel));
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {

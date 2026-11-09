@@ -162,8 +162,8 @@ function renderResultBar() {
 
 function providerName() {
   const s = state.settings || {};
-  const model = s.ai_provider === 'openai' ? s.openai_model : s.claude_model;
-  return model || (s.ai_provider === 'openai' ? 'OpenAI' : 'Claude');
+  const model = { openai: s.openai_model, gemini: s.gemini_model }[s.ai_provider] ?? s.claude_model;
+  return model || ({ openai: 'OpenAI', gemini: 'Gemini' }[s.ai_provider] || 'Claude');
 }
 
 // ---------------- preview ----------------
@@ -786,13 +786,13 @@ $('#baseResetBtn').addEventListener('click', async () => {
 // Keys and models are kept per provider so switching the provider tab loses nothing.
 const sf = {
   provider: 'anthropic',
-  keys: { anthropic: '', openai: '' },
-  models: { anthropic: '', openai: '' },
-  modelLists: { anthropic: null, openai: null },
+  keys: { anthropic: '', openai: '', gemini: '' },
+  models: { anthropic: '', openai: '', gemini: '' },
+  modelLists: { anthropic: null, openai: null, gemini: null },
   saved: null
 };
-const PROVIDER_LABELS = { anthropic: 'Claude API key', openai: 'OpenAI API key' };
-const KEY_PLACEHOLDERS = { anthropic: 'sk-ant-…', openai: 'sk-…' };
+const PROVIDER_LABELS = { anthropic: 'Claude API key', openai: 'OpenAI API key', gemini: 'Gemini API key' };
+const KEY_PLACEHOLDERS = { anthropic: 'sk-ant-…', openai: 'sk-…', gemini: 'AIza…' };
 
 function settingsStatus(text, kind = '') {
   $('#s-testStatus').textContent = text;
@@ -866,6 +866,8 @@ function collectSettings() {
     claude_model: sf.models.anthropic,
     openai_api_key: sf.keys.openai,
     openai_model: sf.models.openai,
+    gemini_api_key: sf.keys.gemini,
+    gemini_model: sf.models.gemini,
     claude_proxy: proxyFromFields(),
     proxy_enabled: $('#s-proxyOn').checked ? '1' : '0',
     prompt_resume: $('#s-promptResume').value.trim(),
@@ -906,8 +908,8 @@ async function loadSettings() {
   const s = await api.getSettings();
   state.settings = s;
   sf.provider = s.ai_provider;
-  sf.keys = { anthropic: s.claude_api_key, openai: s.openai_api_key };
-  sf.models = { anthropic: s.claude_model, openai: s.openai_model };
+  sf.keys = { anthropic: s.claude_api_key, openai: s.openai_api_key, gemini: s.gemini_api_key || '' };
+  sf.models = { anthropic: s.claude_model, openai: s.openai_model, gemini: s.gemini_model || '' };
   const px = splitProxy(s.claude_proxy);
   $('#s-proxyHost').value = px.host;
   $('#s-proxyPort').value = px.port;
@@ -1034,6 +1036,6 @@ $$('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.
   renderTemplateList();
   updateHeader();
   renderPreview();
-  const activeKey = state.settings.ai_provider === 'openai' ? state.settings.openai_api_key : state.settings.claude_api_key;
+  const activeKey = { openai: state.settings.openai_api_key, gemini: state.settings.gemini_api_key }[state.settings.ai_provider] ?? state.settings.claude_api_key;
   if (!activeKey) toast('Add your API key in <b>Settings</b> to enable AI generation.', 'info', 6000);
 })();
