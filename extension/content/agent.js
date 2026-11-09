@@ -124,6 +124,11 @@
 
   const SKIP_INPUT = new Set(['hidden', 'submit', 'button', 'image', 'reset', 'search']);
 
+  function isCombobox(el) {
+    return el.getAttribute('role') === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox' || !!el.getAttribute('aria-autocomplete')
+      || !!el.closest('[data-automation-id*="multiselect" i], [data-uxi-widget-type="selectinput"], [data-automation-id="searchBox"]');
+  }
+
   function snapshot() {
     const fields = [];
     const groups = new Map();
@@ -166,9 +171,11 @@
       } else if (el.isContentEditable) {
         f.kind = 'richtext';
         f.value = textOf(el).slice(0, 200);
-      } else if (el.getAttribute('role') === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox' || el.getAttribute('aria-autocomplete')
-        || el.closest('[data-automation-id*="multiselect" i], [data-uxi-widget-type="selectinput"], [data-automation-id="searchBox"]')) {
+      } else if (isCombobox(el)) {
         f.kind = 'combobox';
+        // the dropdown's real choices, read by probeOptions()
+        const known = el.dataset.abopts ? JSON.parse(el.dataset.abopts) : [];
+        if (known.length) f.options = known;
         const shown = el.tagName === 'INPUT' ? el.value : textOf(el);
         const container = el.closest('[class*="select" i], [class*="dropdown" i]');
         const single = container?.querySelector('[class*="singleValue" i], [class*="single-value" i], [class*="selected" i]');
@@ -448,8 +455,64 @@
     return el.checked === want;
   }
 
-  // Custom dropdowns and typeaheads: open, type, then click the closest suggestion.
+  const OPTION_SEL = '[role="option"], [data-automation-id="promptOption"], [data-automation-id="promptLeafNode"], [class*="option" i]:not(select):not(option), [role="listbox"] li';
+  const NOT_AN_OPTION = /^(no (options|results|items|matches)|loading|searching|type to search|start typing|please enter|enter \d+ or more)/i;
+  const isOtherOption = (t) => /^(other|others|other \(please specify\)|other:|select|select one|choose one|please select|-{2,}.*)$/i.test(clean(t));
+
+  function visibleOptions(el, input) {
+    const listId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || input?.getAttribute?.('aria-controls');
+    const scope = listId ? document.getElementById(listId) : null;
+    return (scope ? [...scope.querySelectorAll('[role="option"], li')] : deepAll(OPTION_SEL))
+      .filter((o) => visible(o) && textOf(o) && textOf(o).length < 200 && !NOT_AN_OPTION.test(textOf(o)));
+  }
+
+  function closeDropdown(el, input) {
+    for (const t of [input, el, document.activeElement, document.body]) {
+      t?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape', code: 'Escape', keyCode: 27 }));
+    }
+  }
+
+  // Opens every custom dropdown on the page once, reads its choices, closes it again and
+  // remembers them (data-abopts), so the snapshot shows the AI what the form offers.
+  async function probeOptions() {
+    let found = 0;
+    for (const el of deepAll('input, [role="combobox"]:not(input), button[aria-haspopup="listbox"]')) {
+      if (el.dataset.abopts || el.disabled || !visible(el) || !isCombobox(el)) continue;
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (el.tagName === 'INPUT' && (SKIP_INPUT.has(type) || type === 'radio' || type === 'checkbox')) continue;
+      const input = el.tagName === 'INPUT' ? el : el.querySelector('input');
+      const before = new Set(deepAll(OPTION_SEL).filter((o) => visible(o)));
+      realClick(el);
+      let opts = [];
+      for (let i = 0; i < 6 && !opts.length; i++) {
+        await sleep(150 + i * 60);
+        opts = visibleOptions(el, input).filter((o) => !before.has(o));
+      }
+      const texts = [...new Set(opts.map((o) => clean(textOf(o))))].slice(0, 80);
+      el.dataset.abopts = JSON.stringify(texts); // [] = typeahead: suggestions only appear after typing
+      if (texts.length) found++;
+      closeDropdown(el, input);
+      await sleep(120);
+      if (visibleOptions(el, input).some((o) => !before.has(o))) realClick(el); // toggle-style dropdowns close on a second click
+      input?.blur?.();
+      await sleep(80);
+    }
+    return found;
+  }
+
+  let chooseNote = '';
+
+  // Custom dropdowns and typeaheads: open, type, then click the matching option.
+  // When the dropdown's options are known, only a real match is picked (never a guess or "Other").
   async function choose(el, value) {
+    chooseNote = '';
+    const known = el.dataset.abopts ? JSON.parse(el.dataset.abopts) : [];
+    const picked = await chooseOption(el, value, known.length > 0);
+    if (!picked && known.length) chooseNote = `no option matches "${value}"; the options are: ${known.slice(0, 40).join(' | ')}`;
+    return picked;
+  }
+
+  async function chooseOption(el, value, strict) {
     const input = el.tagName === 'INPUT' ? el : el.querySelector('input') || el;
     realClick(el);
     await sleep(250);
@@ -459,14 +522,10 @@
       input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: value, inputType: 'insertText' }));
       fire(input, 'change');
     }
-    const OPTION_SEL = '[role="option"], [data-automation-id="promptOption"], [data-automation-id="promptLeafNode"], [class*="option" i]:not(select):not(option), [role="listbox"] li';
     let entered = false;
     for (let i = 0; i < 14; i++) {
       await sleep(250 + i * 50);
-      const listId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || input.getAttribute?.('aria-controls');
-      const scope = listId ? document.getElementById(listId) : null;
-      const opts = (scope ? [...scope.querySelectorAll('[role="option"], li')] : deepAll(OPTION_SEL))
-        .filter((o) => visible(o) && textOf(o) && textOf(o).length < 200 && !/no (options|results|items)|loading|searching/i.test(textOf(o)));
+      const opts = visibleOptions(el, input);
       if (!opts.length) {
         // search boxes (Workday prompts) only list matches after Enter
         if (!entered && i >= 3 && input.tagName === 'INPUT') {
@@ -475,12 +534,17 @@
         }
         continue;
       }
-      const hit = bestMatch(opts, value, textOf) || (opts.length && i > 6 ? opts[0] : null);
+      // typeaheads with unknown options: after a while take the first real suggestion (never "Other")
+      const hit = bestMatch(opts, value, textOf) || (!strict && i > 6 ? opts.find((o) => !isOtherOption(textOf(o))) : null);
       if (hit) {
         realClick(hit);
         await sleep(200);
         return textOf(hit);
       }
+    }
+    if (strict) {
+      closeDropdown(el, input);
+      return '';
     }
     // last resort: keyboard pick of the first suggestion
     input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 }));
@@ -549,7 +613,11 @@
               note = await choose(el, value); // custom dropdown
               ok = !!note;
             }
-            if (!ok) note = `no option matches "${a.value}"`;
+            if (!ok) {
+              note = el.tagName === 'SELECT'
+                ? `no option matches "${a.value}"; the options are: ${[...el.options].map((o) => clean(o.text)).filter(Boolean).slice(0, 40).join(' | ')}`
+                : chooseNote || `no option matches "${a.value}"`;
+            }
             break;
           case 'check':
           case 'uncheck':
@@ -558,7 +626,7 @@
           case 'choose':
             note = await choose(el, value);
             ok = !!note;
-            if (!ok) note = 'no matching suggestion';
+            if (!ok) note = chooseNote || 'no matching suggestion';
             break;
           case 'click':
             realClick(el);
@@ -615,5 +683,5 @@
     return { url: location.href, title: document.title, h1: textOf(document.querySelector('h1')), text: textOf(main).slice(0, 20000) };
   }
 
-  window.__abAgent = { snapshot, act, click, acceptCookies, waitStable, captchaSolved, showCaptcha, pageText };
+  window.__abAgent = { snapshot, probeOptions, act, click, acceptCookies, waitStable, captchaSolved, showCaptcha, pageText };
 })();

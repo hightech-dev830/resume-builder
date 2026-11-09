@@ -647,7 +647,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     await g(settle(tabId));
     if (await g(acceptCookies(tabId))) await g(settle(tabId));
 
-    const snap = await g(readyPage(tabId));
+    let snap = await g(readyPage(tabId));
     // a password box means the site wants an account: skip before spending an AI call
     if (s.behavior.skipAccounts && snap.fields.some((f) => f.kind === 'password')) {
       return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
@@ -660,6 +660,12 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     if (snap.captcha && /checkbox|challenge|Turnstile|hCaptcha|verification/i.test(snap.captcha)) {
       if (captchaWaits++ < 2 && (await g(waitForCaptcha(tabId, s, snap.captcha, ctx)))) continue;
       return { status: 'attention', reason: `${snap.captcha} not solved`, answers };
+    }
+
+    // read the real choices of custom dropdowns so the AI only picks values the form offers
+    if (snap.fields.some((f) => f.kind === 'combobox' && !f.options)) {
+      const probed = await g(call(tabId, '__abAgent', 'probeOptions', [], { allFrames: true }).catch(() => []));
+      if (probed.some((r) => r.result)) snap = await g(snapshotTab(tabId));
     }
 
     setPhase('thinking');

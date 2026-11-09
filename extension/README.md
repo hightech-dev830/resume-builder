@@ -47,6 +47,7 @@ The AI planner prompt lives on the server in `lib/agent.js`, and the server meth
 - **LinkedIn:** jobs that send you to LinkedIn, or only allow Easy Apply / signing in with LinkedIn, are skipped.
 - **Job list:** reloaded every 5 minutes (setting). When no new jobs are left, the bot waits for the next reload instead of stopping.
 - **AI cost:** the popup shows today's and the last 30 days' cost; Settings → AI & prompts shows totals per model and lets you set prices (US$ per 1M tokens) for models without a built-in price.
+- **Dropdowns:** the bot opens each custom dropdown once to read its real options, and the AI must pick one of them (your answer is mapped to the closest offered option, e.g. "Male (Man)" → "Male"). A value the form does not offer is never forced; the AI is told the options and picks again. "Other" is avoided; for "How did you hear about us" it picks Jobright, else Indeed, else another job board.
 - **Answers:** edit `profile.local.json` and raise its `_version` to push changes into the extension; changes made on the settings page stay until the version goes up again.
 
 ## Limits
