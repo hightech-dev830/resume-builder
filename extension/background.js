@@ -604,6 +604,10 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     if (await acceptCookies(tabId)) await settle(tabId);
 
     const snap = await readyPage(tabId);
+    // a password box means the site wants an account: skip before spending an AI call
+    if (s.behavior.skipAccounts && snap.fields.some((f) => f.kind === 'password')) {
+      return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
+    }
     if (snap.success && !snap.fields.some((f) => f.required && !f.value)) {
       log(`Confirmation page: "${(snap.text.match(/[^.]*(thank|submitted|received|congratulations)[^.]*/i) || [''])[0].slice(0, 120)}"`);
       return { status: 'applied', answers };
@@ -623,6 +627,9 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     log(`Step ${step} [${plan.page_type}]: ${plan.summary}`);
 
     if (plan.page_type === 'requires_linkedin') return { status: 'skipped', reason: 'it can only be applied to through LinkedIn', answers };
+    if (s.behavior.skipAccounts && (plan.page_type === 'register' || plan.page_type === 'login')) {
+      return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
+    }
     // never follow a LinkedIn button
     const nextBtn = snap.buttons.find((b) => b.id === plan.next_click);
     if (nextBtn && /linkedin/i.test(`${nextBtn.text} ${nextBtn.href}`)) return { status: 'skipped', reason: 'it wants a LinkedIn sign-in', answers };

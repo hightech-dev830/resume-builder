@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS = {
   },
   behavior: {
     autoSubmit: true,      // false = stop on the final review/submit step for you to check
+    skipAccounts: true,    // skip jobs whose site wants you to sign up or sign in
     template: '',          // '' = the web app's default template
     uploadCover: true,
     delaySec: 8,           // pause between bids
