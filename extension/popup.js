@@ -18,6 +18,7 @@ function render(bot) {
   for (const k of ['applied', 'attention', 'failed', 'skipped']) $('#c' + k[0].toUpperCase() + k.slice(1)).textContent = b.counts?.[k] || 0;
   const c = b.current;
   $('#current').classList.toggle('hidden', !c);
+  $('#skipBtn').classList.toggle('hidden', !b.running || !c);
   if (c) {
     $('#curTitle').textContent = `${c.title || 'Job'}${c.company ? ` @ ${c.company}` : ''}`;
     $('#curMeta').textContent = [c.bidId && `Bid #${c.bidId}`, c.step && `step ${c.step}`].filter(Boolean).join(' · ');
@@ -40,6 +41,7 @@ async function send(type, extra = {}) {
 
 $('#startBtn').addEventListener('click', () => send('start'));
 $('#stopBtn').addEventListener('click', () => send('stop'));
+$('#skipBtn').addEventListener('click', () => send('skip'));
 $('#singleBtn').addEventListener('click', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   send('runSingle', { tabId: tab.id });
