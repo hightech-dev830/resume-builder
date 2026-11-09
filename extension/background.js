@@ -798,6 +798,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   return true;
 });
 
+// The toolbar icon opens the side panel, which stays open while you browse (a popup closes on every click).
+chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+
 chrome.runtime.onInstalled.addListener(async () => {
   if (await seedProfile()) console.log('[auto-bid] profile loaded from profile.local.json');
 });

@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Auto Bid for Jobright",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Applies to remote jobs from Jobright.ai with an AI-tailored resume and cover letter, and saves every bid to Resume Builder.",
   "permissions": [
     "storage",
     "tabs",
     "scripting",
     "notifications",
-    "alarms"
+    "alarms",
+    "sidePanel"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -19,13 +20,15 @@
   },
   "action": {
     "default_title": "Auto Bid",
-    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
+  },
+  "side_panel": {
+    "default_path": "popup.html"
   },
   "options_page": "options.html",
   "icons": {

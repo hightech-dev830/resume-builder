@@ -25,7 +25,7 @@ function render(bot) {
   }
   const log = $('#log');
   const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
-  log.innerHTML = (b.log || []).slice(-80).map((l) =>
+  log.innerHTML = (b.log || []).slice(-200).map((l) =>
     `<div class="${l.level === 'error' ? 'err' : l.level === 'warn' ? 'warn' : l.level === 'ok' ? 'ok' : ''}"><time>${new Date(l.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>${esc(l.msg)}</div>`).join('');
   if (atBottom) log.scrollTop = log.scrollHeight;
 }
@@ -71,6 +71,14 @@ async function showUsage() {
     $('#usage').textContent = '';
   }
 }
-chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-  $('#singleBtn').classList.toggle('hidden', !/jobright\.ai\/jobs\/info\//.test(tab?.url || ''));
-});
+// the side panel stays open across tabs: show "Apply to this job" only on a Jobright job page
+function checkTab() {
+  chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+    $('#singleBtn').classList.toggle('hidden', !/jobright\.ai\/jobs\/info\//.test(tab?.url || ''));
+  });
+}
+checkTab();
+chrome.tabs.onActivated.addListener(checkTab);
+chrome.tabs.onUpdated.addListener((_id, info) => info.url && checkTab());
+// refresh the AI cost line every minute
+setInterval(() => getSettings().then((s) => s.token && showUsage()), 60000);

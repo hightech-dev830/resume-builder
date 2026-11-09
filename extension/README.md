@@ -41,7 +41,8 @@ The AI planner prompt lives on the server in `lib/agent.js`, and the server meth
 ## Notes
 
 - **Order:** the bot opens the application first and creates the bid and the tailored resume + cover letter only when a real form needs them. Jobs it skips cost no AI calls.
-- **Skip job:** while the bot works on a job, the popup shows **⏭ Skip job** under its title. It drops that job at once (even mid-AI call or while waiting on a captcha), marks its bid "skipped", closes its tabs (if "close tabs" is on) and moves to the next job. Skipped jobs are not retried.
+- **Side panel:** the toolbar icon opens the Auto Bid panel on the right side of Chrome. It stays open while you browse and while the bot switches tabs, so you can watch progress all the time. Close it with its ✕; the bot keeps running either way.
+- **Skip job:** while the bot works on a job, the panel shows **⏭ Skip job** under its title. It drops that job at once (even mid-AI call or while waiting on a captcha), marks its bid "skipped", closes its tabs (if "close tabs" is on) and moves to the next job. Skipped jobs are not retried.
 - **Accounts:** jobs whose site asks you to sign up or sign in (Workday, iCIMS, Taleo…) are skipped, with no bid and no AI cost. Turn off "Skip jobs that need an account" in Settings → Jobs & behavior to let the bot create accounts with your email and password instead.
 - **LinkedIn:** jobs that send you to LinkedIn, or only allow Easy Apply / signing in with LinkedIn, are skipped.
 - **Job list:** reloaded every 5 minutes (setting). When no new jobs are left, the bot waits for the next reload instead of stopping.

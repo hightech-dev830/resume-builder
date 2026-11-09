@@ -5,7 +5,7 @@
   <title>Auto Bid</title>
   <link rel="stylesheet" href="ui.css">
   <style>
-    body { width: 380px; }
+    body { min-width: 320px; }
     header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
     header h1 { font-size: 15px; margin: 0; flex: 1; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca3af; }
@@ -21,7 +21,7 @@
     .counts span { font-size: 11px; color: var(--muted); }
     .actions { display: flex; gap: 8px; }
     .actions button { flex: 1; }
-    #log { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; height: 210px; overflow: auto; padding: 6px 8px; font-size: 11.5px; line-height: 1.45; }
+    #log { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; height: max(210px, calc(100vh - 340px)); overflow: auto; padding: 6px 8px; font-size: 11.5px; line-height: 1.45; }
     #log div { border-bottom: 1px dashed var(--line); padding: 2px 0; }
     #log time { color: var(--muted); margin-right: 5px; }
     footer { display: flex; justify-content: space-between; padding: 0 14px 12px; }
