@@ -5,6 +5,7 @@
 import { getSettings, getProfile, seedProfile, profileForAI, secretsFor, rpc } from './lib/config.js';
 
 const JOBRIGHT = /^https:\/\/([a-z]+\.)?jobright\.ai\//;
+const LINKEDIN = /^https:\/\/([a-z]+\.)?linkedin\.com\//i;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------- state (mirrored to storage for the popup) ----------------
@@ -256,10 +257,22 @@ async function runLoop() {
   const listId = await listTab(s);
   const tried = new Set();
   let emptyRounds = 0;
+  const refreshMs = Math.max(1, Number(s.filters.refreshMin) || 5) * 60000;
+  let lastRefresh = Date.now();
+
+  const refreshList = async () => {
+    log('Refreshing the Jobright job list');
+    await chrome.tabs.reload(listId);
+    await waitComplete(listId);
+    await sleep(3000);
+    lastRefresh = Date.now();
+    emptyRounds = 0;
+  };
 
   while (!stopRequested && state.counts.applied < s.filters.maxBids) {
     setPhase('scanning', null);
     if (!(await tabExists(listId))) throw new Error('The Jobright list tab was closed.');
+    if (Date.now() - lastRefresh >= refreshMs) await refreshList();
     let cards = (await jobright(listId, 'scrapeList')) || [];
     if (!cards.length) {
       await sleep(3000);
@@ -289,8 +302,13 @@ async function runLoop() {
       const after = await jobright(listId, 'loadMore');
       emptyRounds = after > before ? 0 : emptyRounds + 1;
       if (emptyRounds >= 3) {
-        log('No more matching jobs in the list.');
-        break;
+        // wait for the next refresh instead of stopping; new jobs keep arriving
+        const at = new Date(lastRefresh + refreshMs);
+        log(`No new matching jobs right now; checking again at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+        setPhase('waiting_jobs', null);
+        while (!stopRequested && Date.now() < at.getTime()) await sleep(3000);
+        if (stopRequested) break;
+        await refreshList();
       }
       continue;
     }
@@ -338,17 +356,7 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
     }
     state.current = { ...state.current, title: detail.title, company: detail.company, url: detail.url };
 
-    // 2. bid row in Supabase
-    bid = await rpc('resumes:create', {
-      company: detail.company, role: detail.title, job_link: detail.url, location: detail.location || (detail.remote ? 'Remote (US)' : ''),
-      salary: detail.salary || '', jd: detail.jd || '', status: 'draft', template: s.behavior.template,
-      notes: `Auto-bid from Jobright${detail.match ? ` (match ${detail.match}%)` : ''}. Posted ${detail.posted || '?'}.`,
-      source: 'jobright', source_url: detail.url, bot_status: 'preparing'
-    });
-    state.current.bidId = bid.id;
-    log(`Bid #${bid.id} created for ${label}`);
-
-    // 3. company application page
+    // 2. company application page
     setPhase('opening_apply');
     let applyId = null;
     const t0 = Date.now();
@@ -369,9 +377,16 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
     await focusTab(applyId);
     await settle(applyId);
     const applyTab = await tabExists(applyId);
+    // LinkedIn applications (Easy Apply / sign in with LinkedIn) are skipped
+    if (LINKEDIN.test(applyTab.url)) {
+      log(`Skipped ${label}: the application is on LinkedIn`);
+      state.counts.skipped++;
+      outcome = 'skipped';
+      return;
+    }
     log(`Application page: ${new URL(applyTab.url).host}`);
 
-    // 4. exact job description from the company page
+    // 3. exact job description from the company page
     const page = await call(applyId, '__abAgent', 'pageText').catch(() => null);
     const job = {
       company: detail.company, role: detail.title, location: detail.location || 'Remote (US)', salary: detail.salary || '',
@@ -379,28 +394,58 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
       jd: [detail.jd, page && page.text.length > 300 ? `\n\n--- From the company posting (${new URL(page.url).host}) ---\n${page.text}` : ''].join('').slice(0, 30000)
     };
 
-    // 5. tailored resume + cover letter, saved to Supabase Storage (and Downloads)
-    setPhase('generating');
-    log('Tailoring the resume…');
-    const tailored = await rpc('ai:tailor', job);
-    log('Writing the cover letter…');
-    const letter = await rpc('ai:coverLetter', { resume: tailored.resume, job });
-    bid = await rpc('resumes:update', bid.id, {
-      resume_json: tailored.resume, cover_letter: letter, jd: job.jd, job_link: job.job_link, apply_url: job.job_link, ...tailored.meta
-    });
-    bid = await rpc('resumes:exportPdf', bid.id);
-    bid = await rpc('resumes:exportCover', bid.id);
-    const [resumePdf, coverPdf] = await Promise.all([rpc('files:get', bid.pdf_path), rpc('files:get', bid.cover_letter_path)]);
-    const files = {
-      resume: { b64: resumePdf.__b64, name: bid.pdf_path.split('/').pop() },
-      cover: s.behavior.uploadCover ? { b64: coverPdf.__b64, name: bid.cover_letter_path.split('/').pop() } : null
+    // 4. bid row in Supabase; resume + cover letter only once a form needs them
+    const docs = { bid: null, files: null, resume: null, coverLetter: '' };
+    const ensureBid = async () => {
+      if (docs.bid) return docs.bid;
+      docs.bid = await rpc('resumes:create', {
+        company: detail.company, role: detail.title, job_link: job.job_link, apply_url: job.job_link,
+        location: detail.location || (detail.remote ? 'Remote (US)' : ''), salary: detail.salary || '', jd: job.jd,
+        status: 'draft', template: s.behavior.template,
+        notes: `Auto-bid from Jobright${detail.match ? ` (match ${detail.match}%)` : ''}. Posted ${detail.posted || '?'}.`,
+        source: 'jobright', source_url: detail.url, bot_status: 'applying'
+      });
+      bid = docs.bid;
+      state.current.bidId = bid.id;
+      log(`Bid #${bid.id} created for ${label}`);
+      return bid;
     };
-    log(`Resume and cover letter ready (${tailored.keywords?.length || 0} JD keywords matched)${s.filesDir ? `, saved in ${s.filesDir}/${bid.resume_dir}` : ''}`);
-    await rpc('bot:log', bid.id, '', { bot_status: 'applying' });
+    const ensureDocs = async () => {
+      if (docs.files) return false;
+      await ensureBid();
+      setPhase('generating');
+      const jobForAi = { ...job, bid_id: bid.id };
+      log('Tailoring the resume…');
+      const tailored = await rpc('ai:tailor', jobForAi);
+      log('Writing the cover letter…');
+      const letter = await rpc('ai:coverLetter', { resume: tailored.resume, job: jobForAi });
+      bid = await rpc('resumes:update', bid.id, { resume_json: tailored.resume, cover_letter: letter, ...tailored.meta });
+      bid = await rpc('resumes:exportPdf', bid.id);
+      bid = await rpc('resumes:exportCover', bid.id);
+      docs.bid = bid;
+      const [resumePdf, coverPdf] = await Promise.all([rpc('files:get', bid.pdf_path), rpc('files:get', bid.cover_letter_path)]);
+      docs.files = {
+        resume: { b64: resumePdf.__b64, name: bid.pdf_path.split('/').pop() },
+        cover: s.behavior.uploadCover ? { b64: coverPdf.__b64, name: bid.cover_letter_path.split('/').pop() } : null
+      };
+      docs.resume = tailored.resume;
+      docs.coverLetter = letter;
+      log(`Resume and cover letter ready (${tailored.keywords?.length || 0} JD keywords matched)${s.filesDir ? `, saved in ${s.filesDir}/${bid.resume_dir}` : ''}`);
+      setPhase('applying');
+      return true;
+    };
 
-    // 6. fill and submit the application
+    // 5. fill and submit the application
     setPhase('applying');
-    const result = await runApplication(applyId, { job, bid, files, settings: s, tabs });
+    const result = await runApplication(applyId, { job, docs, ensureDocs, settings: s, tabs });
+    if (result.status === 'skipped') {
+      log(`Skipped ${label}: ${result.reason}`);
+      state.counts.skipped++;
+      outcome = 'skipped';
+      if (bid) await rpc('bot:log', bid.id, `Skipped: ${result.reason}`, { bot_status: 'skipped' }).catch(() => {});
+      return;
+    }
+    await ensureBid();
     await rpc('resumes:update', bid.id, { answers: result.answers }).catch(() => {});
 
     if (result.status === 'applied') {
@@ -436,6 +481,10 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
     log(`✗ ${label}: ${err.message}`, 'error');
     if (bid) await rpc('bot:log', bid.id, `Failed: ${err.message}`, { bot_status: 'failed' }).catch(() => {});
   } finally {
+    if (bid) {
+      const cost = await rpc('usage:forBid', bid.id).catch(() => null);
+      if (cost?.calls) log(`  AI for this bid: ${cost.calls} calls, ${cost.tokens.toLocaleString()} tokens, ${cost.unpriced ? 'cost unknown for some models' : `$${cost.cost.toFixed(4)}`}`);
+    }
     if (card.id) await markProcessed(card.id, outcome);
     state.current = null;
     save();
@@ -526,8 +575,12 @@ async function readyPage(tabId) {
   return snap;
 }
 
-async function runApplication(startTabId, { job, bid, files, settings: s, tabs }) {
+// Pages where the resume (and cover letter) are needed: generated then, not before.
+const NEEDS_DOCS = new Set(['application_form', 'review']);
+
+async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, tabs }) {
   const profile = await getProfile();
+  const baseResume = await rpc('base:get').catch(() => null);
   const aiProfile = profileForAI(profile);
   const secrets = secretsFor(profile);
   const history = [];
@@ -543,7 +596,9 @@ async function runApplication(startTabId, { job, bid, files, settings: s, tabs }
     if (stopRequested) return { status: 'stopped', answers };
     state.current = { ...state.current, step };
     save();
-    if (!(await tabExists(tabId))) return { status: 'attention', reason: 'the application tab was closed', answers };
+    const tab = await tabExists(tabId);
+    if (!tab) return { status: 'attention', reason: 'the application tab was closed', answers };
+    if (LINKEDIN.test(tab.url)) return { status: 'skipped', reason: 'it sends the application to LinkedIn', answers };
 
     await settle(tabId);
     if (await acceptCookies(tabId)) await settle(tabId);
@@ -561,11 +616,24 @@ async function runApplication(startTabId, { job, bid, files, settings: s, tabs }
 
     setPhase('thinking');
     const plan = await rpc('bot:plan', {
-      snapshot: snap, job, profile: aiProfile, resume: bid.resume_json, coverLetter: bid.cover_letter,
-      history: history.slice(-8), files: { resume: true, cover: !!files.cover }
+      snapshot: snap, job, profile: aiProfile, resume: docs.resume || baseResume, coverLetter: docs.coverLetter,
+      history: history.slice(-8), files: { resume: true, cover: !docs.files || !!docs.files.cover }, bidId: docs.bid?.id
     });
     setPhase('applying');
     log(`Step ${step} [${plan.page_type}]: ${plan.summary}`);
+
+    if (plan.page_type === 'requires_linkedin') return { status: 'skipped', reason: 'it can only be applied to through LinkedIn', answers };
+    // never follow a LinkedIn button
+    const nextBtn = snap.buttons.find((b) => b.id === plan.next_click);
+    if (nextBtn && /linkedin/i.test(`${nextBtn.text} ${nextBtn.href}`)) return { status: 'skipped', reason: 'it wants a LinkedIn sign-in', answers };
+
+    // first real form: write the tailored resume + cover letter now, then plan this page again with them
+    if (!docs.files && (NEEDS_DOCS.has(plan.page_type) || plan.actions.some((a) => a.op.startsWith('upload')))) {
+      log('  Application form found; preparing the resume and cover letter');
+      await ensureDocs();
+      step--;
+      continue;
+    }
 
     if (plan.done || plan.page_type === 'success' || plan.page_type === 'already_applied') return { status: 'applied', answers };
     if (plan.page_type === 'job_closed') return { status: 'attention', reason: 'the posting is closed', answers };
@@ -604,7 +672,7 @@ async function runApplication(startTabId, { job, bid, files, settings: s, tabs }
     const results = [];
     for (const a of plan.actions) {
       const { frameId, local } = splitId(a.id);
-      const r = await call(tabId, '__abAgent', 'act', [[{ ...a, id: local }], files, secrets], { frameId }).catch((err) => [{ ok: false, note: err.message }]);
+      const r = await call(tabId, '__abAgent', 'act', [[{ ...a, id: local }], docs.files, secrets], { frameId }).catch((err) => [{ ok: false, note: err.message }]);
       results.push({ ...a, ...(r?.[0] || {}) });
       if (a.question && a.value) answers.push({ question: a.question, answer: a.value });
     }
@@ -632,6 +700,8 @@ async function runApplication(startTabId, { job, bid, files, settings: s, tabs }
       if (newTab) {
         tabs.push(newTab);
         tabId = newTab;
+        const nt = await tabExists(newTab);
+        if (nt && LINKEDIN.test(nt.pendingUrl || nt.url || '')) return { status: 'skipped', reason: 'it opened LinkedIn', answers };
         await focusTab(tabId);
         log('  Continued in a new tab');
       }

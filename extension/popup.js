@@ -1,9 +1,9 @@
-import { getSettings } from './lib/config.js';
+import { getSettings, rpc } from './lib/config.js';
 
 const $ = (s) => document.querySelector(s);
 const PHASES = {
   idle: 'Idle', starting: 'Starting…', scanning: 'Scanning jobs', opening: 'Opening job', opening_apply: 'Opening application',
-  generating: 'Writing resume', applying: 'Filling form', thinking: 'Reading page (AI)', waiting_human: 'Waiting for you', stopping: 'Stopping…'
+  generating: 'Writing resume', waiting_jobs: 'Waiting for new jobs', applying: 'Filling form', thinking: 'Reading page (AI)', waiting_human: 'Waiting for you', stopping: 'Stopping…'
 };
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -51,7 +51,24 @@ $('#openJobright').addEventListener('click', async () => chrome.tabs.create({ ur
 
 chrome.storage.onChanged.addListener((ch) => ch.bot && render(ch.bot.newValue));
 chrome.storage.local.get('bot').then(({ bot }) => render(bot));
-getSettings().then((s) => $('#signin').classList.toggle('hidden', !!s.token));
+getSettings().then((s) => {
+  $('#signin').classList.toggle('hidden', !!s.token);
+  if (s.token) showUsage();
+});
+
+const money = (t) => (t.unpriced && !t.cost ? 'cost unknown' : `${t.cost.toFixed(t.cost < 1 ? 4 : 2)}${t.unpriced ? '+' : ''}`);
+
+// AI tokens and US$ (today and the last 30 days)
+async function showUsage() {
+  try {
+    const u = await rpc('usage:summary');
+    $('#usage').textContent = u.missingTable
+      ? 'AI cost tracking: run supabase/migrations/003_ai_usage.sql'
+      : `AI today: ${money(u.today)} · ${u.today.tokens.toLocaleString()} tokens   |   30 days: ${money(u.month)}`;
+  } catch {
+    $('#usage').textContent = '';
+  }
+}
 chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
   $('#singleBtn').classList.toggle('hidden', !/jobright\.ai\/jobs\/info\//.test(tab?.url || ''));
 });

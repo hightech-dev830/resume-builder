@@ -47,6 +47,22 @@ CREATE INDEX IF NOT EXISTS resumes_bot_status_idx ON public.resumes (bot_status)
 CREATE INDEX IF NOT EXISTS resumes_created_at_idx ON public.resumes (created_at DESC);
 CREATE INDEX IF NOT EXISTS resumes_company_idx ON public.resumes (lower(company));
 
+-- tokens and US$ of every AI call (same as migrations/003_ai_usage.sql)
+CREATE TABLE IF NOT EXISTS public.ai_usage (
+  id             BIGSERIAL PRIMARY KEY,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  provider       TEXT NOT NULL DEFAULT '',
+  model          TEXT NOT NULL DEFAULT '',
+  task           TEXT NOT NULL DEFAULT '',
+  bid_id         INTEGER,
+  input_tokens   INTEGER NOT NULL DEFAULT 0,
+  cached_tokens  INTEGER NOT NULL DEFAULT 0,
+  output_tokens  INTEGER NOT NULL DEFAULT 0,
+  cost_usd       NUMERIC(12, 6)
+);
+CREATE INDEX IF NOT EXISTS ai_usage_created_at_idx ON public.ai_usage (created_at DESC);
+ALTER TABLE public.ai_usage ENABLE ROW LEVEL SECURITY;
+
 -- Row level security ON with no policies: the publishable (anon) key can read nothing.
 -- The web app's server uses the secret key, which bypasses RLS.
 -- This matters because settings holds your AI API keys.

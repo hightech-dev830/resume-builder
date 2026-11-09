@@ -136,6 +136,22 @@ const TAILOR_SCHEMA = {
   }
 };
 
+// ---------------- usage ----------------
+
+// Every completed AI call reports its token counts here (the app saves them with the cost).
+let usageListener = null;
+function onUsage(fn) {
+  usageListener = fn;
+}
+function reportUsage(cfg, model, usage) {
+  if (!usageListener) return;
+  try {
+    usageListener({ provider: cfg.provider, model, ...usage });
+  } catch (err) {
+    console.warn('usage listener failed:', err.message);
+  }
+}
+
 // ---------------- providers ----------------
 
 function requireKey(cfg) {
@@ -175,6 +191,12 @@ async function completeAnthropic(cfg, { system, user, schema, maxTokens, effort 
     ? client.beta.messages.stream({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' })
     : client.messages.stream(params);
   const message = await stream.finalMessage();
+  const u = message.usage || {};
+  reportUsage(cfg, message.model || model, {
+    input: (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+    cached: u.cache_read_input_tokens || 0,
+    output: u.output_tokens || 0
+  });
   if (message.stop_reason === 'refusal') throw new Error('Claude declined this request. Try rephrasing the job details or the prompt.');
   if (message.stop_reason === 'max_tokens') throw new Error('The response was cut off (max tokens). Try again.');
   return message.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
@@ -192,6 +214,9 @@ async function completeOpenAI(cfg, { system, user, schema, maxTokens }) {
     ],
     ...(schema ? { response_format: { type: 'json_schema', json_schema: { name: 'structured_output', schema, strict: true } } } : {})
   });
+  const u = res.usage || {};
+  const cached = u.prompt_tokens_details?.cached_tokens || 0;
+  reportUsage(cfg, res.model || cfg.model, { input: (u.prompt_tokens || 0) - cached, cached, output: u.completion_tokens || 0 });
   const choice = res.choices[0];
   if (choice.message.refusal) throw new Error(`${PROVIDERS[cfg.provider]?.label || 'AI'} declined this request: ${choice.message.refusal}`);
   if (choice.finish_reason === 'length') throw new Error('The response was cut off (max tokens). Try again.');
@@ -342,5 +367,5 @@ async function testProxy(proxy, provider = 'anthropic') {
 
 module.exports = {
   PROVIDERS, KEY_SETTING, MODEL_SETTING, DEFAULT_RESUME_PROMPT, DEFAULT_COVER_PROMPT,
-  complete, jobBlock, tailorResume, generateCoverLetter, listModels, testKey, testProxy, parseProxy
+  complete, jobBlock, onUsage, tailorResume, generateCoverLetter, listModels, testKey, testProxy, parseProxy
 };

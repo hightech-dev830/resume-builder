@@ -25,6 +25,7 @@ console.log('Syncing shared code …');
 copy('src/ai.js', 'lib/shared/ai.js');
 copy('src/templates.js', 'lib/shared/templates.js');
 copy('src/baseResume.js', 'lib/shared/baseResume.js');
+copy('src/prices.js', 'lib/shared/prices.js');
 
 // UI
 copy('renderer/app.js', 'public/app.js');

@@ -98,6 +98,21 @@ ALTER TABLE resumes ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS resumes_source_url_idx ON resumes (source_url);
 CREATE INDEX IF NOT EXISTS resumes_bot_status_idx ON resumes (bot_status);
 
+-- tokens and US$ of every AI call
+CREATE TABLE IF NOT EXISTS ai_usage (
+  id             BIGSERIAL PRIMARY KEY,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  provider       TEXT NOT NULL DEFAULT '',
+  model          TEXT NOT NULL DEFAULT '',
+  task           TEXT NOT NULL DEFAULT '',
+  bid_id         INTEGER,
+  input_tokens   INTEGER NOT NULL DEFAULT 0,
+  cached_tokens  INTEGER NOT NULL DEFAULT 0,
+  output_tokens  INTEGER NOT NULL DEFAULT 0,
+  cost_usd       NUMERIC(12, 6)
+);
+CREATE INDEX IF NOT EXISTS ai_usage_created_at_idx ON ai_usage (created_at DESC);
+
 CREATE INDEX IF NOT EXISTS resumes_created_at_idx ON resumes (created_at DESC);
 CREATE INDEX IF NOT EXISTS resumes_company_idx ON resumes (lower(company));
 `;
@@ -230,7 +245,14 @@ async function deleteResume(id) {
   await getPool().query('DELETE FROM resumes WHERE id = $1', [id]);
 }
 
+async function logUsage(u) {
+  await getPool().query(
+    'INSERT INTO ai_usage (provider, model, task, bid_id, input_tokens, cached_tokens, output_tokens, cost_usd) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+    [u.provider || '', u.model || '', u.task || '', u.bid_id || null, u.input || 0, u.cached || 0, u.output || 0, u.cost_usd]
+  );
+}
+
 module.exports = {
-  CONFIG_PATH, loadConfig, saveConfig, init, getSetting, setSetting, getAllSettings,
+  logUsage, CONFIG_PATH, loadConfig, saveConfig, init, getSetting, setSetting, getAllSettings,
   createResume, updateResume, getResume, listResumes, listDates, deleteResume, distinctValues
 };

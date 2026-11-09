@@ -14,7 +14,7 @@ const PROFILE_LABELS = {
   work_authorized_us: 'Authorized to work in the US', needs_sponsorship: 'Needs visa sponsorship', citizenship: 'Citizenship',
   willing_to_relocate: 'Willing to relocate', remote_preference: 'Work preference',
   start_date: 'Earliest start date', notice_period: 'Notice period', salary_expectation: 'Salary expectation',
-  gender: 'Gender', pronouns: 'Pronouns', race_ethnicity: 'Race / ethnicity', hispanic_latino: 'Hispanic or Latino', veteran_status: 'Veteran status', disability_status: 'Disability status',
+  gender: 'Gender', pronouns: 'Pronouns', sexual_orientation: 'Sexual orientation', race_ethnicity: 'Race / ethnicity', hispanic_latino: 'Hispanic or Latino', veteran_status: 'Veteran status', disability_status: 'Disability status',
   sms_consent: 'Consent to text messages', how_heard: 'How did you hear about us', licenses_certifications: 'Licenses / certifications',
   other_info: 'Anything else the bot should know',
   password: 'Password for job-site accounts', ssn_last4: 'SSN last 4 digits', dob: 'Date of birth (YYYY-MM-DD)'
@@ -104,6 +104,7 @@ async function loadServer() {
     $('#connStatus').textContent = '✓ Connected';
     $('#connStatus').className = 'ok';
     if (ai.keys[ai.provider]) loadModels(true);
+    loadUsage();
   } catch (err) {
     $('#connStatus').textContent = err.message;
     $('#connStatus').className = 'err';
@@ -159,6 +160,34 @@ $$('[data-reset]').forEach((b) => b.addEventListener('click', async () => {
   $(b.dataset.reset === 'resume' ? '#promptResume' : '#promptCover').value = d[b.dataset.reset];
 }));
 
+// ---------- AI usage ----------
+const fmtCost = (t) => (t.unpriced && !t.cost ? '?' : `${t.cost.toFixed(t.cost < 1 ? 4 : 2)}${t.unpriced ? '+' : ''}`);
+const fmtN = (n) => Number(n || 0).toLocaleString();
+
+async function loadUsage() {
+  $('#usageStatus').textContent = 'Loading…';
+  try {
+    const [u, p] = await Promise.all([rpc('usage:summary'), rpc('usage:prices')]);
+    if (u.missingTable) {
+      $('#usageStatus').textContent = 'Run supabase/migrations/003_ai_usage.sql in Supabase to start tracking.';
+      return;
+    }
+    const head = '<tr><th></th><th>Calls</th><th>Input</th><th>Cached</th><th>Output</th><th>Total tokens</th><th>Cost (US$)</th></tr>';
+    const row = (label, t) => `<tr><td>${label}</td><td>${fmtN(t.calls)}</td><td>${fmtN(t.input)}</td><td>${fmtN(t.cached)}</td><td>${fmtN(t.output)}</td><td>${fmtN(t.tokens)}</td><td>${fmtCost(t)}</td></tr>`;
+    $('#usageTotals').innerHTML = head + row('Today', u.today) + row('Last 7 days', u.week) + row('Last 30 days', u.month);
+    $('#usageModels').innerHTML = u.models.length
+      ? head.replace('<th></th>', '<th>Model (30 days)</th>') + u.models.map((m) => row(m.model, m)).join('')
+      : '';
+    $('#aiPrices').value = Object.keys(p.saved || {}).length ? JSON.stringify(p.saved, null, 2) : '';
+    $('#defaultPrices').textContent = 'Built-in: ' + Object.entries(p.defaults).map(([m, x]) => `${m} ${x.input}/${x.output}`).join(', ');
+    const unpriced = u.models.filter((m) => m.unpriced).map((m) => m.model.split(' / ')[1]);
+    $('#usageStatus').textContent = unpriced.length ? `No price yet for: ${unpriced.join(', ')}. Add it under Prices to see its cost.` : '';
+  } catch (err) {
+    $('#usageStatus').textContent = err.message;
+  }
+}
+$('#usageRefresh').addEventListener('click', loadUsage);
+
 // ---------- connection ----------
 $('#loginBtn').addEventListener('click', async () => {
   $('#connStatus').textContent = 'Signing in…';
@@ -206,12 +235,13 @@ $('#saveBtn').addEventListener('click', async () => {
         prompt_resume: $('#promptResume').value.trim(),
         prompt_cover: $('#promptCover').value.trim(),
         base_resume: $('#baseResume').value,
+        ai_prices: $('#aiPrices').value.trim() ? JSON.stringify(JSON.parse($('#aiPrices').value)) : '{}',
         ...(server.files_location === 'local' ? { local_output_dir: $('#filesDir').value.trim() } : {})
       });
     }
     status('✓ Saved', 'ok');
   } catch (err) {
-    status(err instanceof SyntaxError ? 'Resume JSON is not valid: ' + err.message : err.message, 'err');
+    status(err instanceof SyntaxError ? 'Resume JSON or prices JSON is not valid: ' + err.message : err.message, 'err');
   }
 });
 

@@ -3,7 +3,17 @@ const path = require('path');
 const { app, BrowserWindow, ipcMain, shell, Menu } = require('electron');
 if (app.isPackaged) process.env.RESUME_BUILDER_CONFIG_DIR = app.getPath('userData');
 const db = require('./src/db');
+const { costUsd } = require('./src/prices');
 const ai = require('./src/ai');
+
+// tokens and US$ of every AI call go to the ai_usage table (prices: Settings → ai_prices)
+ai.onUsage(async (u) => {
+  let overrides = {};
+  try {
+    overrides = JSON.parse((await db.getSetting('ai_prices', '')) || '{}');
+  } catch {}
+  db.logUsage({ ...u, cost_usd: costUsd(u.model, u, overrides) }).catch((err) => console.warn('AI usage not saved:', err.message));
+});
 const templates = require('./src/templates');
 const { htmlToPdf } = require('./src/pdf');
 const seedResume = require('./src/baseResume');

@@ -15,7 +15,7 @@ If a step needs you (a captcha, an email verification code, or a question it can
 ## Setup
 
 1. **Server.** The extension uses the Resume Builder web app for AI, PDFs and Supabase. Run it locally (`npm run dev` in the repo root, which serves http://localhost:3000) or use your Vercel URL.
-2. **Database columns.** Run `supabase/migrations/002_auto_bid.sql` once in the Supabase SQL Editor. This adds `source`, `source_url`, `apply_url`, `bot_status`, `bot_log`, `answers` and `applied_at` to `resumes`. Until you run it, the bot keeps its status in the bid's notes, and the step log and answers are not saved.
+2. **Database.** Run `supabase/migrations/002_auto_bid.sql` and `003_ai_usage.sql` once each in the Supabase SQL Editor. This adds `source`, `source_url`, `apply_url`, `bot_status`, `bot_log`, `answers` and `applied_at` to `resumes`. `003` adds the `ai_usage` table (tokens and US$ of every AI call). Until you run `002`, the bot keeps its status in the bid's notes, and the step log and answers are not saved.
 3. **Load the extension.** Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick this `extension` folder.
 4. **Settings** (right-click the icon, then **Options**):
    - **Connection:** enter the server URL and sign in with the web app login (`jkr` / `jkr`).
@@ -37,6 +37,14 @@ If a step needs you (a captcha, an email verification code, or a question it can
 | `profile.local.json` | Your personal details. **Not in git** (it holds your password) |
 
 The AI planner prompt lives on the server in `lib/agent.js`, and the server methods are `bot:plan`, `bot:seen`, `bot:log` and `files:get`.
+
+## Notes
+
+- **Order:** the bot opens the application first and creates the bid and the tailored resume + cover letter only when a real form needs them. Jobs it skips cost no AI calls.
+- **LinkedIn:** jobs that send you to LinkedIn, or only allow Easy Apply / signing in with LinkedIn, are skipped.
+- **Job list:** reloaded every 5 minutes (setting). When no new jobs are left, the bot waits for the next reload instead of stopping.
+- **AI cost:** the popup shows today's and the last 30 days' cost; Settings → AI & prompts shows totals per model and lets you set prices (US$ per 1M tokens) for models without a built-in price.
+- **Answers:** edit `profile.local.json` and raise its `_version` to push changes into the extension; changes made on the settings page stay until the version goes up again.
 
 ## Limits
 

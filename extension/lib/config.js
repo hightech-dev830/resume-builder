@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS = {
     remoteOnly: true,
     maxAgeHours: 24,       // "today's jobs": posted within the last 24 hours
     maxBids: 25,           // stop after this many submitted applications per run
+    refreshMin: 5,         // reload the Jobright list this often (minutes); the bot waits for new jobs
     minMatch: 0,           // skip jobs below this Jobright match %
     titleExclude: '',      // comma-separated words; skip titles containing any
     companyExclude: ''     // comma-separated company names to skip
@@ -36,7 +37,7 @@ export const DEFAULT_PROFILE = {
   work_authorized_us: 'Yes', needs_sponsorship: 'No', citizenship: '',
   willing_to_relocate: 'No', remote_preference: 'Remote',
   start_date: '', notice_period: '', salary_expectation: '',
-  gender: '', pronouns: '', race_ethnicity: '', hispanic_latino: '', veteran_status: '', disability_status: '',
+  gender: '', pronouns: '', sexual_orientation: '', race_ethnicity: '', hispanic_latino: '', veteran_status: '', disability_status: '',
   sms_consent: 'Yes', how_heard: 'Jobright.ai', licenses_certifications: 'None',
   other_info: '',
   // secrets: never sent to the AI, only typed into the page
@@ -70,17 +71,21 @@ export async function getProfile() {
 }
 
 export async function saveProfile(profile) {
-  await chrome.storage.local.set({ profile: { ...DEFAULT_PROFILE, ...profile } });
+  const { profile: cur } = await chrome.storage.local.get('profile');
+  // keep the file version so edits made on the options page are not overwritten by the same file again
+  await chrome.storage.local.set({ profile: { ...DEFAULT_PROFILE, _version: cur?._version || 0, ...profile } });
 }
 
 // Loads profile.local.json (if present) the first time, so the profile need not be typed in.
+// Also reloads it when the file's "_version" is newer than the saved profile's.
 export async function seedProfile() {
   const { profile } = await chrome.storage.local.get('profile');
-  if (profile && profile.email) return false;
   try {
     const res = await fetch(chrome.runtime.getURL('profile.local.json'));
     if (!res.ok) return false;
-    await saveProfile(await res.json());
+    const file = await res.json();
+    if (profile?.email && (Number(file._version) || 0) <= (Number(profile._version) || 0)) return false;
+    await saveProfile(file);
     return true;
   } catch {
     return false;
@@ -97,7 +102,7 @@ function dobParts(dob) {
 // What the AI sees: real values, except secrets become {{placeholders}}.
 export function profileForAI(p) {
   const out = {};
-  for (const [k, v] of Object.entries(p)) if (!SECRET_KEYS.includes(k) && v !== '') out[k] = v;
+  for (const [k, v] of Object.entries(p)) if (!SECRET_KEYS.includes(k) && !k.startsWith('_') && v !== '') out[k] = v;
   if (p.password) out.password = '{{password}}';
   if (p.ssn_last4) out.ssn_last4 = '{{ssn_last4}} (only for a field that explicitly asks for the last 4 digits of the SSN)';
   if (dobParts(p.dob)) out.date_of_birth = '{{dob_mm_dd_yyyy}} (use {{dob_iso}} for yyyy-mm-dd date inputs; only when asked)';
