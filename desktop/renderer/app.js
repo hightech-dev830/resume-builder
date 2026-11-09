@@ -1010,6 +1010,57 @@ $('#s-save').addEventListener('click', () => {
   }).catch(() => {});
 });
 
+// ---------------- AI usage ----------------
+
+const fmtTokens = (n) => Number(n || 0).toLocaleString();
+// "$1.23", "$0.0042", "?" when no price is known; "+" when part of it has no price
+function fmtCost(t) {
+  if (t.unpriced && !t.cost) return '?';
+  return '$' + t.cost.toFixed(t.cost && t.cost < 1 ? 4 : 2) + (t.unpriced ? '+' : '');
+}
+
+async function loadUsage() {
+  $('#u-status').textContent = 'Loading…';
+  try {
+    const [u, p] = await Promise.all([api.getUsage(), api.getPrices()]);
+    if (u.missingTable) {
+      $('#u-status').textContent = 'Usage is not recorded yet: run supabase/migrations/003_ai_usage.sql in Supabase.';
+      return;
+    }
+    const card = (label, t) => `<div class="u-card"><div class="u-label">${label}</div><div class="u-cost">${fmtCost(t)}</div>
+      <div class="u-sub">${fmtTokens(t.tokens)} tokens · ${fmtTokens(t.calls)} calls</div></div>`;
+    $('#u-cards').innerHTML = card('Today', u.today) + card('Last 7 days', u.week) + card('Last 30 days', u.month) + card('All time', u.all);
+    const empty = (cols) => `<tr><td colspan="${cols}" class="muted">No AI calls yet.</td></tr>`;
+    $('#u-days').innerHTML = u.days.map((d) => `<tr><td>${d.day}</td><td>${fmtTokens(d.calls)}</td><td>${fmtTokens(d.tokens)}</td><td>${fmtCost(d)}</td></tr>`).join('') || empty(4);
+    $('#u-models').innerHTML = u.models.map((m) => `<tr><td>${escapeHtml(m.model)}</td><td>${fmtTokens(m.calls)}</td><td>${fmtTokens(m.input)}</td><td>${fmtTokens(m.cached)}</td><td>${fmtTokens(m.output)}</td><td>${fmtCost(m)}</td></tr>`).join('') || empty(6);
+    $('#u-tasks').innerHTML = u.tasks.map((t) => `<tr><td>${escapeHtml(t.task)}</td><td>${fmtTokens(t.calls)}</td><td>${fmtTokens(t.tokens)}</td><td>${fmtCost(t)}</td></tr>`).join('') || empty(4);
+    $('#u-prices').value = Object.keys(p.saved || {}).length ? JSON.stringify(p.saved, null, 2) : '';
+    $('#u-defaults').textContent = 'Built-in (input / output): ' + Object.entries(p.defaults).map(([m, x]) => `${m} ${x.input} / ${x.output}`).join(', ');
+    const unpriced = u.models.filter((m) => m.unpriced).map((m) => m.model.split(' / ')[1]);
+    $('#u-status').textContent = unpriced.length ? `No price yet for ${unpriced.join(', ')}: add it under Prices to see its cost.` : '';
+  } catch (err) {
+    $('#u-status').textContent = 'Could not load usage: ' + err.message;
+  }
+}
+
+$('#u-refresh').addEventListener('click', loadUsage);
+$('#u-savePrices').addEventListener('click', async () => {
+  const raw = $('#u-prices').value.trim() || '{}';
+  try {
+    const parsed = JSON.parse(raw);
+    for (const [model, p] of Object.entries(parsed)) {
+      if (!p || typeof p.input !== 'number' || typeof p.output !== 'number') throw new Error(`"${model}" needs numeric "input" and "output"`);
+    }
+    await api.saveSettings({ ai_prices: JSON.stringify(parsed) });
+    $('#u-pricesStatus').textContent = '✓ Saved';
+    $('#u-pricesStatus').className = 'hint ok';
+    loadUsage();
+  } catch (err) {
+    $('#u-pricesStatus').textContent = err.message;
+    $('#u-pricesStatus').className = 'hint err';
+  }
+});
+
 // ---------------- tabs ----------------
 
 function switchTab(name) {
@@ -1019,6 +1070,7 @@ function switchTab(name) {
   if (name === 'cover') renderCoverPreview();
   if (name === 'base') loadBase();
   if (name === 'settings') loadSettings();
+  if (name === 'usage') loadUsage();
   if (name === 'builder' && state.resume && $('#zoom').value === 'fit') applyZoom($('#paperHolder'), 'fit');
 }
 

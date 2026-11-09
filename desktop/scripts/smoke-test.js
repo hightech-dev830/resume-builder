@@ -168,6 +168,27 @@ app.whenReady().then(async () => {
   check('model dropdown filled', (await js(`document.querySelectorAll('#s-model option').length`)) >= 1);
   await shot('4-settings');
 
+  // ---- AI usage tab (two sample calls, removed again below) ----
+  const db = require('../src/db');
+  const { Pool } = require('pg');
+  const prevPrices = await db.getSetting('ai_prices', '');
+  await db.logUsage({ provider: 'openai', model: 'gpt-5', task: 'smoke', input: 10000, cached: 2000, output: 3000, cost_usd: 0.04275 });
+  await db.logUsage({ provider: 'openai', model: 'smoke-model', task: 'smoke', input: 1000000, cached: 0, output: 0, cost_usd: null });
+  await tab('usage');
+  await wait(1200);
+  check('usage tab shows 4 cost cards', (await js(`document.querySelectorAll('#u-cards .u-card').length`)) === 4);
+  check('today includes the sample cost', /\$0\.04/.test(await js(`document.querySelector('#u-cards .u-card .u-cost').textContent`)));
+  check('unpriced model flagged', (await js(`document.querySelector('#u-status').textContent`)).includes('smoke-model'));
+  check('days / models / tasks tables filled', (await js(`[...['#u-days','#u-models','#u-tasks']].every(s => document.querySelectorAll(s + ' tr').length >= 1)`)) === true);
+  await js(`document.querySelector('#u-prices').value = '{"smoke-model": {"input": 2, "output": 8}}'; document.querySelector('#u-savePrices').click();`);
+  await wait(1500);
+  check('price added re-prices past calls', /\$2\.04/.test(await js(`document.querySelector('#u-cards .u-card .u-cost').textContent`)));
+  await shot('5-usage');
+  const pool = new Pool(db.loadConfig());
+  await pool.query(`DELETE FROM ai_usage WHERE task = 'smoke'`);
+  await pool.end();
+  await db.setSetting('ai_prices', prevPrices);
+
   // ---- clean up ----
   for (const x of [id, ...extra]) await js(`api.deleteResume(${x})`);
   for (const d of dirs) if (d && d.includes('Smoke_Test_Co')) fs.rmSync(d, { recursive: true, force: true });

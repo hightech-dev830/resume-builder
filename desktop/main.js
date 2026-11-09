@@ -3,7 +3,12 @@ const path = require('path');
 const { app, BrowserWindow, ipcMain, shell, Menu } = require('electron');
 if (app.isPackaged) process.env.RESUME_BUILDER_CONFIG_DIR = app.getPath('userData');
 const db = require('./src/db');
-const { costUsd } = require('./src/prices');
+const { costUsd, summarize, DEFAULT_PRICES } = require('./src/prices');
+const { AsyncLocalStorage } = require('async_hooks');
+
+// labels AI calls with what they were for (resume, cover letter, key test)
+const usageTask = new AsyncLocalStorage();
+const track = (task, fn) => usageTask.run(task, fn);
 const ai = require('./src/ai');
 
 // tokens and US$ of every AI call go to the ai_usage table (prices: Settings → ai_prices)
@@ -12,7 +17,7 @@ ai.onUsage(async (u) => {
   try {
     overrides = JSON.parse((await db.getSetting('ai_prices', '')) || '{}');
   } catch {}
-  db.logUsage({ ...u, cost_usd: costUsd(u.model, u, overrides) }).catch((err) => console.warn('AI usage not saved:', err.message));
+  db.logUsage({ ...u, task: usageTask.getStore() || '', cost_usd: costUsd(u.model, u, overrides) }).catch((err) => console.warn('AI usage not saved:', err.message));
 });
 const templates = require('./src/templates');
 const { htmlToPdf } = require('./src/pdf');
@@ -201,11 +206,12 @@ handle('settings:get', async () => {
 
 handle('settings:save', async (values) => {
   const allowed = ['ai_provider', 'claude_api_key', 'claude_model', 'openai_api_key', 'openai_model', 'gemini_api_key', 'gemini_model', 'claude_proxy', 'proxy_enabled',
-    'prompt_resume', 'prompt_cover', 'output_dir', 'default_template', 'base_resume'];
+    'prompt_resume', 'prompt_cover', 'output_dir', 'default_template', 'base_resume', 'ai_prices'];
   for (const [k, v] of Object.entries(values || {})) {
     if (!allowed.includes(k)) continue;
     if (k === 'base_resume') JSON.parse(v); // validate before saving
     if (k === 'claude_proxy') ai.parseProxy(v);
+    if (k === 'ai_prices') JSON.parse(v || '{}');
     await db.setSetting(k, v);
   }
   return true;
@@ -218,7 +224,18 @@ handle('settings:resetBase', async () => {
 });
 
 handle('settings:defaultPrompts', async () => ({ resume: ai.DEFAULT_RESUME_PROMPT, cover: ai.DEFAULT_COVER_PROMPT }));
-handle('settings:testKey', async (over) => ai.testKey(await aiConfig(over)));
+handle('settings:testKey', async (over) => track('test', async () => ai.testKey(await aiConfig(over))));
+
+// ---------- AI usage (tokens and US$) ----------
+async function savedPrices() {
+  try {
+    return JSON.parse((await db.getSetting('ai_prices', '')) || '{}');
+  } catch {
+    return {};
+  }
+}
+handle('usage:summary', async () => summarize(await db.usageRows(), await savedPrices(), Intl.DateTimeFormat().resolvedOptions().timeZone));
+handle('usage:prices', async () => ({ defaults: DEFAULT_PRICES, saved: await savedPrices() }));
 handle('settings:listModels', async (over) => ai.listModels(await aiConfig(over)));
 handle('settings:testProxy', async (proxy, provider) => ai.testProxy(proxy, provider));
 
@@ -234,18 +251,18 @@ handle('render:coverPdf', async (resume, letter, tpl, job) =>
 
 // ---------- AI ----------
 
-handle('ai:tailor', async (job) => {
+handle('ai:tailor', async (job) => track('resume', async () => {
   const cfg = await aiConfig();
   const prompt = await getPrompt('resume');
   const out = await ai.tailorResume({ cfg, prompt, base: await getBaseResume(), job });
   return { ...out, meta: { ai_provider: cfg.provider, ai_model: cfg.model, prompt_used: prompt } };
-});
+}));
 
-handle('ai:coverLetter', async ({ resume, job, instructions }) => {
+handle('ai:coverLetter', async ({ resume, job, instructions }) => track('cover', async () => {
   const cfg = await aiConfig();
   const prompt = await getPrompt('cover');
   return ai.generateCoverLetter({ cfg, prompt, resume: resume || (await getBaseResume()), job, instructions });
-});
+}));
 
 // ---------- resumes (bids) ----------
 

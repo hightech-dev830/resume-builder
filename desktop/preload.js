@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('api', {
   listModels: (cfg) => call('settings:listModels', cfg),
   testProxy: (proxy, provider) => call('settings:testProxy', proxy, provider),
   defaultPrompts: () => call('settings:defaultPrompts'),
+  getUsage: () => call('usage:summary'),
+  getPrices: () => call('usage:prices'),
 
   listTemplates: () => call('templates:list'),
   getBaseResume: () => call('base:get'),

@@ -56,7 +56,7 @@ getSettings().then((s) => {
   if (s.token) showUsage();
 });
 
-const money = (t) => (t.unpriced && !t.cost ? 'cost unknown' : `${t.cost.toFixed(t.cost < 1 ? 4 : 2)}${t.unpriced ? '+' : ''}`);
+const money = (t) => (t.unpriced && !t.cost ? 'cost unknown' : '$' + t.cost.toFixed(t.cost < 1 ? 4 : 2) + (t.unpriced ? '+' : ''));
 
 // AI tokens and US$ (today and the last 30 days)
 async function showUsage() {

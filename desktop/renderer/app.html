@@ -14,6 +14,7 @@
       <button class="tab" data-tab="cover">Cover Letter</button>
       <button class="tab" data-tab="history">History</button>
       <button class="tab" data-tab="base">Base Profile</button>
+      <button class="tab" data-tab="usage">AI Usage</button>
       <button class="tab" data-tab="settings">Settings</button>
     </nav>
     <div class="current" id="currentBid">New bid (unsaved)</div>
@@ -163,6 +164,38 @@
         <span id="h-page" class="page-label"></span>
         <button class="btn small" id="h-next" title="Next page">›</button>
         <button class="btn small" id="h-last" title="Last page">»</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- ================= AI USAGE ================= -->
+  <main class="view" id="view-usage">
+    <section class="panel full">
+      <div class="panel-head">
+        <span>AI usage &amp; cost</span>
+        <span class="muted" id="u-status"></span>
+        <button class="btn small" id="u-refresh">Refresh</button>
+      </div>
+      <div class="panel-body scroll">
+        <div class="u-cards" id="u-cards"></div>
+        <div class="u-grid">
+          <div>
+            <h3>By day (last 30 days)</h3>
+            <table class="table u-table"><thead><tr><th>Day</th><th>Calls</th><th>Tokens</th><th>Cost (US$)</th></tr></thead><tbody id="u-days"></tbody></table>
+          </div>
+          <div>
+            <h3>By model (last 30 days)</h3>
+            <table class="table u-table"><thead><tr><th>Model</th><th>Calls</th><th>Input</th><th>Cached</th><th>Output</th><th>Cost (US$)</th></tr></thead><tbody id="u-models"></tbody></table>
+            <h3>By task (last 30 days)</h3>
+            <table class="table u-table"><thead><tr><th>Used for</th><th>Calls</th><th>Tokens</th><th>Cost (US$)</th></tr></thead><tbody id="u-tasks"></tbody></table>
+            <h3>Prices (US$ per 1 million tokens)</h3>
+            <p class="hint">Built-in prices cover common models. Add or correct a model as JSON; your entries override the built-in ones, and past calls without a saved cost are re-priced. Example:
+              <code>{"gpt-5.5": {"input": 1.25, "cached": 0.125, "output": 10}}</code></p>
+            <textarea id="u-prices" rows="6" spellcheck="false" placeholder="{}"></textarea>
+            <div class="row-actions"><button class="btn primary small" id="u-savePrices">Save prices</button><span class="hint" id="u-pricesStatus"></span></div>
+            <p class="hint" id="u-defaults"></p>
+          </div>
+        </div>
       </div>
     </section>
   </main>

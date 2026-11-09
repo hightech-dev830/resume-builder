@@ -41,4 +41,56 @@ function costUsd(model, usage, overrides) {
   return (n(usage.input) * p.input + n(usage.cached) * (p.cached ?? p.input) + n(usage.output) * p.output) / 1e6;
 }
 
-module.exports = { DEFAULT_PRICES, priceFor, costUsd };
+// ---------- summaries (shared by the desktop app and the web server) ----------
+
+// Cost of a saved ai_usage row: stored when it was recorded, or worked out now if the
+// model's price was added later.
+function rowCost(r, overrides) {
+  if (r.cost_usd != null) return Number(r.cost_usd);
+  return costUsd(r.model, { input: r.input_tokens, cached: r.cached_tokens, output: r.output_tokens }, overrides);
+}
+
+function totals(rows, overrides) {
+  const out = { calls: rows.length, input: 0, cached: 0, output: 0, tokens: 0, cost: 0, unpriced: 0 };
+  for (const r of rows) {
+    out.input += r.input_tokens || 0;
+    out.cached += r.cached_tokens || 0;
+    out.output += r.output_tokens || 0;
+    const c = rowCost(r, overrides);
+    if (c == null) out.unpriced++;
+    else out.cost += c;
+  }
+  out.tokens = out.input + out.cached + out.output;
+  return out;
+}
+
+const TASK_NAMES = { resume: 'Resume', cover: 'Cover letter', page: 'Application pages (bot)', test: 'Key tests', '': 'Other' };
+
+// rows: ai_usage rows (any order). Returns today / 7 days / 30 days / all-time totals,
+// one line per day for the last 30 days, and 30-day breakdowns by model and by task.
+function summarize(rows, overrides = {}, tz = 'America/Los_Angeles') {
+  const day = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(d));
+  const now = Date.now();
+  const today = day(now);
+  const recent = rows.filter((r) => now - new Date(r.created_at) < 30 * 86400000);
+  const group = (list, key) => {
+    const m = new Map();
+    for (const r of list) {
+      const k = key(r);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(r);
+    }
+    return [...m];
+  };
+  return {
+    today: totals(rows.filter((r) => day(r.created_at) === today), overrides),
+    week: totals(rows.filter((r) => now - new Date(r.created_at) < 7 * 86400000), overrides),
+    month: totals(recent, overrides),
+    all: totals(rows, overrides),
+    days: group(recent, (r) => day(r.created_at)).map(([d, list]) => ({ day: d, ...totals(list, overrides) })).sort((a, b) => b.day.localeCompare(a.day)),
+    models: group(recent, (r) => `${r.provider} / ${r.model}`).map(([model, list]) => ({ model, ...totals(list, overrides) })).sort((a, b) => b.cost - a.cost || b.tokens - a.tokens),
+    tasks: group(recent, (r) => r.task || '').map(([task, list]) => ({ task: TASK_NAMES[task] || task, ...totals(list, overrides) })).sort((a, b) => b.cost - a.cost || b.tokens - a.tokens)
+  };
+}
+
+module.exports = { DEFAULT_PRICES, priceFor, costUsd, totals, summarize };

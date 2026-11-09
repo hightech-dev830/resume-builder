@@ -161,7 +161,7 @@ $$('[data-reset]').forEach((b) => b.addEventListener('click', async () => {
 }));
 
 // ---------- AI usage ----------
-const fmtCost = (t) => (t.unpriced && !t.cost ? '?' : `${t.cost.toFixed(t.cost < 1 ? 4 : 2)}${t.unpriced ? '+' : ''}`);
+const fmtCost = (t) => (t.unpriced && !t.cost ? '?' : '$' + t.cost.toFixed(t.cost < 1 ? 4 : 2) + (t.unpriced ? '+' : ''));
 const fmtN = (n) => Number(n || 0).toLocaleString();
 
 async function loadUsage() {

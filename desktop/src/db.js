@@ -252,7 +252,13 @@ async function logUsage(u) {
   );
 }
 
+// Every saved AI call, newest first.
+async function usageRows() {
+  const { rows } = await getPool().query('SELECT * FROM ai_usage ORDER BY created_at DESC LIMIT 100000');
+  return rows;
+}
+
 module.exports = {
-  logUsage, CONFIG_PATH, loadConfig, saveConfig, init, getSetting, setSetting, getAllSettings,
+  logUsage, usageRows, CONFIG_PATH, loadConfig, saveConfig, init, getSetting, setSetting, getAllSettings,
   createResume, updateResume, getResume, listResumes, listDates, deleteResume, distinctValues
 };

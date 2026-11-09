@@ -74,6 +74,8 @@
     listModels: (cfg) => call('settings:listModels', cfg),
     testProxy: (proxy, provider) => call('settings:testProxy', proxy, provider),
     defaultPrompts: () => call('settings:defaultPrompts'),
+    getUsage: () => call('usage:summary', Intl.DateTimeFormat().resolvedOptions().timeZone),
+    getPrices: () => call('usage:prices'),
 
     listTemplates: () => call('templates:list'),
     getBaseResume: () => call('base:get'),
