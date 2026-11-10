@@ -15,7 +15,10 @@ export const DEFAULT_SETTINGS = {
   },
   behavior: {
     autoSubmit: true,      // false = stop on the final review/submit step for you to check
-    skipAccounts: true,    // skip jobs whose site wants you to sign up or sign in
+    accounts: 'try',       // sign-up / sign-in walls: 'try' (create the account; skip the job if it cannot get past) or 'skip'
+    workers: 2,            // Job links mode: jobs applied to at the same time (one window each, 1-4)
+    linkDelaySec: 2,       // Job links mode: pause between links in one window
+    emailWaitSec: 120,     // how long to wait for a verification email in Gmail
     template: '',          // '' = the web app's default template
     uploadCover: true,
     delaySec: 8,           // pause between bids
@@ -54,6 +57,11 @@ export async function getSettings() {
   const s = settings || {};
   // 25 was the old default page limit; multi-step sites (Workday) need more
   if (s.behavior?.stepLimit === 25) s.behavior.stepLimit = DEFAULT_SETTINGS.behavior.stepLimit;
+  // the old "skip account sites" checkbox became the accounts setting; sign-up is now tried first
+  if (s.behavior && !s.behavior.accounts) {
+    s.behavior.accounts = 'try';
+    delete s.behavior.skipAccounts;
+  }
   return {
     ...DEFAULT_SETTINGS, ...s,
     filters: { ...DEFAULT_SETTINGS.filters, ...(s.filters || {}) },

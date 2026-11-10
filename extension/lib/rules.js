@@ -107,7 +107,8 @@ function ruleFor(f) {
 
 const APPLY_BTN = /^(apply|apply now|apply (for|to) (this )?(job|position|role)|apply online|apply here|start (my |your )?application|i'?m interested|begin application)$/;
 const START_BTN = [/^autofill with resume$/, /^(upload|apply with) (resume|cv)$/, /^apply manually$/];
-const NEXT_BTN = [/^(save (and|&) continue|continue|next|next step|proceed|save and next|review( application)?|review and submit)$/,
+const NEXT_BTN = [/^(verify|verify (email|code|account|my email)|submit code|confirm code|confirm)$/,
+  /^(save (and|&) continue|continue|next|next step|proceed|save and next|review( application)?|review and submit)$/,
   /^(submit|submit (your |my )?application|send( my)? application|submit (and|&) apply|apply|apply now|finish|complete( application)?)$/];
 const BAD_BTN = /linkedin|indeed|google|facebook|seek|glassdoor|easy apply|sign ?in|log ?in/;
 
@@ -128,7 +129,7 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
   const actions = [];
   const leftover = [];
   let wantsCoverText = false;
-  const fields = snap.fields.filter((f) => f.kind !== 'password');
+  const fields = snap.fields;
   const fileFields = fields.filter((f) => f.kind === 'file');
 
   for (const f of fields) {
@@ -138,7 +139,11 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
     let act = null;
     let handled = false;
 
-    if (f.kind === 'file') {
+    if (f.kind === 'password') {
+      // password and confirm-password boxes: the placeholder is swapped for the real password inside the page
+      handled = true;
+      if (!filled) act = { op: 'fill', value: '{{password}}' };
+    } else if (f.kind === 'file') {
       handled = true;
       if (!filled) {
         if (/cover/.test(t)) act = uploadCover ? { op: 'upload_cover' } : null;

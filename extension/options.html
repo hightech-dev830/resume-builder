@@ -106,7 +106,11 @@
           <label>Max pages per application<input type="number" id="b-stepLimit" min="3"></label>
           <label>Wait for you to solve a captcha (minutes)<input type="number" id="b-captchaWaitMin" min="0"></label>
           <label class="check"><input type="checkbox" id="b-autoSubmit"> Submit automatically (off = stop at the final step for review)</label>
-          <label class="check"><input type="checkbox" id="b-skipAccounts"> Skip jobs that need an account (sign up / sign in)</label>
+          <label>Sites that need an account<select id="b-accounts">
+            <option value="try">Try to sign up / sign in; skip the job if it cannot get past</option>
+            <option value="skip">Skip those jobs right away</option>
+          </select></label>
+          <label>Wait for a verification email in Gmail (seconds)<input type="number" id="b-emailWaitSec" min="0"></label>
           <label class="check"><input type="checkbox" id="b-uploadCover"> Attach the cover letter when the form allows it</label>
           <label class="check"><input type="checkbox" id="b-closeTabs"> Close the job tabs after a successful bid</label>
         </div>
@@ -139,8 +143,11 @@
         </div>
         <div class="grid" style="margin-top:12px">
           <label class="wide"><span id="keyLabel">API key</span><input id="aiKey" class="secret" autocomplete="off"></label>
-          <label>Model (resume &amp; cover letter)<select id="aiModel"></select></label>
-          <label>Model for reading application pages<select id="agentModel"></select></label>
+          <label>Main model<select id="aiModel"></select></label>
+          <label>Resume model<select id="resumeModel"></select></label>
+          <label>Cover letter model<select id="coverModel"></select></label>
+          <label>Application pages model (use a small, cheap one)<select id="agentModel"></select></label>
+          <p class="hint wide">Each task can use its own model of this provider. "Same as main" uses the main model. A strong model for the resume, a mid one for the cover letter and a small one for application pages keeps cost low.</p>
         </div>
         <div class="row"><button id="loadModels">Load models</button><span id="aiStatus" class="muted"></span></div>
       </div>

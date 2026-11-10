@@ -683,5 +683,42 @@
     return { url: location.href, title: document.title, h1: textOf(document.querySelector('h1')), text: textOf(main).slice(0, 20000) };
   }
 
-  window.__abAgent = { snapshot, probeOptions, act, click, acceptCookies, waitStable, captchaSolved, showCaptcha, pageText };
+  // Title / company / location of the job on a posting page you linked to directly.
+  // Uses the page's JobPosting data (most job sites publish it), then the ATS's URL and the title.
+  function jobInfo() {
+    const out = { title: '', company: '', location: '', salary: '', remote: false };
+    const postings = [];
+    const walk = (x) => {
+      if (!x || typeof x !== 'object') return;
+      if (Array.isArray(x)) return x.forEach(walk);
+      if (/JobPosting/i.test(String(x['@type']))) postings.push(x);
+      if (x['@graph']) walk(x['@graph']);
+    };
+    for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try { walk(JSON.parse(s.textContent)); } catch { /* bad JSON on the page */ }
+    }
+    const jp = postings[0];
+    if (jp) {
+      out.title = clean(jp.title);
+      out.company = clean(jp.hiringOrganization?.name || '');
+      const loc = [].concat(jp.jobLocation || [])[0]?.address || {};
+      out.location = [loc.addressLocality, loc.addressRegion, loc.addressCountry?.name || loc.addressCountry].filter((x) => typeof x === 'string' && x).join(', ');
+      out.remote = /TELECOMMUTE/i.test(String(jp.jobLocationType || '')) || /remote/i.test(out.location);
+      const v = jp.baseSalary?.value;
+      if (v && (v.minValue || v.value)) out.salary = `${jp.baseSalary.currency || ''} ${v.minValue || v.value}${v.maxValue ? `-${v.maxValue}` : ''} ${v.unitText || ''}`.trim();
+    }
+    const meta = (n) => document.querySelector(`meta[property="${n}"], meta[name="${n}"]`)?.content || '';
+    const h1 = textOf(document.querySelector('h1'));
+    out.title = out.title || clean(h1 || meta('og:title') || document.title).slice(0, 120);
+    // company from the ATS address: boards.greenhouse.io/acme, jobs.lever.co/acme, jobs.ashbyhq.com/acme, acme.wd5.myworkdayjobs.com
+    const m = /(?:greenhouse\.io|lever\.co|ashbyhq\.com|workable\.com|smartrecruiters\.com|breezy\.hr|recruitee\.com|jobvite\.com)\/([^/?#]+)/i.exec(location.href)
+      || /^https?:\/\/([^.]+)\.(?:wd\d+\.myworkdayjobs|bamboohr|breezy|recruitee|applytojob|jobs\.personio)/i.exec(location.href);
+    const fromUrl = m ? m[1].replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) : '';
+    const fromTitle = (/ at ([^|–-]+)/i.exec(document.title) || /[|–-]\s*([^|–-]+)$/.exec(document.title) || [])[1] || '';
+    out.company = out.company || clean(meta('og:site_name')) || fromUrl || clean(fromTitle) || location.hostname.replace(/^www\./, '');
+    out.remote = out.remote || /\bremote\b/i.test(`${out.title} ${out.location} ${textOf(document.body).slice(0, 3000)}`);
+    return out;
+  }
+
+  window.__abAgent = { snapshot, probeOptions, act, click, acceptCookies, waitStable, captchaSolved, showCaptcha, pageText, jobInfo };
 })();

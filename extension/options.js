@@ -64,7 +64,7 @@ function renderSettings(s) {
   }
   for (const [k, v] of Object.entries(s.behavior)) {
     const el = $(`#b-${k}`);
-    if (el && el.tagName !== 'SELECT') el.type === 'checkbox' ? (el.checked = !!v) : (el.value = v);
+    if (el && el.id !== 'b-template') el.type === 'checkbox' ? (el.checked = !!v) : (el.value = v);
   }
   $('#b-template').dataset.value = s.behavior.template;
 }
@@ -91,6 +91,8 @@ async function loadServer() {
       ai.models[p] = s[MODEL_FIELD[p]] || '';
     }
     ai.agentModel = s.agent_model || '';
+    ai.resumeModel = s.resume_model || '';
+    ai.coverModel = s.cover_model || '';
     $('#promptResume').value = s.prompt_resume;
     $('#promptCover').value = s.prompt_cover;
     $('#baseResume').value = s.base_resume;
@@ -116,6 +118,8 @@ function captureAi() {
   ai.keys[ai.provider] = $('#aiKey').value.trim();
   if ($('#aiModel').value) ai.models[ai.provider] = $('#aiModel').value;
   ai.agentModel = $('#agentModel').value;
+  ai.resumeModel = $('#resumeModel').value;
+  ai.coverModel = $('#coverModel').value;
 }
 
 function modelOptions(list, currentId, blankLabel) {
@@ -130,7 +134,9 @@ function renderProvider() {
   $('#aiKey').value = ai.keys[ai.provider] || '';
   const list = ai.lists[ai.provider];
   $('#aiModel').innerHTML = modelOptions(list, ai.models[ai.provider]) || '<option value="">Load models first</option>';
-  $('#agentModel').innerHTML = modelOptions(list, ai.agentModel, 'Same as above');
+  $('#agentModel').innerHTML = modelOptions(list, ai.agentModel, 'Same as main');
+  $('#resumeModel').innerHTML = modelOptions(list, ai.resumeModel, 'Same as main');
+  $('#coverModel').innerHTML = modelOptions(list, ai.coverModel, 'Same as main');
 }
 
 async function loadModels(quiet) {
@@ -248,6 +254,8 @@ $('#saveBtn').addEventListener('click', async () => {
         [KEY_FIELD.openai]: ai.keys.openai || '', [MODEL_FIELD.openai]: ai.models.openai || '',
         [KEY_FIELD.gemini]: ai.keys.gemini || '', [MODEL_FIELD.gemini]: ai.models.gemini || '',
         agent_model: ai.agentModel || '',
+        resume_model: ai.resumeModel || '',
+        cover_model: ai.coverModel || '',
         prompt_resume: $('#promptResume').value.trim(),
         prompt_cover: $('#promptCover').value.trim(),
         base_resume: $('#baseResume').value,
