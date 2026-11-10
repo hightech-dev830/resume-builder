@@ -11,7 +11,7 @@ const LINK_STATUS = { pending: 'queued', running: 'running', applied: 'applied',
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
-let mode = 'jobright';
+let mode = 'links'; // this extension works on your job links only (Jobright is the other extension)
 let bot = null;
 let links = [];
 
@@ -119,9 +119,8 @@ chrome.storage.onChanged.addListener((ch) => {
 chrome.storage.local.get(['bot', 'links']).then((r) => {
   bot = r.bot;
   links = r.links || [];
-  let saved = 'jobright';
-  try { saved = localStorage.getItem('ab-mode') || 'jobright'; } catch { /* storage blocked */ }
-  setMode(bot?.running ? bot.mode || saved : saved);
+  setMode('links');
+  $('#modes').classList.add('hidden');
   render();
   renderLinks();
 });

@@ -105,7 +105,17 @@ function ruleFor(f) {
   return RULES.find((r) => r.re.test(t) && !(r.not && r.not.test(t)));
 }
 
-const APPLY_BTN = /^(apply|apply now|apply (for|to) (this )?(job|position|role)|apply online|apply here|start (my |your )?application|i'?m interested|begin application)$/;
+// The posting's apply button, including job boards (Jobicy, Himalayas, Remote OK, We Work Remotely…)
+// that send you on to the company's own application.
+const APPLY_BTN = /^(apply|apply now|apply (for|to) (this )?(job|position|role|opening)|apply online|apply here|start (my |your )?application|i'?m interested|begin application|apply (now )?(on|at|via) (the )?(company|employer'?s?|hiring company)('s)?( website| site| page)?|apply (on|at) [a-z0-9 .&-]{2,40}|apply externally|apply on website|go to (the )?application|continue to (the )?application|view (and|&) apply|apply to (this )?job)$/;
+
+// A job posting you can read without an account: the description is on the page and an Apply button is there.
+// The bot clicks Apply instead of signing in / signing up on the job board.
+export function postingWithApply(snap) {
+  const apply = findButton(snap.buttons, [APPLY_BTN]);
+  const formish = snap.fields.filter((f) => f.kind !== 'file' && f.kind !== 'checkbox').length;
+  return apply && String(snap.text || '').length > 600 && formish < 3 && !snap.fields.some((f) => f.kind === 'file') ? apply : null;
+}
 const START_BTN = [/^autofill with resume$/, /^(upload|apply with) (resume|cv)$/, /^apply manually$/];
 const NEXT_BTN = [/^(verify|verify (email|code|account|my email)|submit code|confirm code|confirm)$/,
   /^(save (and|&) continue|continue|next|next step|proceed|save and next|review( application)?|review and submit)$/,

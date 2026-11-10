@@ -202,18 +202,33 @@ async function completeAnthropic(cfg, { system, user, schema, maxTokens, effort 
   return message.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
 }
 
-async function completeOpenAI(cfg, { system, user, schema, maxTokens }) {
+// OpenAI reasoning models (gpt-5 and later, o-series) take reasoning_effort; without it they think at
+// "medium" on every call. Older chat models (gpt-4o, gpt-4.1) reject the parameter.
+const OPENAI_REASONING = /^(gpt-[5-9]|o\d)/i;
+
+async function completeOpenAI(cfg, { system, user, schema, maxTokens, effort }) {
   const client = openaiClient(cfg);
   const gemini = cfg.provider === 'gemini';
-  const res = await client.chat.completions.create({
-    model: cfg.model || PROVIDERS[cfg.provider]?.defaultModel || PROVIDERS.openai.defaultModel,
+  const model = cfg.model || PROVIDERS[cfg.provider]?.defaultModel || PROVIDERS.openai.defaultModel;
+  const body = {
+    model,
     ...(gemini ? { max_tokens: maxTokens } : { max_completion_tokens: maxTokens }),
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user }
     ],
     ...(schema ? { response_format: { type: 'json_schema', json_schema: { name: 'structured_output', schema, strict: true } } } : {})
-  });
+  };
+  if (!gemini && effort && OPENAI_REASONING.test(model)) body.reasoning_effort = effort;
+  let res;
+  try {
+    res = await client.chat.completions.create(body);
+  } catch (err) {
+    // a model that does not know reasoning_effort (or this value of it): ask again without it
+    if (!body.reasoning_effort || !/reasoning/i.test(err.message || '')) throw err;
+    delete body.reasoning_effort;
+    res = await client.chat.completions.create(body);
+  }
   const u = res.usage || {};
   const cached = u.prompt_tokens_details?.cached_tokens || 0;
   reportUsage(cfg, res.model || cfg.model, { input: (u.prompt_tokens || 0) - cached, cached, output: u.completion_tokens || 0 });

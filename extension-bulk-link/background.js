@@ -5,7 +5,7 @@
 // Every application: read the posting, fill the form (rules first, the AI only for what is left),
 // write the tailored resume + cover letter when a real form appears, submit. Bids go to Supabase.
 import { getSettings, getProfile, seedProfile, profileForAI, secretsFor, rpc } from './lib/config.js';
-import { rulePlan, answersToSave, isFilled } from './lib/rules.js';
+import { rulePlan, answersToSave, isFilled, postingWithApply } from './lib/rules.js';
 
 const JOBRIGHT = /^https:\/\/([a-z]+\.)?jobright\.ai\//;
 const LINKEDIN = /^https:\/\/([a-z]+\.)?linkedin\.com\//i;
@@ -683,7 +683,7 @@ async function applyFlow(J, g, { applyId, detail, s, source, sourceUrl, notes })
     if (docs.bid) return docs.bid;
     J.ctx.check();
     docs.bid = await g(rpc('resumes:create', {
-      company: detail.company, role: detail.title, job_link: job.job_link, apply_url: job.job_link,
+      company: detail.company, role: detail.title, job_link: job.job_link, apply_url: job.apply_url || job.job_link,
       location: detail.location || (detail.remote ? 'Remote (US)' : ''), salary: detail.salary || '', jd: job.jd,
       status: 'draft', template: s.behavior.template, notes, source, source_url: sourceUrl, bot_status: 'applying'
     }));
@@ -963,7 +963,9 @@ async function runSteps(J, startTabId, { job, docs, ensureDocs, s }) {
     if (await g(acceptCookies(J, tabId))) await g(settle(tabId));
 
     let snap = await g(readyPage(tabId));
-    if (snap.fields.some((f) => f.kind === 'password')) {
+    const posting = postingWithApply(snap);
+    if (posting && step === 1) J.log(`  Job details are readable without an account; using "${posting.text}"`);
+    if (!posting && snap.fields.some((f) => f.kind === 'password')) {
       J.account = true;
       if (skipAccounts) return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
     }
@@ -1004,6 +1006,7 @@ async function runSteps(J, startTabId, { job, docs, ensureDocs, s }) {
     // a real application form: write the tailored resume + cover letter before filling it
     if (!docs.files && !snap.fields.some((f) => f.kind === 'password') && rp.page_type === 'application_form' && (rp.needsDocs || snap.fields.length >= 3)) {
       J.log('  Application form found; preparing the resume and cover letter');
+      job.apply_url = snap.url;
       await g(ensureDocs());
       rp = rulePlan(snap, ruleArgs());
     }
@@ -1031,7 +1034,7 @@ async function runSteps(J, startTabId, { job, docs, ensureDocs, s }) {
     }
 
     if (plan.page_type === 'requires_linkedin') return { status: 'skipped', reason: 'it can only be applied to through LinkedIn', answers };
-    if (plan.page_type === 'register' || plan.page_type === 'login') {
+    if ((plan.page_type === 'register' || plan.page_type === 'login') && !posting) {
       J.account = true;
       if (skipAccounts) return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
     }
