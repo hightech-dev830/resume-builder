@@ -121,6 +121,12 @@
         <p class="hint">The bot remembers which Jobright jobs it already handled (and the server checks Supabase too), so it never applies twice.</p>
         <div class="row"><button id="resetDone">Forget handled jobs</button><span id="doneCount" class="muted"></span></div>
       </div>
+      <div class="card">
+        <h2>Saved answers</h2>
+        <p class="hint">Standard questions (contact details, work authorization, sponsorship, EEO, "how did you hear") are answered from My info without the AI. Other screening questions the AI answered once are saved here and reused on later applications, so they cost nothing the next time. Job-specific questions ("Why this company?") are never reused.</p>
+        <div class="row"><button id="showAnswers">Show saved answers</button><button id="clearAnswers">Clear saved answers</button><span id="answerCount" class="muted"></span></div>
+        <div id="answerList" class="muted" style="max-height:260px;overflow:auto;font-size:12px;margin-top:8px"></div>
+      </div>
     </section>
 
     <!-- AI -->

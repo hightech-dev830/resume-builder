@@ -25,23 +25,25 @@ export const DEFAULT_SETTINGS = {
   }
 };
 
-// Personal details the bot types into forms. Filled from profile.local.json on install
-// (kept out of git) and editable on the options page.
+// Personal details the bot types into forms: Kevin's profile, so a new browser starts filled in.
+// The street address and the secrets (password, SSN last 4, date of birth) are NOT here, because
+// this repo is public: they come from profile.local.json (kept out of git) or the options page.
 export const DEFAULT_PROFILE = {
-  first_name: '', last_name: '', full_name: '', preferred_name: '',
-  email: '', phone: '', phone_country_code: '+1',
-  address_line1: '', city: '', state: '', state_full: '', zip: '', county: '', country: 'United States',
-  current_location: '',
-  linkedin: '', github: '', website: '',
-  current_title: '', current_company: '', years_experience: '',
-  highest_degree: '', degree_field: '', school: '', graduation_year: '',
-  work_authorized_us: 'Yes', needs_sponsorship: 'No', citizenship: '',
+  first_name: 'Kevin', last_name: 'Burgess', full_name: 'Kevin Burgess', preferred_name: 'Kevin',
+  email: 'kcburgess11@gmail.com', phone: '310-933-9572', phone_country_code: '+1',
+  address_line1: '', city: 'Rancho Palos Verdes', state: 'CA', state_full: 'California', zip: '90275', county: 'Los Angeles', country: 'United States',
+  current_location: 'Rancho Palos Verdes, CA, United States',
+  linkedin: 'https://www.linkedin.com/in/kevin-burgess-357505446/', github: 'https://github.com/hightech-dev830', website: 'https://portfolio-kg-red.vercel.app/',
+  current_title: 'Senior Software Engineer', current_company: '', years_experience: '11',
+  highest_degree: "Bachelor's Degree", degree_field: 'Computer Science', school: 'California State University Dominguez Hills', graduation_year: '2014',
+  work_authorized_us: 'Yes, authorized to work for any employer in the US', needs_sponsorship: 'No, now or in the future', citizenship: '',
   willing_to_relocate: 'No', remote_preference: 'Remote',
-  start_date: '', notice_period: '', salary_expectation: '',
-  gender: '', pronouns: '', sexual_orientation: '', race_ethnicity: '', hispanic_latino: '', veteran_status: '', disability_status: '',
+  start_date: '2026-12-01 (or immediately if the form asks for availability)', notice_period: 'Available immediately', salary_expectation: '',
+  gender: 'Male (Man)', pronouns: 'He/Him', sexual_orientation: 'Heterosexual', race_ethnicity: 'Asian (Not Hispanic or Latino)', hispanic_latino: 'No',
+  veteran_status: 'I am not a protected veteran', disability_status: 'No, I do not have a disability',
   sms_consent: 'Yes', how_heard: 'Jobright.ai', licenses_certifications: 'None',
-  other_info: '',
-  // secrets: never sent to the AI, only typed into the page
+  other_info: "Self-rating / comfort-level questions (for example \"Rate your comfort level translating ambiguous business requirements into technical architecture\", data warehouse architecture): choose \"Comfortable\", not the highest level.\n\"Have you led or owned the design of data models / data warehouse architecture?\": Yes.\nWilling to complete a take-home assignment or interview exercise: Yes.\nDisability questions: No. Sexual orientation: Heterosexual. Gender: Man / Male. Race: Asian.\nFor any other optional question with no answer in this profile, write N/A.",
+  // secrets: never sent to the AI, only typed into the page; never in git
   password: '', ssn_last4: '', dob: ''
 };
 
@@ -81,16 +83,18 @@ export async function saveProfile(profile) {
 // Also reloads it when the file's "_version" is newer than the saved profile's.
 export async function seedProfile() {
   const { profile } = await chrome.storage.local.get('profile');
+  let file = null;
   try {
     const res = await fetch(chrome.runtime.getURL('profile.local.json'));
-    if (!res.ok) return false;
-    const file = await res.json();
-    if (profile?.email && (Number(file._version) || 0) <= (Number(profile._version) || 0)) return false;
-    await saveProfile(file);
-    return true;
+    if (res.ok) file = await res.json();
   } catch {
-    return false;
+    // no profile.local.json in this copy (e.g. a fresh clone): the built-in profile is used
   }
+  const newer = file && (Number(file._version) || 0) > (Number(profile?._version) || 0);
+  if (profile?.email && !newer) return false;
+  // a new browser, or a profile saved empty: start from the built-in profile (+ the local file, if any)
+  await chrome.storage.local.set({ profile: { ...DEFAULT_PROFILE, ...(file || {}), _version: file?._version || profile?._version || 0 } });
+  return true;
 }
 
 function dobParts(dob) {

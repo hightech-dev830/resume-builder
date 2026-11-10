@@ -212,9 +212,25 @@ $('#resetDone').addEventListener('click', async () => {
 });
 
 async function showDoneCount() {
-  const { done } = await chrome.storage.local.get('done');
+  const { done, answers } = await chrome.storage.local.get(['done', 'answers']);
   $('#doneCount').textContent = `${Object.keys(done || {}).length} jobs handled so far`;
+  $('#answerCount').textContent = `${Object.keys(answers || {}).length} answers saved`;
 }
+
+const escHtml = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+$('#showAnswers').addEventListener('click', async () => {
+  const { answers } = await chrome.storage.local.get('answers');
+  const rows = Object.values(answers || {}).sort((a, b) => b.t - a.t);
+  $('#answerList').innerHTML = rows.length
+    ? rows.map((r) => `<div><b>${escHtml(r.q)}</b> → ${escHtml(r.answer)}</div>`).join('')
+    : 'No saved answers yet.';
+});
+$('#clearAnswers').addEventListener('click', async () => {
+  if (!confirm('Forget every saved answer? The AI will answer those questions again (and save them again).')) return;
+  await chrome.storage.local.remove('answers');
+  $('#answerList').innerHTML = '';
+  showDoneCount();
+});
 
 // ---------- save ----------
 $('#saveBtn').addEventListener('click', async () => {

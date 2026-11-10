@@ -3,6 +3,20 @@
 // opens the company application, fills it page by page with the AI planner, and finally
 // confirms "Yes, I applied!" on Jobright. Every bid is saved to Supabase by the server.
 import { getSettings, getProfile, seedProfile, profileForAI, secretsFor, rpc } from './lib/config.js';
+import { rulePlan, answersToSave } from './lib/rules.js';
+
+// Answers the AI gave to reusable screening questions, reused on later applications without the AI.
+async function savedAnswers() {
+  const { answers } = await chrome.storage.local.get('answers');
+  return answers || {};
+}
+async function rememberAnswers(add) {
+  if (!Object.keys(add).length) return;
+  const all = { ...(await savedAnswers()), ...add };
+  const keys = Object.keys(all);
+  if (keys.length > 3000) keys.sort((a, b) => all[a].t - all[b].t).slice(0, keys.length - 3000).forEach((k) => delete all[k]);
+  await chrome.storage.local.set({ answers: all });
+}
 
 const JOBRIGHT = /^https:\/\/([a-z]+\.)?jobright\.ai\//;
 const LINKEDIN = /^https:\/\/([a-z]+\.)?linkedin\.com\//i;
@@ -634,6 +648,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
   let captchaWaits = 0;
   let overrides = 0; // times the bot decided by itself instead of asking you
   let idle = 0; // pages that looked empty / still loading
+  let lastRulesKey = ''; // page handled by rules alone last step; if it is still there, ask the AI
 
   for (let step = 1; step <= s.behavior.stepLimit; step++) {
     if (stopRequested) return { status: 'stopped', answers };
@@ -668,13 +683,41 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
       if (probed.some((r) => r.result)) snap = await g(snapshotTab(tabId));
     }
 
-    setPhase('thinking');
-    const plan = await g(rpc('bot:plan', {
-      snapshot: snap, job, profile: aiProfile, resume: docs.resume || baseResume, coverLetter: docs.coverLetter,
-      history: history.slice(-8), files: { resume: true, cover: !docs.files || !!docs.files.cover }, bidId: docs.bid?.id
-    }));
-    setPhase('applying');
-    log(`Step ${step} [${plan.page_type}]: ${plan.summary}`);
+    // 1. rules first: the profile answers the usual questions and the obvious button needs no AI.
+    //    If the last rules-only step did not move the page on, let the AI look at the whole form.
+    const pageKey = `${snap.url}|${snap.fields.map((f) => f.id).join(',')}|${snap.buttons.map((b) => b.text).join(',')}`;
+    const forceAI = pageKey === lastRulesKey;
+    const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI });
+    const saved = await savedAnswers();
+    let rp = rulePlan(snap, ruleArgs());
+    // a real application form: write the tailored resume + cover letter before filling it
+    if (!docs.files && rp.page_type === 'application_form' && (rp.needsDocs || snap.fields.length >= 3)) {
+      log('  Application form found; preparing the resume and cover letter');
+      await g(ensureDocs());
+      rp = rulePlan(snap, ruleArgs());
+    }
+
+    let plan;
+    if (!rp.askAI) {
+      plan = { page_type: rp.page_type, summary: rp.summary, actions: rp.actions, next_click: rp.next_click, done: false, needs_human: '' };
+      lastRulesKey = pageKey;
+      log(`Step ${step} [${plan.page_type}] no AI: ${plan.summary}`);
+    } else {
+      // 2. the AI only sees the questions the rules could not answer
+      setPhase('thinking');
+      const aiSnap = { ...snap, fields: rp.aiFields };
+      const ai = await g(rpc('bot:plan', {
+        snapshot: aiSnap, prefilled: snap.fields.length - rp.aiFields.length, job, profile: aiProfile, resume: docs.resume || baseResume,
+        coverLetter: rp.aiFields.some((f) => /cover letter/i.test(`${f.label} ${f.question || ''}`)) ? docs.coverLetter : '',
+        history: history.slice(-5), files: { resume: true, cover: !docs.files || !!docs.files.cover }, bidId: docs.bid?.id
+      }));
+      setPhase('applying');
+      lastRulesKey = '';
+      const aiIds = new Set(ai.actions.map((a) => a.id));
+      plan = { ...ai, actions: [...rp.actions.filter((a) => !aiIds.has(a.id)), ...ai.actions], next_click: ai.next_click || rp.next_click };
+      rememberAnswers(answersToSave(snap, ai.actions)).catch(() => {});
+      log(`Step ${step} [${plan.page_type}]: ${plan.summary}${rp.actions.length ? ` (+${rp.actions.length} filled by rules)` : ''}`);
+    }
 
     if (plan.page_type === 'requires_linkedin') return { status: 'skipped', reason: 'it can only be applied to through LinkedIn', answers };
     if (s.behavior.skipAccounts && (plan.page_type === 'register' || plan.page_type === 'login')) {

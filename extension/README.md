@@ -20,7 +20,7 @@ If a step needs you (a captcha, an email verification code, or a question it can
 4. **Settings** (right-click the icon, then **Options**):
    - **Connection:** enter the server URL and sign in with the web app login (`jkr` / `jkr`).
    - **AI & prompts:** pick Claude, OpenAI or Gemini, paste the API key, and choose models. You can use a faster model for reading application pages. These settings are shared with the web app.
-   - **My info:** filled from `profile.local.json` on first load. Your password, SSN last 4 and date of birth never go to the AI; it sees placeholders, and the real values are typed straight into the page.
+   - **My info:** comes pre-filled with Kevin's profile (built into `lib/config.js`), so a new browser or a fresh clone starts filled in. Only the street address, password, SSN last 4 and date of birth are not built in (this repo is public): they come from `profile.local.json` when it is present, or you type them once in My info. Your password, SSN last 4 and date of birth never go to the AI; it sees placeholders, and the real values are typed straight into the page.
    - **Jobs & behavior:** remote only, posting age (default 24 h = today's jobs), maximum bids per run, template, auto-submit, cover letter, local copies.
 5. On Jobright, set your search filters (role, Remote, Past 24 hours). Then open the extension popup and press **Start bot**. To run the bot on one job only, open that job's Jobright page and press **Apply to this job**.
 
@@ -46,6 +46,13 @@ The AI planner prompt lives on the server in `lib/agent.js`, and the server meth
 - **Accounts:** jobs whose site asks you to sign up or sign in (Workday, iCIMS, Taleo…) are skipped, with no bid and no AI cost. Turn off "Skip jobs that need an account" in Settings → Jobs & behavior to let the bot create accounts with your email and password instead.
 - **LinkedIn:** jobs that send you to LinkedIn, or only allow Easy Apply / signing in with LinkedIn, are skipped.
 - **Job list:** reloaded every 5 minutes (setting). When no new jobs are left, the bot waits for the next reload instead of stopping.
+- **Low AI use:** each page is first handled by rules (`lib/rules.js`) with no AI:
+  - The "Apply" and "Autofill with Resume" buttons are clicked without the AI.
+  - Contact details, address, links, work authorization and sponsorship are filled from My info, along with relocation, the EEO questions, "how did you hear", uploads and consent boxes.
+  - The AI is only asked about the required questions that are left, and it sees only those fields. Usually that's the "Why this company?" kind of question.
+  - Other screening questions the AI answered once are saved (Settings → Jobs & behavior → Saved answers) and reused on later jobs.
+  - If a page doesn't move on after a rules-only step (a validation error, an unusual form), the next step goes to the AI with the whole form.
+  - For the AI calls that remain, choose a small model under Settings → AI & prompts → Agent model.
 - **AI cost:** the popup shows today's and the last 30 days' cost; Settings → AI & prompts shows totals per model and lets you set prices (US$ per 1M tokens) for models without a built-in price.
 - **Dropdowns:** the bot opens each custom dropdown once to read its real options, and the AI must pick one of them (your answer is mapped to the closest offered option, e.g. "Male (Man)" → "Male"). A value the form does not offer is never forced; the AI is told the options and picks again. "Other" is avoided; for "How did you hear about us" it picks Jobright, else Indeed, else another job board.
 - **Answers:** edit `profile.local.json` and raise its `_version` to push changes into the extension; changes made on the settings page stay until the version goes up again.
