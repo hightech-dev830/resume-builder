@@ -99,11 +99,6 @@ $('#addLinks').addEventListener('click', async () => {
     $('#msg').textContent = `${res.added} links added${res.dupes ? `, ${res.dupes} already in the list` : ''}.`;
   }
 });
-$('#workers').addEventListener('change', async () => {
-  const v = Math.min(4, Math.max(1, Number($('#workers').value) || 1));
-  $('#workers').value = v;
-  await saveSettings({ behavior: { workers: v } });
-});
 $('#retryLinks').addEventListener('click', () => send('clearLinks', { which: 'retry' }));
 $('#clearDone').addEventListener('click', () => send('clearLinks', { which: 'done' }));
 $('#clearAll').addEventListener('click', () => confirm('Remove every link that is not running?') && send('clearLinks', { which: 'all' }));
@@ -126,7 +121,6 @@ chrome.storage.local.get(['bot', 'links']).then((r) => {
 });
 getSettings().then((s) => {
   $('#signin').classList.toggle('hidden', !!s.token);
-  $('#workers').value = s.behavior.workers;
   if (s.token) showUsage();
 });
 

@@ -100,12 +100,43 @@
     };
   }
 
-  // "Apply Now" (opens the company's page) first; "Apply for this job" only scrolls on Jobicy.
+  const htmlText = (h) => {
+    const d = document.createElement('div');
+    d.innerHTML = String(h || '').replace(/<\/(p|li|h\d|div)>|<br\s*\/?>/gi, '$&\n');
+    return clean(d.textContent);
+  };
+
+  // Any other posting page (Himalayas, company career pages, …): title, company and the whole
+  // description after "Show more", plus whether the page already holds the application form.
+  async function generic() {
+    const expanded = await expand();
+    const ld = postingData();
+    const h1 = all('h1').find(visible);
+    const title = one(ld.title || h1?.textContent);
+    const company = one(ld.hiringOrganization?.name);
+    let about = ld.description ? htmlText(ld.description) : '';
+    if (about.length < 300) {
+      const main = document.querySelector('main, article, [role="main"]') || document.body;
+      about = clean(main.innerText);
+    }
+    const fields = all('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=search]), textarea, select')
+      .filter((el) => visible(el) && !el.closest('nav, header')).length;
+    const applyEl = findApply();
+    return {
+      title, company, summary: '', about: about.slice(0, 20000), skills: [], expanded, fields,
+      salary: one(ld.baseSalary?.value?.value || ''), remoteFrom: '',
+      applyText: applyEl ? one(applyEl.textContent) : '', applyHref: applyEl?.href || ''
+    };
+  }
+
+  // "Apply Now" that leads to the company's page first; "Apply for this job" only scrolls on Jobicy.
   function findApply() {
-    const cands = all('a, button, [role="button"]').filter((el) => /^apply\b/i.test(one(el.textContent)) && !/linkedin|indeed/i.test(one(el.textContent)));
-    const score = (el) => (/^apply now$/i.test(one(el.textContent)) ? 3 : 0)
-      + (el.href && !/jobicy\.com/i.test(el.href) && !/^javascript:|#/.test(el.getAttribute('href') || '#') ? 2 : 0)
-      + (el.target === '_blank' ? 1 : 0);
+    const here = location.hostname.replace(/^www\./, '');
+    const cands = all('a, button, [role="button"], input[type="submit"], input[type="button"]')
+      .filter((el) => visible(el) || el.tagName === 'A')
+      .filter((el) => { const t = one(el.textContent || el.value); return t.length < 50 && /^apply\b|\bapply (now|for this|on company|here)\b/i.test(t) && !/linkedin|indeed|filter/i.test(t); });
+    const ext = (el) => el.href && !/^javascript:|^#/.test(el.getAttribute('href') || '#') && !el.href.includes(here);
+    const score = (el) => (/^apply now$/i.test(one(el.textContent)) ? 3 : 0) + (ext(el) ? 2 : 0) + (el.target === '_blank' ? 1 : 0);
     return cands.sort((a, b) => score(b) - score(a))[0] || null;
   }
 
@@ -114,8 +145,8 @@
     if (!el) return { clicked: false };
     el.scrollIntoView({ block: 'center' });
     el.click();
-    return { clicked: true, text: one(el.textContent), href: el.href || '' };
+    return { clicked: true, text: one(el.textContent || el.value), href: el.href || '' };
   }
 
-  window.__abBoards = { jobicy, clickApply };
+  window.__abBoards = { jobicy, generic, clickApply };
 })();

@@ -9,10 +9,12 @@
     "scripting",
     "notifications",
     "alarms",
-    "sidePanel"
+    "sidePanel",
+    "activeTab"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://*/*",
+    "http://*/*"
   ],
   "background": {
     "service_worker": "background.js",
