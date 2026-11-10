@@ -642,16 +642,84 @@ async function processLink(w, item, s, win) {
       title: info.title || 'Job', company: info.company || host, location: info.location || '', salary: info.salary || '',
       remote: !!info.remote, url: item.url, jd: ''
     };
+
+    // a job board posting (Jobicy): read it the way you would, then press its Apply Now
+    let applyId = tab.id;
+    const board = BOARDS.find((b) => b.re.test(item.url));
+    if (board) {
+      const got = await g(readBoard(J, board, tab.id, win, detail));
+      if (got) applyId = got;
+    }
+
     J.set({ title: detail.title, company: detail.company });
     item.title = detail.title;
     item.company = detail.company;
     J.log(`Job: ${J.label}`);
-    await applyFlow(J, g, { applyId: tab.id, detail, s, source: 'links', sourceUrl: item.url, notes: 'Auto-bid from a job link.' });
+    await applyFlow(J, g, { applyId, detail, s, source: 'links', sourceUrl: item.url, notes: `Auto-bid from a job link (${host}).` });
   });
   item.status = J.outcome === 'attention' ? 'attention' : J.outcome;
   item.bidId = J.bidId;
   item.note = J.note || '';
   item.t = Date.now();
+}
+
+// ---------------- job boards ----------------
+
+// Job boards whose postings are read in full before applying; the company's application opens from "Apply Now".
+const BOARDS = [{ name: 'Jobicy', re: /^https:\/\/(www\.)?jobicy\.com\/jobs\//i, method: 'jobicy' }];
+
+// Fills `detail` from the board page (title, company, the full description, skills) and presses Apply Now.
+// Returns the tab with the company's application, or null to carry on in the board tab.
+async function readBoard(J, board, tabId, win, detail) {
+  await inject(tabId, 'content/boards.js');
+  const b = await call(tabId, '__abBoards', board.method).catch(() => null);
+  if (!b || !b.title) {
+    J.log(`  ${board.name}: could not read the posting; continuing on the page`, 'warn');
+    return null;
+  }
+  detail.title = b.title;
+  detail.company = b.company || detail.company;
+  if (b.remoteFrom) detail.location = `Remote (${b.remoteFrom})`;
+  if (b.salary) detail.salary = b.salary;
+  detail.remote = true;
+  detail.postingUrl = (await tabExists(tabId))?.url || detail.url;
+  detail.jd = [
+    `${b.title} at ${detail.company}`,
+    [b.remoteFrom && `Remote from: ${b.remoteFrom}`, b.employment && `Employment: ${b.employment}`, b.experience && `Experience: ${b.experience}`,
+      b.salary && `Salary: ${b.salary}`, b.department && `Department: ${b.department}`].filter(Boolean).join(' | '),
+    b.skills.length ? `Core skills: ${b.skills.join(', ')}` : '',
+    b.summary ? `Summary: ${b.summary}` : '',
+    b.about ? `About this role:\n${b.about}` : ''
+  ].filter(Boolean).join('\n\n');
+  J.log(`  ${board.name}: ${b.title} @ ${detail.company}; ${b.skills.length} core skills; description ${b.about.length.toLocaleString()} characters${b.expanded ? ' (after "Show more")' : ''}`);
+
+  // "Apply Now" opens the company's application in a new tab (sometimes in this tab)
+  if (!b.applyText) {
+    J.log(`  ${board.name}: no Apply button found; continuing on the page`, 'warn');
+    return null;
+  }
+  const t0 = Date.now();
+  await call(tabId, '__abBoards', 'clickApply').catch(() => null);
+  J.log(`  Pressed "${b.applyText}"`);
+  let applyId = await waitNewTab(tabId, t0, 8000);
+  if (!applyId) {
+    const now = await tabExists(tabId);
+    if (now && !board.re.test(now.url)) applyId = tabId; // the board sent this tab on
+    else if (b.applyHref && !board.re.test(b.applyHref)) applyId = (await chrome.tabs.create({ windowId: win.id, url: b.applyHref, active: true })).id;
+  }
+  if (!applyId) {
+    J.log(`  ${board.name}: Apply did not open the company page; continuing on the page`, 'warn');
+    return null;
+  }
+  if (applyId !== tabId) J.tabs.push(applyId);
+  // wait out redirects (tracking links) until the company page is there
+  for (let i = 0; i < 20; i++) {
+    const t = await tabExists(applyId);
+    if (t?.url && !board.re.test(t.url) && !/^about:|^chrome/.test(t.url)) break;
+    await sleep(500);
+  }
+  await showTab(applyId);
+  return applyId;
 }
 
 // ---------------- the application, shared by both modes ----------------
@@ -673,7 +741,7 @@ async function applyFlow(J, g, { applyId, detail, s, source, sourceUrl, notes })
   const page = await g(call(applyId, '__abAgent', 'pageText').catch(() => null));
   const job = {
     company: detail.company, role: detail.title, location: detail.location || 'Remote (US)', salary: detail.salary || '',
-    job_link: applyTab.url,
+    job_link: detail.postingUrl || applyTab.url, // the job board posting when there is one
     jd: [detail.jd, page && page.text.length > 300 ? `\n\n--- From the company posting (${new URL(page.url).host}) ---\n${page.text}` : ''].join('').slice(0, 30000)
   };
 
