@@ -148,5 +148,24 @@
     return { clicked: true, text: one(el.textContent || el.value), href: el.href || '' };
   }
 
-  window.__abBoards = { jobicy, generic, clickApply };
+  // The job on this page, like Jobright's scrapeDetail: title, company, location, salary and the job description.
+  async function scrapeDetail() {
+    const isJobicy = /(^|\.)jobicy\.com$/i.test(location.hostname);
+    const b = isJobicy ? await jobicy() : await generic();
+    const jd = [
+      b.title && `${b.title}${b.company ? ` at ${b.company}` : ''}`,
+      [b.remoteFrom && `Remote from: ${b.remoteFrom}`, b.employment && `Employment: ${b.employment}`, b.experience && `Experience: ${b.experience}`,
+        b.salary && `Salary: ${b.salary}`, b.department && `Department: ${b.department}`].filter(Boolean).join(' | '),
+      b.skills.length ? `Core skills: ${b.skills.join(', ')}` : '',
+      b.summary ? `Summary: ${b.summary}` : '',
+      b.about ? `About this role:\n${b.about}` : ''
+    ].filter(Boolean).join('\n\n');
+    return {
+      title: b.title, company: b.company, jd, salary: b.salary || '',
+      location: b.remoteFrom ? `Remote (${b.remoteFrom})` : '', remote: isJobicy,
+      formHere: !isJobicy && b.fields >= 3 // the link is the application form itself
+    };
+  }
+
+  window.__abBoards = { scrapeDetail, clickApply };
 })();

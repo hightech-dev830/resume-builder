@@ -573,56 +573,32 @@ function clearLinks(which) {
   return { total: linkQueue.length };
 }
 
-// Side-by-side windows, one per worker, so every job's tab stays visible (hidden tabs run slowly).
-async function workerWindow(w, n) {
-  const base = await chrome.windows.getLastFocused().catch(() => null);
-  const W = Math.max(900, base?.width || 1400);
-  const H = Math.max(700, base?.height || 900);
-  const width = Math.max(560, Math.floor(W / n));
-  const win = await chrome.windows.create({ url: 'about:blank', focused: false, left: (base?.left || 0) + w * width, top: base?.top || 0, width, height: H })
-    // a small screen refuses side-by-side bounds: let Chrome place the window
-    .catch(() => chrome.windows.create({ url: 'about:blank', focused: false }));
-  return { id: win.id, blank: win.tabs?.[0]?.id };
-}
-
-// The window you are looking at (a normal one), for the one-by-one run.
-async function currentWindow() {
-  const w = await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
-  if (w) return { id: w.id, blank: null };
-  return workerWindow(0, 1);
-}
-
-// Links are applied to one by one, in your current window, like Jobright mode.
+// Same loop as Jobright mode, except the next job comes from your link list instead of the Jobright board.
 async function runLinks() {
   const s = await withTemplate(await getSettings());
-  state.workers = 1;
   linkQueue.forEach((l) => { if (l.status === 'running') l.status = 'pending'; });
   saveLinks();
   setPhase('running');
-  log(`${linkQueue.filter((l) => l.status === 'pending').length} links to apply to, one by one`);
-  await linkWorker(0, s).catch((err) => log(`Stopped: ${err.message}`, 'error'));
+  log(`${linkQueue.filter((l) => l.status === 'pending').length} links to apply to`);
+  while (!stopRequested) {
+    const item = linkQueue.find((l) => l.status === 'pending');
+    if (!item) break;
+    item.status = 'running';
+    saveLinks();
+    await processLink(item, s);
+    saveLinks();
+    if (!stopRequested) await sleep((Number(s.behavior.linkDelaySec) || 0) * 1000);
+  }
   if (!stopRequested) {
     const c = state.counts;
     notify('Job links done', `${c.applied} applied, ${c.attention} need you, ${c.skipped} skipped, ${c.failed} failed`);
   }
 }
 
-async function linkWorker(w, s) {
-  let win = null;
-  while (!stopRequested) {
-    const item = linkQueue.find((l) => l.status === 'pending');
-    if (!item) break;
-    item.status = 'running';
-    saveLinks();
-    if (!win || !(await chrome.windows.get(win.id).catch(() => null))) win = await currentWindow();
-    await processLink(w, item, s, win);
-    saveLinks();
-    if (!stopRequested) await sleep((Number(s.behavior.linkDelaySec) || 0) * 1000);
-  }
-}
-
-async function processLink(w, item, s, win) {
-  const J = newJob(w, { title: item.title || new URL(item.url).hostname, company: item.company || '', url: item.url });
+// Same as processJobright: 1. open the job link in a new tab and read the job,
+// 2. click Apply -> the company's application (new tab), 3. the application.
+async function processLink(item, s) {
+  const J = newJob(0, { title: item.title || new URL(item.url).hostname, company: item.company || '', url: item.url });
   J.log(`Opening ${item.url}`);
   await runJob(J, s, async (g) => {
     // a link you already applied to (or left for yourself) is not done twice
@@ -634,104 +610,55 @@ async function processLink(w, item, s, win) {
       J.outcome = 'skipped';
       return;
     }
-    const tab = await chrome.tabs.create({ windowId: win.id, url: item.url, active: true });
-    J.tabs.push(tab.id);
-    if (win.blank) {
-      chrome.tabs.remove(win.blank).catch(() => {});
-      win.blank = null;
-    }
-    await g(settle(tab.id));
-    const info = (await g(call(tab.id, '__abAgent', 'jobInfo').catch(() => null))) || {};
-    const host = new URL((await tabExists(tab.id))?.url || item.url).hostname.replace(/^www\./, '');
-    const detail = {
-      title: info.title || 'Job', company: info.company || host, location: info.location || '', salary: info.salary || '',
-      remote: !!info.remote, url: item.url, jd: ''
-    };
 
-    // the posting: read the job description, then press its Apply button, which opens the company's
-    // application (usually a new tab), same as Jobright mode
-    let applyId = tab.id;
-    const board = BOARDS.find((b) => b.re.test(item.url)) || { name: host, method: 'generic', re: null };
-    const got = await g(readBoard(J, board, tab.id, win, detail));
-    if (got) applyId = got;
-
+    // 1. job page
+    const detailId = (await chrome.tabs.create({ url: item.url, active: true })).id;
+    J.tabs.push(detailId);
+    await g(settle(detailId));
+    await inject(detailId, 'content/boards.js');
+    const detail = (await g(call(detailId, '__abBoards', 'scrapeDetail').catch(() => null))) || {};
+    const info = (await g(call(detailId, '__abAgent', 'jobInfo').catch(() => null))) || {};
+    const host = new URL(item.url).hostname.replace(/^www\./, '');
+    detail.title = detail.title || info.title || 'Job';
+    detail.company = detail.company || info.company || host;
+    detail.location = detail.location || info.location || '';
+    detail.salary = detail.salary || info.salary || '';
+    detail.remote = detail.remote || !!info.remote;
+    detail.url = item.url;
+    detail.postingUrl = item.url;
     J.set({ title: detail.title, company: detail.company });
     item.title = detail.title;
     item.company = detail.company;
-    J.log(`Job: ${J.label}`);
+    J.log(`Job: ${J.label} (description ${(detail.jd || '').length.toLocaleString()} characters)`);
+
+    // 2. company application page
+    J.phase('opening_apply');
+    let applyId = null;
+    if (!LINKEDIN.test(item.url) && !detail.formHere) {
+      const t0 = Date.now();
+      const clicked = await g(call(detailId, '__abBoards', 'clickApply').catch(() => null));
+      if (clicked?.clicked) {
+        J.log(`  Clicked "${clicked.text}"`);
+        applyId = await g(waitNewTab(detailId, t0, 10000));
+      }
+    }
+    if (!applyId) applyId = detailId; // same-tab redirect, or the form is on this page
+    else J.tabs.push(applyId);
+    // wait out redirects to the real application page
+    for (let i = 0; i < 20; i++) {
+      const t = await tabExists(applyId);
+      if (t?.url && !/^about:|^chrome/.test(t.url)) break;
+      await g(sleep(500));
+    }
+    await focusTab(applyId);
+
+    // 3. the application (same as Jobright mode)
     await applyFlow(J, g, { applyId, detail, s, source: 'links', sourceUrl: item.url, notes: `Auto-bid from a job link (${host}).` });
   });
-  item.status = J.outcome === 'attention' ? 'attention' : J.outcome;
+  item.status = J.outcome;
   item.bidId = J.bidId;
   item.note = J.note || '';
   item.t = Date.now();
-}
-
-// ---------------- job boards ----------------
-
-// Job boards whose postings are read in full before applying; the company's application opens from "Apply Now".
-const BOARDS = [{ name: 'Jobicy', re: /^https:\/\/(www\.)?jobicy\.com\/jobs\//i, method: 'jobicy' }];
-
-// Fills `detail` from the board page (title, company, the full description, skills) and presses Apply Now.
-// Returns the tab with the company's application, or null to carry on in the board tab.
-async function readBoard(J, board, tabId, win, detail) {
-  const startUrl = (await tabExists(tabId))?.url || detail.url;
-  if (LINKEDIN.test(startUrl)) return null; // skipped by the application step
-  const onPosting = (u) => (board.re ? board.re.test(u) : u.split('#')[0] === startUrl.split('#')[0]);
-  await inject(tabId, 'content/boards.js');
-  const b = await call(tabId, '__abBoards', board.method).catch(() => null);
-  if (!b || (!b.title && !b.about)) {
-    J.log(`  ${board.name}: could not read the posting; continuing on the page`, 'warn');
-    return null;
-  }
-  detail.title = b.title || detail.title;
-  detail.company = b.company || detail.company;
-  if (b.remoteFrom) detail.location = `Remote (${b.remoteFrom})`;
-  if (b.salary) detail.salary = b.salary;
-  if (board.re) detail.remote = true;
-  detail.postingUrl = startUrl;
-  detail.jd = [
-    `${b.title} at ${detail.company}`,
-    [b.remoteFrom && `Remote from: ${b.remoteFrom}`, b.employment && `Employment: ${b.employment}`, b.experience && `Experience: ${b.experience}`,
-      b.salary && `Salary: ${b.salary}`, b.department && `Department: ${b.department}`].filter(Boolean).join(' | '),
-    b.skills.length ? `Core skills: ${b.skills.join(', ')}` : '',
-    b.summary ? `Summary: ${b.summary}` : '',
-    b.about ? `About this role:\n${b.about}` : ''
-  ].filter(Boolean).join('\n\n');
-  J.log(`  ${board.name}: ${detail.title} @ ${detail.company}; ${b.skills.length ? `${b.skills.length} core skills; ` : ''}description ${b.about.length.toLocaleString()} characters${b.expanded ? ' (after "Show more")' : ''}`);
-
-  // the link is already the application form: fill it right here
-  if (!board.re && b.fields >= 3) {
-    J.log('  The application form is on this page');
-    return null;
-  }
-  // "Apply" opens the company's application in a new tab (sometimes in this tab)
-  if (!b.applyText) {
-    J.log(`  ${board.name}: no Apply button found; continuing on the page`, 'warn');
-    return null;
-  }
-  const t0 = Date.now();
-  await call(tabId, '__abBoards', 'clickApply').catch(() => null);
-  J.log(`  Pressed "${b.applyText}"`);
-  let applyId = await waitNewTab(tabId, t0, 8000);
-  if (!applyId) {
-    const now = await tabExists(tabId);
-    if (now && !onPosting(now.url)) applyId = tabId; // the posting sent this tab on
-    else if (b.applyHref && !onPosting(b.applyHref)) applyId = (await chrome.tabs.create({ windowId: win.id, url: b.applyHref, active: true })).id;
-  }
-  if (!applyId) {
-    J.log(`  ${board.name}: Apply did not open another page; continuing on this page`, board.re ? 'warn' : 'info');
-    return null;
-  }
-  if (applyId !== tabId) J.tabs.push(applyId);
-  // wait out redirects (tracking links) until the company page is there
-  for (let i = 0; i < 20; i++) {
-    const t = await tabExists(applyId);
-    if (t?.url && !onPosting(t.url) && !/^about:|^chrome/.test(t.url)) break;
-    await sleep(500);
-  }
-  await showTab(applyId);
-  return applyId;
 }
 
 // ---------------- the application, shared by both modes ----------------
