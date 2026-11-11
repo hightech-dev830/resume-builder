@@ -96,7 +96,7 @@ $('#addLinks').addEventListener('click', async () => {
   if (res?.ok) {
     $('#linkInput').value = '';
     $('#msg').className = 'muted';
-    $('#msg').textContent = `${res.added} links added${res.dupes ? `, ${res.dupes} already in the list` : ''}.`;
+    $('#msg').textContent = `${res.added} links added${res.dupes ? ` (${res.dupes} of them repeats, applied again)` : ''}.`;
   }
 });
 $('#retryLinks').addEventListener('click', () => send('clearLinks', { which: 'retry' }));

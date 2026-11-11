@@ -553,6 +553,7 @@ const normUrl = (u) => {
   }
 };
 
+// Every link is added, also one that is already in the list or was applied to before (repeats are allowed).
 function addLinks(text) {
   const have = new Set(linkQueue.map((l) => l.url));
   const found = String(text || '').match(/https?:\/\/[^\s"'<>]+/g) || [];
@@ -561,7 +562,7 @@ function addLinks(text) {
   for (const raw of found) {
     const url = normUrl(raw.replace(/[),.;]+$/, ''));
     if (!url) continue;
-    if (have.has(url)) { dupes++; continue; }
+    if (have.has(url)) dupes++;
     have.add(url);
     linkQueue.push({ url, status: 'pending', t: Date.now() });
     added++;
@@ -606,15 +607,10 @@ async function processLink(item, s) {
   const J = newJob(0, { title: item.title || new URL(item.url).hostname, company: item.company || '', url: item.url });
   J.log(`Opening ${item.url}`);
   await runJob(J, s, async (g) => {
-    // a link you already applied to (or left for yourself) is not done twice
+    // a link applied to before is applied to again (repeats are allowed); just say so in the log
     const seen = await g(rpc('bot:seen', [item.url]).catch(() => []));
-    const prior = seen.find((r) => ['applied', 'needs_attention'].includes(r.bot_status));
-    if (prior) {
-      J.log(`Skipped: bid #${prior.id} for this link is already ${prior.bot_status === 'applied' ? 'applied' : 'waiting for you'}`);
-      state.counts.skipped++;
-      J.outcome = 'skipped';
-      return;
-    }
+    const prior = seen.find((r) => r.bot_status === 'applied');
+    if (prior) J.log(`  Applying again (bid #${prior.id} for this link is already applied)`);
 
     // 1. job page
     const detailId = (await chrome.tabs.create({ url: item.url, active: true })).id;
