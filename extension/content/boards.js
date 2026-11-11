@@ -37,7 +37,13 @@
   async function expand() {
     let n = 0;
     for (let round = 0; round < 3; round++) {
-      const more = byText('button, a, [role="button"]', /^(show|read|see|view) (more|full description|all)\b/i).filter(visible);
+      // only "Show more"-style expanders on this page; never "See all …" / "View all …" or any link to another page
+      const goesAway = (el) => {
+        const h = el.tagName === 'A' ? (el.getAttribute('href') || '') : '';
+        return !!h && !/^(#|javascript:)/i.test(h) && el.href.split('#')[0] !== location.href.split('#')[0];
+      };
+      const more = byText('button, a, [role="button"], summary', /^(show|read|see|view) (more|full description|full job description|the full description)\b/i)
+        .filter((el) => visible(el) && !goesAway(el) && !el.closest('nav, header, footer'));
       if (!more.length) break;
       for (const b of more) {
         b.click();
@@ -228,6 +234,12 @@
     return best;
   }
 
+  // Where the Apply button would go, without clicking it.
+  function applyInfo() {
+    const el = findApply();
+    return el ? { text: label(el), href: el.href || '' } : null;
+  }
+
   function clickApply() {
     const el = findApply();
     if (!el) return { clicked: false };
@@ -255,5 +267,5 @@
     };
   }
 
-  window.__abBoards = { scrapeDetail, clickApply, popup, closePopup, fieldCount };
+  window.__abBoards = { scrapeDetail, applyInfo, clickApply, popup, closePopup, fieldCount };
 })();

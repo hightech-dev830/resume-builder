@@ -131,6 +131,11 @@
         <div class="row"><button id="showAnswers">Show saved answers</button><button id="clearAnswers">Clear saved answers</button><span id="answerCount" class="muted"></span></div>
         <div id="answerList" class="muted" style="max-height:260px;overflow:auto;font-size:12px;margin-top:8px"></div>
       </div>
+      <div class="card">
+        <h2>Learned examples</h2>
+        <p class="hint">The AI reads worked examples before it answers a form: the applications in <code>data/examples.json</code> plus every new question it answered on later forms (kept here, newest first). Download them to check the answers and merge the good ones into <code>data/examples.json</code>.</p>
+        <div class="row"><button id="downloadLearned">Download learned examples (JSON)</button><button id="clearLearned">Clear learned examples</button><span id="learnedCount" class="muted"></span></div>
+      </div>
     </section>
 
     <!-- AI -->

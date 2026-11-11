@@ -6,6 +6,7 @@
 // write the tailored resume + cover letter when a real form appears, submit. Bids go to Supabase.
 import { getSettings, getProfile, seedProfile, profileForAI, secretsFor, rpc } from './lib/config.js';
 import { rulePlan, answersToSave, isFilled, postingWithApply } from './lib/rules.js';
+import { examplesForAI, learnFrom, mergeLearned } from './lib/examples.js';
 
 const JOBRIGHT = /^https:\/\/([a-z]+\.)?jobright\.ai\//;
 const LINKEDIN = /^https:\/\/([a-z]+\.)?linkedin\.com\//i;
@@ -34,6 +35,18 @@ function rememberAnswers(add) {
     const keys = Object.keys(all);
     if (keys.length > 5000) keys.sort((a, b) => all[a].t - all[b].t).slice(0, keys.length - 5000).forEach((k) => delete all[k]);
     await chrome.storage.local.set({ answers: all });
+  }).catch(() => {});
+  return answersChain;
+}
+
+// New questions the AI answered (free text too), kept as examples for the next forms.
+// Options > Jobs & behavior > Learned examples downloads them to merge into data/examples.json.
+const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
+function rememberLearned(add) {
+  if (!add.length) return answersChain;
+  answersChain = answersChain.then(async () => {
+    const { learned } = await chrome.storage.local.get('learned');
+    await chrome.storage.local.set({ learned: mergeLearned(learned || [], add) });
   }).catch(() => {});
   return answersChain;
 }
@@ -546,7 +559,7 @@ const normUrl = (u) => {
   try {
     const x = new URL(u.trim());
     x.hash = '';
-    for (const k of [...x.searchParams.keys()]) if (/^utm_|^(ref|source|src|gh_src|lever-source)$/i.test(k)) x.searchParams.delete(k);
+    // the link is opened exactly as you pasted it (some boards, e.g. Himalayas, use ?utm_source=api)
     return x.toString();
   } catch {
     return '';
@@ -618,7 +631,18 @@ async function processLink(item, s) {
     J.tabs.push(detailId);
     await g(settle(detailId));
     await inject(detailId, 'content/boards.js');
-    const detail = (await g(call(detailId, '__abBoards', 'scrapeDetail').catch(() => null))) || {};
+    let detail = (await g(call(detailId, '__abBoards', 'scrapeDetail').catch(() => null))) || {};
+    // still on the job page? (a link on the page may have taken the tab elsewhere): go back to the link once
+    const pathOf = (u) => { try { const x = new URL(u); return x.hostname.replace(/^www\./, '') + x.pathname.replace(/\/+$/, ''); } catch { return ''; } };
+    const sameUrl = (a, b) => pathOf(a) === pathOf(b);
+    const onPage = await tabExists(detailId);
+    if (onPage && !sameUrl(onPage.url, item.url)) {
+      J.log(`  Left the job page (${onPage.url.slice(0, 80)}); opening the link again`, 'warn');
+      await chrome.tabs.update(detailId, { url: item.url });
+      await g(settle(detailId));
+      await inject(detailId, 'content/boards.js');
+      detail = (await g(call(detailId, '__abBoards', 'scrapeDetail').catch(() => null))) || {};
+    }
     const info = (await g(call(detailId, '__abAgent', 'jobInfo').catch(() => null))) || {};
     const host = new URL(item.url).hostname.replace(/^www\./, '');
     detail.title = detail.title || info.title || 'Job';
@@ -651,6 +675,14 @@ async function processLink(item, s) {
       for (let attempt = 1; attempt <= 2 && !applyId; attempt++) {
         const t0 = Date.now();
         const before = (await tabExists(detailId))?.url || item.url;
+        // the board's own sign-up / login (Himalayas when you are logged out): never sign up on a job board,
+        // so this is checked before clicking (a company's own account page is fine: the application may need one)
+        const boardHost = new URL(item.url).hostname;
+        const info = await call(detailId, '__abBoards', 'applyInfo').catch(() => null);
+        const toBoardAccount = (h) => { try { const u = new URL(h); return u.hostname === boardHost && /sign-?up|sign-?in|register|log-?in/i.test(u.pathname); } catch { return false; } };
+        if (info && JOB_BOARDS.test(boardHost) && toBoardAccount(info.href)) {
+          return skip(`${boardHost.replace(/^www\./, '')} wants you signed in before Apply: sign in to it in this browser once, then retry`);
+        }
         const clicked = await g(call(detailId, '__abBoards', 'clickApply').catch(() => null));
         if (!clicked?.clicked) { noButton = attempt === 1; break; }
         J.log(`  Clicked "${clicked.text}"`);
@@ -687,6 +719,9 @@ async function processLink(item, s) {
   item.note = J.note || '';
   item.t = Date.now();
 }
+
+// Job boards (they list other companies' jobs): no account is ever made on these.
+const JOB_BOARDS = /(^|\.)(himalayas\.app|jobicy\.com|devitjobs\.(com|us)|remoteok\.(com|io)|weworkremotely\.com|remotive\.(com|io)|wellfound\.com|builtin\.com|dice\.com|ziprecruiter\.com|simplyhired\.com|monster\.com|careerbuilder\.com|glassdoor\.com|workingnomads\.com|remote\.co|jobspresso\.co|nodesk\.co|4dayweek\.io|otta\.com|welcometothejungle\.com)$/i;
 
 // What an Apply click on the job page did: opened a new tab, moved this tab to another page,
 // or showed a pop-up / form on the page. Waits up to 10 s.
@@ -1057,7 +1092,7 @@ async function runSteps(J, startTabId, { job, docs, ensureDocs, s }) {
     const pageKey = `${snap.url}|${snap.fields.map((f) => f.id).join(',')}|${snap.buttons.map((b) => b.text).join(',')}`;
     const forceAI = pageKey === lastRulesKey;
     const saved = await savedAnswers();
-    const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI });
+    const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI, jobSalary: job.salary });
     let rp = rulePlan(snap, ruleArgs());
     // a real application form: write the tailored resume + cover letter before filling it
     if (!docs.files && !snap.fields.some((f) => f.kind === 'password') && rp.page_type === 'application_form' && (rp.needsDocs || snap.fields.length >= 3)) {
@@ -1076,16 +1111,20 @@ async function runSteps(J, startTabId, { job, docs, ensureDocs, s }) {
       // 2. the AI only sees the questions the rules could not answer
       J.phase('thinking');
       const aiSnap = { ...snap, fields: rp.aiFields };
+      // the example knowledge base (data/examples.json + what earlier forms taught it) for these questions
+      const { learned } = await chrome.storage.local.get('learned');
+      const examples = examplesForAI(rp.aiFields, { url: snap.url, profile: aiProfile, learned: learned || [] });
       const ai = await g(rpc('bot:plan', {
         snapshot: aiSnap, prefilled: snap.fields.length - rp.aiFields.length, job, profile: aiProfile, resume: docs.resume || baseResume,
         coverLetter: rp.aiFields.some((f) => /cover letter/i.test(`${f.label} ${f.question || ''}`)) ? docs.coverLetter : '',
-        history: history.slice(-5), files: { resume: true, cover: !docs.files || !!docs.files.cover }, bidId: docs.bid?.id
+        history: history.slice(-5), files: { resume: true, cover: !docs.files || !!docs.files.cover }, bidId: docs.bid?.id, examples
       }));
       J.phase('applying');
       lastRulesKey = '';
       const aiIds = new Set(ai.actions.map((a) => a.id));
       plan = { ...ai, actions: [...rp.actions.filter((a) => !aiIds.has(a.id)), ...ai.actions], next_click: ai.next_click || rp.next_click };
       rememberAnswers(answersToSave(snap, ai.actions));
+      rememberLearned(learnFrom(snap, ai.actions, { host: hostOf(snap.url), company: job.company }));
       J.log(`Step ${step} [${plan.page_type}]: ${plan.summary}${rp.actions.length ? ` (+${rp.actions.length} filled by rules)` : ''}`);
     }
 

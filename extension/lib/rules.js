@@ -2,6 +2,8 @@
 // Works on the same page snapshot the AI gets and returns actions in the AI's format,
 // so the AI is only asked about what is left (or not at all).
 
+import { EXAMPLES, fillProfile } from './examples.js';
+
 export const norm = (s) => String(s || '').toLowerCase().replace(/[_*✱:]/g, ' ').replace(/\s+/g, ' ').trim();
 
 // "how did you hear about us" style answers, best first; "Other" / "Referral" are never picked
@@ -82,7 +84,7 @@ const RULES = [
   // --- links ---
   { re: /linkedin/, text: v('linkedin') },
   { re: /github/, text: v('github') },
-  { re: /website|portfolio|personal (site|url|page)|other url|\bblog\b/, text: (p) => p.website || p.github },
+  { re: /website|portfolio|personal (site|url|page)|other url|\bblog\b/, not: /employer|company'?s? (web)?site|organi[sz]ation/, text: (p) => p.website || p.github },
   // --- background ---
   { re: /current (company|employer)|most recent (company|employer)/, text: v('current_company') },
   { re: /current (job )?title|current (role|position)|most recent (job )?title/, text: v('current_title') },
@@ -103,6 +105,20 @@ export const questionKey = (f) => norm(f.question || f.label).replace(/[^a-z0-9 
 function ruleFor(f) {
   const t = fieldText(f);
   return RULES.find((r) => r.re.test(t) && !(r.not && r.not.test(t)));
+}
+
+// The example answer for a question (lib/examples.js), if there is one.
+function exampleFor(f) {
+  const t = norm(f.question || f.label || f.name || '');
+  return t ? EXAMPLES.find((e) => e.q && e.q.test(t) && !(e.not && e.not.test(t))) : null;
+}
+
+// Today's date as forms want it: 2026-11-11 for a date picker, else 11/11/2026.
+function today(iso) {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return iso ? `${d.getFullYear()}-${mm}-${dd}` : `${mm}/${dd}/${d.getFullYear()}`;
 }
 
 // The posting's apply button, including job boards (Jobicy, Himalayas, Remote OK, We Work Remotely…)
@@ -135,7 +151,18 @@ function findButton(buttons, patterns) {
 /**
  * @returns {{ actions, next_click, page_type, summary, askAI, aiFields, needsDocs, handled }}
  */
-export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, coverLetter = '', forceAI = false }) {
+// The middle of the job's posted yearly pay range, rounded to 5,000 ("$180K – $199K" -> 190000). '' when none.
+export function salaryMidpoint(text) {
+  const nums = [...String(text || '').matchAll(/\$?\s*(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(k\b)?/gi)]
+    .map((m) => parseFloat(m[1].replace(/,/g, '')) * (m[2] ? 1000 : 1))
+    .filter((n) => n >= 30000 && n <= 1000000);
+  if (!nums.length) return '';
+  return String(Math.round((Math.min(...nums) + Math.max(...nums)) / 2 / 5000) * 5000);
+}
+
+export function rulePlan(snap, { profile, saved = {}, uploadCover = true, coverLetter = '', forceAI = false, jobSalary = '' }) {
+  // salary: the posting's own range when it shows one, otherwise the profile's figure
+  const p = { ...profile, salary_expectation: salaryMidpoint(jobSalary) || profile.salary_expectation || '' };
   const actions = [];
   const leftover = [];
   let wantsCoverText = false;
@@ -161,7 +188,13 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
         else handled = false;
       }
     } else if (f.kind === 'checkbox') {
-      if (CONSENT.test(t)) {
+      // your examples first: "pick one" checkbox lists (disability, …) and boxes left unticked
+      const own = norm(f.label || q);
+      const ex = EXAMPLES.find((e) => (e.check && e.check.test(own)) || (e.never && e.never.test(own)));
+      if (ex) {
+        handled = true;
+        if (ex.check && !f.checked) act = { op: 'check' };
+      } else if (CONSENT.test(t)) {
         handled = true;
         if (!f.checked) act = { op: 'check' };
       }
@@ -170,7 +203,31 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
       wantsCoverText = true;
       if (!filled && coverLetter) act = { op: 'fill', value: coverLetter };
     } else {
-      const rule = ruleFor(f);
+      // your examples first (lib/examples.js)
+      const ex = exampleFor(f);
+      if (ex?.leave) {
+        handled = true;
+        if (filled) act = { op: 'fill', value: '' };
+      } else if (ex?.today) {
+        handled = true;
+        if (!filled) act = { op: 'fill', value: today(f.kind === 'date') };
+      } else if (ex?.answer) {
+        const prefs = [].concat(ex.answer);
+        if (isChoice(f)) {
+          const opt = pickOption(f.options, prefs);
+          if (opt) {
+            handled = true;
+            if (norm(f.value) !== norm(opt)) act = { op: f.kind === 'combobox' ? 'choose' : 'select', value: opt, question: q };
+          }
+        } else if ((TEXTY.has(f.kind) || f.kind === 'textarea') && ex.text) {
+          const val = fillProfile(ex.text, p);
+          if (val) {
+            handled = true;
+            if (!filled) act = { op: f.kind === 'combobox' ? 'choose' : 'fill', value: val, question: q };
+          }
+        }
+      }
+      const rule = handled ? null : ruleFor(f);
       if (rule?.skip) handled = true;
       else if (rule && isChoice(f) && rule.choose) {
         const opt = pickOption(f.options, rule.choose(p));

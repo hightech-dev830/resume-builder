@@ -1,0 +1,160 @@
+{
+  "about": "Example answers from applications Kevin filled in correctly. 'rules' are answered straight away without the AI (they beat the built-in rules). 'applications' are worked examples the AI reads before it answers a form (the closest questions are sent with each page). 'notes' and 'ats' teach the AI how to work. Patterns are lower-case regular expressions; in 'pick', a value starting and ending with / is a pattern, anything else is the exact option. Profile values are written as {profile.key} and come from My info, so the street address and other private details never live in this file. To add an application: copy one block in 'applications', and add a line to 'rules' for any question that always has the same answer.",
+  "version": 2,
+
+  "notes": [
+    "Every REQUIRED field must be filled before pressing Next / Submit. Optional fields: fill them when the answer is known; never fill only part of an optional group (for example only the website of an optional 'Job 2'): either the whole group from the resume or none of it.",
+    "Technical-experience questions (do you have experience with X, describe a system you built, how do you use AI tools, testing, distributed systems): answer at once from the resume. Yes when the resume shows the skill (Node.js, TypeScript, Python, React, PostgreSQL, AWS, Azure, Kubernetes, Go and the others listed). Free text: 2-5 plain first-person sentences with real projects and numbers from the resume.",
+    "Salary / desired compensation: if the job shows a pay range, give its midpoint (a plain number such as 175000). If no range is shown, give a comfortable market figure for a senior engineer in that location, never a low number.",
+    "City is always Rancho Palos Verdes (not Rolling Hills). Location typeaheads: 'Rancho Palos Verdes, California, United States'.",
+    "Employer website in an employment-history section is the employer's own site (Jaburg & Wilk, P.C. -> https://www.jaburgwilk.com), never the candidate's portfolio.",
+    "Employment dates: follow the format the form shows (MM/YY to MM/YY -> 04/24 to 10/26). Dates come from the resume.",
+    "Education: Bachelor's Degree in Computer Science, California State University Dominguez Hills. Pick 'Bachelor's Degree' and 'Computer Science' from the offered options.",
+    "Never click 'Apply with LinkedIn' or 'Sign in with LinkedIn/Google'; they are not needed."
+  ],
+
+  "ats": [
+    {
+      "name": "Workday",
+      "url": "myworkdayjobs\\.com|workday",
+      "flow": "Create an account on the company's Workday site (email + {{password}}) or sign in -> Autofill with Resume -> My Information (How did you hear: Indeed; previously employed: No; name, address, phone device type Personal Cell, country phone code United States of America (+1)) -> My Experience (check the work history and education the resume filled in, add Languages: English, all proficiencies 4 - Advanced) -> Application Questions -> Voluntary Disclosures (veteran, gender, ethnicity, terms checkbox) -> Self Identify (name, today's date, disability: No) -> Review -> Submit. Press 'Save and Continue' after each step. Leave Employee ID empty."
+    },
+    {
+      "name": "Ashby",
+      "url": "ashbyhq\\.com|jobs\\.ashby",
+      "flow": "One page under the 'Application' tab. 'Autofill from resume' uploads the resume and fills name, email and location; then answer the questions top to bottom (Yes/No buttons are radio choices), fill the employment-history block for every required job, and press Submit Application."
+    },
+    {
+      "name": "Jobvite",
+      "url": "jobvite\\.com",
+      "flow": "Add Resume (upload) -> Personal Information (first, last, preferred first name, email, home phone, address, city, state, zip) -> Desired Compensation -> Additional Files: upload the cover letter -> Next -> further pages of questions -> Submit. Skip 'Apply With LinkedIn'."
+    },
+    {
+      "name": "Greenhouse",
+      "url": "greenhouse\\.io|grnh\\.se",
+      "flow": "One page: first, last, email, country +1 and phone, Resume/CV Attach, Education (school, degree, discipline) dropdowns, the company's questions, Website and LinkedIn, then Voluntary Self-Identification (gender, Hispanic/Latino, race, veteran, disability) -> Submit application."
+    }
+  ],
+
+  "rules": [
+    { "from": "College Board (Workday)", "q": "how did you hear|hear about us", "pick": ["Indeed", "/^indeed/", "/job ?board/", "/linkedin/"] },
+    { "from": "College Board (Workday)", "q": "(have you|were you) (ever )?(been )?(employed|worked) (by|for|at|with)|employee or a contractor", "not": "how many|companies|years", "pick": ["No", "/^no\\b/"] },
+    { "from": "College Board (Workday)", "q": "phone device type|phone type", "pick": ["Personal Cell", "/mobile|cell/"] },
+    { "from": "College Board (Workday)", "q": "country phone code|phone country code|country code", "pick": ["United States of America (+1)", "/united states.*\\+1/", "/\\+1\\b/"] },
+    { "from": "College Board (Workday)", "never": "^i have a preferred name$" },
+    { "from": "College Board (Workday)", "q": "^language\\b|^languages? \\d|^language$", "not": "proficien|comprehension|overall|reading|speaking|writing|programming", "pick": ["English", "/^english/"] },
+    { "from": "College Board (Workday)", "q": "^(comprehension|overall|reading|speaking|writing)\\b|language proficiency|proficiency level", "pick": ["4 - Advanced", "/advanced/", "/fluent/", "/native/"] },
+    { "from": "College Board (Workday)", "q": "related to,? (or .{0,40})?(an?|any) (current )?(employee|member|person)|close personal relationship with an? (employee|member)|relatives? (who )?work", "pick": ["No", "/^no\\b/"] },
+    { "from": "College Board (Workday)", "q": "sponsor", "not": "without", "pick": ["No", "/^no\\b/"] },
+    { "from": "College Board (Workday), Canonical (Greenhouse)", "q": "(willing|able).{0,30}travel|travel (out of town|over ?night)|overnight travel|meet in person|international travel", "pick": ["No", "/^no\\b/"] },
+    { "from": "College Board (Workday)", "q": "select \"?yes\"? to confirm|confirm your understanding|understanding and agreement", "pick": ["Yes", "/^yes\\b/"] },
+    { "from": "College Board (Workday), Canonical (Greenhouse)", "q": "veteran status|protected veteran", "pick": ["I am not a Veteran", "I am not a protected veteran", "/not a (protected )?veteran/", "/^i am not/", "/^no\\b/"] },
+    { "from": "College Board (Workday)", "q": "employee id|employee number|worker id|associate id", "leave": true },
+    { "from": "College Board (Workday)", "q": "^date\\b|today'?s date|date signed|signature date", "not": "birth|start|availab|graduat|from|to \\(|expected", "today": true },
+    { "from": "College Board (Workday)", "check": "^no,? i (do not|don'?t) have a disability" },
+    { "from": "College Board (Workday)", "never": "^yes,? i have a disability|^i do not want to answer" },
+    { "from": "Canonical (Greenhouse)", "q": "^disability status", "pick": ["/^no,? i (do not|don'?t) have a disability/", "/^no\\b/"] },
+
+    { "from": "GridUnity (Ashby)", "q": "describes your work authori[sz]ation status|work authori[sz]ation status", "pick": ["/authori[sz]ed to work.*(do not|don'?t) require sponsorship/", "/do not require sponsorship/"] },
+    { "from": "GridUnity (Ashby)", "q": "years of (professional )?software (development|engineering) experience|years of professional (software|development) experience", "pick": ["/^10\\s*\\+/", "/10\\+|10 or more|more than 10|over 10/", "/^(7|8|9)/"], "text": "{profile.years_experience}" },
+    { "from": "GridUnity (Ashby)", "q": "years.{0,40}(senior|lead|staff) role|senior role where you mentored|years.{0,30}mentor", "pick": ["/^3\\s*\\+/", "/3\\+|3 or more|more than 3/", "/^(3|4|5)/"] },
+    { "from": "NRC Health (Jobvite)", "q": "^preferred first name|preferred name", "not": "^i have", "text": "{profile.first_name}" },
+    { "from": "NRC Health (Jobvite)", "q": "address line 2|address 2", "leave": true },
+    { "from": "Canonical (Greenhouse)", "q": "agree to use only my own words|use of ai or other generated content", "pick": ["No", "/^no\\b/"] },
+    { "from": "Canonical (Greenhouse)", "q": "how did you perform in (mathematics|math|your native language|english)", "pick": ["Cannot recall", "/cannot recall|can'?t recall|do not recall|don'?t remember/", "/prefer not/"] },
+    { "from": "Canonical (Greenhouse)", "q": "bachelor'?s (university )?degree result|degree result|university (grade|result)|\\bgpa\\b|grade point average", "not": "high school", "text": "Bachelor's Degree in Computer Science, California State University Dominguez Hills, 2004. GPA approximately 3.2/4.0 (US grading system: 4.0 = A, 3.0 = B, 2.0 = C, 1.0 = D)." },
+    { "from": "Canonical (Greenhouse)", "q": "rationale or evidence for the high school performance|justify your selections", "text": "I completed high school coursework with strong performance in math and language. I do not have specific rank or score details available, so I am providing the most accurate summary I can." },
+    { "from": "Canonical (Greenhouse)", "q": "how many companies have you worked for|number of companies|companies have you worked", "pick": ["/^10\\s*\\+/", "/10\\+|10 or more|more than 10/"] },
+    { "from": "Canonical (Greenhouse)", "q": "which country do you currently work|country do you currently (work|live|reside)|current location from the dropdown", "pick": ["/^united states.*california/", "United States of America", "/^united states/"] },
+    { "from": "Canonical (Greenhouse)", "q": "read and agree to .{0,60}(privacy|recruitment)|privacy notice and privacy policy", "pick": ["/acknowledge|confirm/", "/^(i )?agree/", "/^yes\\b/"] },
+    { "from": "Canonical (Greenhouse)", "q": "nationality|citizenship", "not": "dual|other than", "pick": ["American", "/^american/", "/united states/"] }
+  ],
+
+  "applications": [
+    {
+      "company": "College Board", "ats": "Workday", "date": "2026-11-11", "role": "Lead Data Platform Engineer",
+      "qa": [
+        { "q": "How Did You Hear About Us?", "type": "combobox", "a": "Indeed" },
+        { "q": "Have you been employed by the College Board, either as an Employee or a Contractor?", "type": "radio", "a": "No" },
+        { "q": "Name / Address / Phone", "type": "text", "a": "{profile.first_name} {profile.last_name}, {profile.address_line1}, Rancho Palos Verdes, California, 90275, {profile.phone}" },
+        { "q": "Phone Device Type", "type": "select", "a": "Personal Cell" },
+        { "q": "Country Phone Code", "type": "combobox", "a": "United States of America (+1)" },
+        { "q": "I have a preferred name", "type": "checkbox", "a": "(unticked)" },
+        { "q": "Work Experience 1, 2, ...: Job Title, Company, Location, From, To, Role Description", "type": "group", "a": "From the resume. Fill every field of every job, Location included; the description is the job's bullet points, never a LinkedIn link." },
+        { "q": "Language / Comprehension / Overall / Reading / Speaking / Writing", "type": "select", "a": "English / 4 - Advanced (all five)" },
+        { "q": "Are you related to, or do you have a close personal relationship with an employee of the College Board?", "type": "select", "a": "No" },
+        { "q": "Will you now or in the future require College Board to sponsor you (H-1B visa, etc.)?", "type": "select", "a": "No" },
+        { "q": "Are you willing and able to travel out of town or over night for this position as necessary?", "type": "select", "a": "No" },
+        { "q": "Please select \"Yes\" to confirm your understanding and agreement.", "type": "select", "a": "Yes" },
+        { "q": "Veteran Status", "type": "select", "a": "I am not a Veteran" },
+        { "q": "Gender / Ethnicity", "type": "select", "a": "Male / Asian (Not Hispanic or Latino)" },
+        { "q": "I have read and agree to the terms and conditions", "type": "checkbox", "a": "(ticked)" },
+        { "q": "Self Identify: Name / Employee ID (if applicable) / Date", "type": "text", "a": "Kevin Burgess / (empty) / today's date MM/DD/YYYY" },
+        { "q": "Disability: Yes, I have a disability / No, I do not have a disability and have not had one in the past / I do not want to answer", "type": "checkbox", "a": "No, I do not have a disability and have not had one in the past" }
+      ]
+    },
+    {
+      "company": "GridUnity", "ats": "Ashby", "date": "2026-11-11", "role": "Senior Software Engineer",
+      "qa": [
+        { "q": "Name (First and Last name)", "type": "text", "a": "Kevin Burgess" },
+        { "q": "Location", "type": "combobox", "a": "Rancho Palos Verdes, California, United States" },
+        { "q": "Portfolio / Website", "type": "url", "a": "{profile.website}" },
+        { "q": "GitHub Profile", "type": "url", "a": "{profile.github}" },
+        { "q": "Are you legally authorized to work in the United States?", "type": "radio", "a": "Yes" },
+        { "q": "Which of the following best describes your work authorization status?", "type": "radio", "a": "I am authorized to work in the United States and do not require sponsorship now or in the future." },
+        { "q": "How many years of professional software development experience do you have?", "type": "radio", "options": ["Less than 3", "3-4 years", "5-6 years", "7-9 years", "10+ years"], "a": "10+ years" },
+        { "q": "How many of those years were you in a Senior role where you mentored junior engineers, led technical initiatives, and drove team-wide improvements?", "type": "radio", "options": ["0 years", "1-2 years", "3+ years"], "a": "3+ years" },
+        { "q": "Do you have professional, production experience with at least one of the following backend technologies: Node.js, TypeScript, Java, Python, or C#?", "type": "radio", "a": "Yes", "how": "ai: the resume shows Node.js, TypeScript and Python" },
+        { "q": "Do you have professional, production experience with React or a similar modern JavaScript framework (Vue, Angular, Svelte)?", "type": "radio", "a": "Yes", "how": "ai: the resume shows React" },
+        { "q": "Do you have professional experience with PostgreSQL or another relational database?", "type": "radio", "a": "Yes" },
+        { "q": "Describe a full-stack system or feature you designed and built that had to scale. What was the biggest technical tradeoff you made, and what was the outcome?", "type": "textarea", "how": "ai", "a": "I designed and led a React and TypeScript matter workspace backed by Node.js GraphQL APIs and PostgreSQL for a law firm. The system consolidated tasks, deadlines, and document activity for 145 users and had to support tenant-aware permissions and high-volume document workflows. The biggest tradeoff was balancing a flexible GraphQL API with strict RBAC and data access rules." },
+        { "q": "How do you use AI tools in your day-to-day work today? If you've built or integrated LLM features into a production system, tell us what you built and what you learned.", "type": "textarea", "how": "ai", "a": "(2-5 sentences from the resume: the tools used daily and any LLM feature built, with what was learned)" },
+        { "q": "(Job 1) Employer Name", "type": "text", "a": "Jaburg & Wilk, P.C.", "how": "resume" },
+        { "q": "(Job 1) Employer Website", "type": "url", "a": "https://www.jaburgwilk.com", "how": "the employer's own site, not the portfolio" },
+        { "q": "(Job 1) Employment Dates (MM/YY to MM/YY)", "type": "text", "a": "04/24 to 10/26", "how": "resume, in the format the form asks for" },
+        { "q": "(Job 1) Job Title", "type": "text", "a": "Senior Software Engineer", "how": "resume" },
+        { "q": "(Job 1) What product or service did the company provide?", "type": "textarea", "a": "A legal services firm providing litigation, transactions, and related client support services, with internal software used to manage matters, tasks, deadlines, and documents." },
+        { "q": "(Job 1) Approximately how many employees did the company have?", "type": "text", "a": "145" },
+        { "q": "(Job 1) What part of this role best relates to the work described in the role at GridUnity?", "type": "textarea", "how": "ai", "a": "I led the design and delivery of a full-stack matter workspace with React, TypeScript, Node.js GraphQL APIs, PostgreSQL, and event-driven document intake. The work involved multi-tenant RBAC, workflow automation, and data integrity controls, which are directly relevant to building reliable, scalable systems like GridUnity's platform." },
+        { "q": "(Job 2) Employer Name / Website / Dates / Job Title / ... (optional)", "type": "group", "a": "Fill the whole group from the second most relevant job in the resume, or leave all of it empty. Never only the website." }
+      ]
+    },
+    {
+      "company": "NRC Health", "ats": "Jobvite", "date": "2026-11-11", "role": "Sr. Software Engineer",
+      "qa": [
+        { "q": "Add Resume", "type": "file", "a": "the tailored resume PDF (Kevin_Burgess_<Company>_Resume.pdf)" },
+        { "q": "First Name / Last Name / Preferred First Name", "type": "text", "a": "Kevin / Burgess / Kevin" },
+        { "q": "Home Phone", "type": "tel", "a": "{profile.phone}" },
+        { "q": "Address / Address Line 2", "type": "text", "a": "{profile.address_line1} / (empty)" },
+        { "q": "City / State / Zip", "type": "text", "a": "Rancho Palos Verdes / California / 90275" },
+        { "q": "Desired Compensation", "type": "text", "a": "the midpoint of the job's posted range as a plain number; without a range a comfortable senior market figure", "how": "job-specific" },
+        { "q": "Apply With LinkedIn", "type": "button", "a": "(do not click)" },
+        { "q": "Additional Files (optional)", "type": "file", "a": "the tailored cover letter PDF" }
+      ]
+    },
+    {
+      "company": "Canonical", "ats": "Greenhouse", "date": "2026-11-11", "role": "Software Engineer",
+      "qa": [
+        { "q": "Country / Phone", "type": "combobox", "a": "+1 / (310) 933-9572" },
+        { "q": "School / Degree / Discipline", "type": "combobox", "a": "California State University - Dominguez Hills / Bachelor's Degree / Computer Science" },
+        { "q": "During this application process I agree to use only my own words. I understand that plagiarism, the use of AI or other generated content will disqualify my application.", "type": "select", "a": "No" },
+        { "q": "How did you perform in mathematics at high school?", "type": "select", "a": "Cannot recall" },
+        { "q": "How did you perform in your native language at high school?", "type": "select", "a": "Cannot recall" },
+        { "q": "What was your bachelor's university degree result? Please include the grading system.", "type": "text", "a": "Bachelor's Degree in Computer Science, California State University Dominguez Hills, 2004. GPA approximately 3.2/4.0 (US grading system: 4.0 = A, 3.0 = B, 2.0 = C, 1.0 = D)." },
+        { "q": "Please share your rationale or evidence for the high school performance selections above.", "type": "textarea", "a": "I completed high school coursework with strong performance in math and language. I do not have specific rank or score details available, so I am providing the most accurate summary I can." },
+        { "q": "Briefly describe your experience with Automated Software Testing and/or Distributed Systems.", "type": "textarea", "how": "ai", "a": "I have 11+ years of experience building and testing distributed systems in Python and Go across Linux, Kubernetes, AWS, Azure, and CI/CD environments. My work has included automated test frameworks, contract and integration testing, load and resilience testing, and release validation for APIs, queues, databases, and cloud-native services. I have also built test infrastructure that reduced manual validation time and improved feedback speed for engineering teams." },
+        { "q": "We require all colleagues to meet in person 2-4 times a year ... international travel ... Are you willing and able to commit to this?", "type": "select", "a": "No" },
+        { "q": "Website / LinkedIn Profile", "type": "url", "a": "{profile.website} / {profile.linkedin}" },
+        { "q": "In the past ten years, since you graduated your first undergraduate degree, how many companies have you worked for?", "type": "select", "a": "10+" },
+        { "q": "In which country do you currently work?", "type": "select", "a": "United States of America - California" },
+        { "q": "Please confirm that you have read and agree to Canonical's Recruitment Privacy Notice and Privacy Policy.", "type": "select", "a": "Acknowledge/Confirm" },
+        { "q": "Which gender do you identify as?", "type": "select", "a": "Male" },
+        { "q": "Please indicate your nationality", "type": "multiselect", "a": "American" },
+        { "q": "Please indicate your race or ethnicity", "type": "select", "a": "Asian" },
+        { "q": "Voluntary Self-Identification: Gender / Are you Hispanic/Latino? / Please identify your race", "type": "select", "a": "Male / No / Asian" },
+        { "q": "Veteran Status", "type": "select", "a": "I am not a protected veteran" },
+        { "q": "Disability Status", "type": "select", "a": "No, I do not have a disability and have not had one in the past" }
+      ]
+    }
+  ]
+}

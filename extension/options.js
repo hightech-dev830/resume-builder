@@ -221,7 +221,24 @@ async function showDoneCount() {
   const { done, answers } = await chrome.storage.local.get(['done', 'answers']);
   $('#doneCount').textContent = `${Object.keys(done || {}).length} jobs handled so far`;
   $('#answerCount').textContent = `${Object.keys(answers || {}).length} answers saved`;
+  const { learned } = await chrome.storage.local.get('learned');
+  $('#learnedCount').textContent = `${(learned || []).length} examples learned`;
 }
+
+$('#downloadLearned').addEventListener('click', async () => {
+  const { learned } = await chrome.storage.local.get('learned');
+  const blob = new Blob([JSON.stringify({ learned: learned || [] }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `learned-examples-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+});
+$('#clearLearned').addEventListener('click', async () => {
+  if (!confirm('Forget every learned example? data/examples.json is kept.')) return;
+  await chrome.storage.local.remove('learned');
+  showDoneCount();
+});
 
 const escHtml = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 $('#showAnswers').addEventListener('click', async () => {
