@@ -5,7 +5,7 @@
 // Every application: read the posting, fill the form (rules first, the AI only for what is left),
 // write the tailored resume + cover letter when a real form appears, submit. Bids go to Supabase.
 import { getSettings, getProfile, seedProfile, profileForAI, secretsFor, rpc } from './lib/config.js';
-import { rulePlan, answersToSave, isFilled } from './lib/rules.js';
+import { rulePlan, answersToSave, isFilled, postingWithApply } from './lib/rules.js';
 
 const JOBRIGHT = /^https:\/\/([a-z]+\.)?jobright\.ai\//;
 const LINKEDIN = /^https:\/\/([a-z]+\.)?linkedin\.com\//i;
@@ -204,14 +204,19 @@ chrome.alarms.onAlarm.addListener(() => {});
 
 const createdTabs = []; // { id, opener, t }
 chrome.tabs.onCreated.addListener((tab) => {
-  createdTabs.push({ id: tab.id, opener: tab.openerTabId, t: Date.now() });
+  createdTabs.push({ id: tab.id, opener: tab.openerTabId, win: tab.windowId, t: Date.now() });
   if (createdTabs.length > 100) createdTabs.shift();
 });
+const ownTabs = new Set(); // tabs the bot opened itself (never mistaken for a tab a page opened)
 
+// The tab a click in `openerId` opened. Sites that open links with "noopener" leave no opener on the
+// new tab, so a tab without one in the same window right after the click counts too.
 async function waitNewTab(openerId, since, timeout) {
   const end = Date.now() + timeout;
+  const win = (await tabExists(openerId))?.windowId;
   while (Date.now() < end) {
-    const hit = createdTabs.find((c) => c.opener === openerId && c.t >= since);
+    const hit = createdTabs.find((c) => c.t >= since && !ownTabs.has(c.id) && c.id !== openerId &&
+      (c.opener === openerId || (c.opener == null && c.win === win)));
     if (hit) return hit.id;
     await sleep(300);
   }
@@ -548,6 +553,7 @@ const normUrl = (u) => {
   }
 };
 
+// Every link is added, also one that is already in the list or was applied to before (repeats are allowed).
 function addLinks(text) {
   const have = new Set(linkQueue.map((l) => l.url));
   const found = String(text || '').match(/https?:\/\/[^\s"'<>]+/g) || [];
@@ -556,7 +562,7 @@ function addLinks(text) {
   for (const raw of found) {
     const url = normUrl(raw.replace(/[),.;]+$/, ''));
     if (!url) continue;
-    if (have.has(url)) { dupes++; continue; }
+    if (have.has(url)) dupes++;
     have.add(url);
     linkQueue.push({ url, status: 'pending', t: Date.now() });
     added++;
@@ -573,85 +579,135 @@ function clearLinks(which) {
   return { total: linkQueue.length };
 }
 
-// Side-by-side windows, one per worker, so every job's tab stays visible (hidden tabs run slowly).
-async function workerWindow(w, n) {
-  const base = await chrome.windows.getLastFocused().catch(() => null);
-  const W = Math.max(900, base?.width || 1400);
-  const H = Math.max(700, base?.height || 900);
-  const width = Math.max(560, Math.floor(W / n));
-  const win = await chrome.windows.create({ url: 'about:blank', focused: false, left: (base?.left || 0) + w * width, top: base?.top || 0, width, height: H })
-    // a small screen refuses side-by-side bounds: let Chrome place the window
-    .catch(() => chrome.windows.create({ url: 'about:blank', focused: false }));
-  return { id: win.id, blank: win.tabs?.[0]?.id };
-}
-
+// Same loop as Jobright mode, except the next job comes from your link list instead of the Jobright board.
 async function runLinks() {
   const s = await withTemplate(await getSettings());
-  const n = Math.min(4, Math.max(1, Number(s.behavior.workers) || 1));
-  state.workers = n;
   linkQueue.forEach((l) => { if (l.status === 'running') l.status = 'pending'; });
   saveLinks();
   setPhase('running');
-  log(`${linkQueue.filter((l) => l.status === 'pending').length} links to apply to, ${n} at a time`);
-  // one worker's problem (a closed window, …) never stops the others
-  await Promise.all(Array.from({ length: n }, (_, w) => linkWorker(w, n, s).catch((err) => log(`Worker ${w + 1} stopped: ${err.message}`, 'error'))));
+  log(`${linkQueue.filter((l) => l.status === 'pending').length} links to apply to`);
+  while (!stopRequested) {
+    const item = linkQueue.find((l) => l.status === 'pending');
+    if (!item) break;
+    item.status = 'running';
+    saveLinks();
+    await processLink(item, s);
+    saveLinks();
+    if (!stopRequested) await sleep((Number(s.behavior.linkDelaySec) || 0) * 1000);
+  }
   if (!stopRequested) {
     const c = state.counts;
     notify('Job links done', `${c.applied} applied, ${c.attention} need you, ${c.skipped} skipped, ${c.failed} failed`);
   }
 }
 
-async function linkWorker(w, n, s) {
-  let win = null;
-  if (w > 0) await sleep(w * 1500); // stagger the start
-  while (!stopRequested) {
-    const item = linkQueue.find((l) => l.status === 'pending');
-    if (!item) break;
-    item.status = 'running'; // taken before any await, so two workers never get the same link
-    saveLinks();
-    if (!win || !(await chrome.windows.get(win.id).catch(() => null))) win = await workerWindow(w, n);
-    await processLink(w, item, s, win);
-    saveLinks();
-    if (!stopRequested) await sleep((Number(s.behavior.linkDelaySec) || 0) * 1000);
-  }
-}
-
-async function processLink(w, item, s, win) {
-  const J = newJob(w, { title: item.title || new URL(item.url).hostname, company: item.company || '', url: item.url });
+// Same as processJobright: 1. open the job link in a new tab and read the job,
+// 2. click Apply -> the company's application (new tab), 3. the application.
+async function processLink(item, s) {
+  const J = newJob(0, { title: item.title || new URL(item.url).hostname, company: item.company || '', url: item.url });
   J.log(`Opening ${item.url}`);
   await runJob(J, s, async (g) => {
-    // a link you already applied to (or left for yourself) is not done twice
+    // a link applied to before is applied to again (repeats are allowed); just say so in the log
     const seen = await g(rpc('bot:seen', [item.url]).catch(() => []));
-    const prior = seen.find((r) => ['applied', 'needs_attention'].includes(r.bot_status));
-    if (prior) {
-      J.log(`Skipped: bid #${prior.id} for this link is already ${prior.bot_status === 'applied' ? 'applied' : 'waiting for you'}`);
-      state.counts.skipped++;
-      J.outcome = 'skipped';
-      return;
-    }
-    const tab = await chrome.tabs.create({ windowId: win.id, url: item.url, active: true });
-    J.tabs.push(tab.id);
-    if (win.blank) {
-      chrome.tabs.remove(win.blank).catch(() => {});
-      win.blank = null;
-    }
-    await g(settle(tab.id));
-    const info = (await g(call(tab.id, '__abAgent', 'jobInfo').catch(() => null))) || {};
-    const host = new URL((await tabExists(tab.id))?.url || item.url).hostname.replace(/^www\./, '');
-    const detail = {
-      title: info.title || 'Job', company: info.company || host, location: info.location || '', salary: info.salary || '',
-      remote: !!info.remote, url: item.url, jd: ''
-    };
+    const prior = seen.find((r) => r.bot_status === 'applied');
+    if (prior) J.log(`  Applying again (bid #${prior.id} for this link is already applied)`);
+
+    // 1. job page
+    const detailId = (await chrome.tabs.create({ url: item.url, active: true })).id;
+    ownTabs.add(detailId);
+    J.tabs.push(detailId);
+    await g(settle(detailId));
+    await inject(detailId, 'content/boards.js');
+    const detail = (await g(call(detailId, '__abBoards', 'scrapeDetail').catch(() => null))) || {};
+    const info = (await g(call(detailId, '__abAgent', 'jobInfo').catch(() => null))) || {};
+    const host = new URL(item.url).hostname.replace(/^www\./, '');
+    detail.title = detail.title || info.title || 'Job';
+    detail.company = detail.company || info.company || host;
+    detail.location = detail.location || info.location || '';
+    detail.salary = detail.salary || info.salary || '';
+    detail.remote = detail.remote || !!info.remote;
+    detail.url = item.url;
+    detail.postingUrl = item.url;
     J.set({ title: detail.title, company: detail.company });
     item.title = detail.title;
     item.company = detail.company;
-    J.log(`Job: ${J.label}`);
-    await applyFlow(J, g, { applyId: tab.id, detail, s, source: 'links', sourceUrl: item.url, notes: 'Auto-bid from a job link.' });
+    J.log(`Job: ${J.label} (description ${(detail.jd || '').length.toLocaleString()} characters)`);
+
+    // 2. company application page: click Apply once (twice only when a newsletter pop-up was in the way).
+    // The job page is never opened again and its Apply is never clicked by the application steps.
+    J.phase('opening_apply');
+    const skip = (reason) => {
+      J.log(`Skipped ${J.label}: ${reason}`);
+      state.counts.skipped++;
+      J.outcome = 'skipped';
+      J.note = reason;
+    };
+    let applyId = null;
+    if (LINKEDIN.test(item.url) || detail.formHere) {
+      applyId = detailId; // LinkedIn is skipped next; a link that is the form itself is filled right here
+    } else {
+      await call(detailId, '__abAgent', 'acceptCookies').catch(() => {});
+      let noButton = false;
+      for (let attempt = 1; attempt <= 2 && !applyId; attempt++) {
+        const t0 = Date.now();
+        const before = (await tabExists(detailId))?.url || item.url;
+        const clicked = await g(call(detailId, '__abBoards', 'clickApply').catch(() => null));
+        if (!clicked?.clicked) { noButton = attempt === 1; break; }
+        J.log(`  Clicked "${clicked.text}"`);
+        const r = await g(afterApplyClick(detailId, t0, before));
+        if (r.tab) {
+          applyId = r.tab;
+        } else if (r.popup?.newsletter && attempt === 1) {
+          // e.g. DevITjobs: "Get a weekly email…": close it (never fill it in) and press Apply again
+          J.log(`  Closed a pop-up that is not the application ("${r.popup.text.slice(0, 60)}…")`);
+          await call(detailId, '__abBoards', 'closePopup').catch(() => {});
+        } else if ((r.popup?.open && !r.popup.newsletter) || r.fields >= 3) {
+          applyId = detailId; // the application (form or start dialog) opened on this page
+        } else if (clicked.href && /^https?:/.test(clicked.href) && clicked.href.split('#')[0] !== before.split('#')[0]) {
+          applyId = (await chrome.tabs.create({ url: clicked.href, active: true })).id; // the link, opened by hand
+          ownTabs.add(applyId);
+        }
+      }
+      if (!applyId) return skip(noButton ? 'no Apply button on the job page' : 'the Apply button did not open the application');
+    }
+    if (applyId !== detailId) J.tabs.push(applyId);
+    // wait out redirects to the real application page
+    for (let i = 0; i < 20; i++) {
+      const t = await tabExists(applyId);
+      if (t?.url && !/^about:|^chrome/.test(t.url)) break;
+      await g(sleep(500));
+    }
+    await focusTab(applyId);
+
+    // 3. the application (same as Jobright mode)
+    await applyFlow(J, g, { applyId, detail, s, source: 'links', sourceUrl: item.url, notes: `Auto-bid from a job link (${host}).` });
   });
-  item.status = J.outcome === 'attention' ? 'attention' : J.outcome;
+  item.status = J.outcome;
   item.bidId = J.bidId;
   item.note = J.note || '';
   item.t = Date.now();
+}
+
+// What an Apply click on the job page did: opened a new tab, moved this tab to another page,
+// or showed a pop-up / form on the page. Waits up to 10 s.
+async function afterApplyClick(tabId, since, before) {
+  const end = Date.now() + 10000;
+  let popup = null;
+  while (Date.now() < end) {
+    const tab = await waitNewTab(tabId, since, 400);
+    if (tab) return { tab };
+    const now = await tabExists(tabId);
+    if (!now) return {};
+    const url = now.pendingUrl || now.url || '';
+    if (url && url.split('#')[0] !== before.split('#')[0]) return { tab: tabId }; // went on in this tab
+    if (Date.now() - since > 2000) {
+      popup = await call(tabId, '__abBoards', 'popup').catch(() => null);
+      // a pop-up came up instead of a new page
+      if (popup?.open) return { popup };
+    }
+  }
+  const fields = await call(tabId, '__abBoards', 'fieldCount').catch(() => 0);
+  return { popup, fields };
 }
 
 // ---------------- the application, shared by both modes ----------------
@@ -673,7 +729,7 @@ async function applyFlow(J, g, { applyId, detail, s, source, sourceUrl, notes })
   const page = await g(call(applyId, '__abAgent', 'pageText').catch(() => null));
   const job = {
     company: detail.company, role: detail.title, location: detail.location || 'Remote (US)', salary: detail.salary || '',
-    job_link: applyTab.url,
+    job_link: detail.postingUrl || applyTab.url, // the job board posting when there is one
     jd: [detail.jd, page && page.text.length > 300 ? `\n\n--- From the company posting (${new URL(page.url).host}) ---\n${page.text}` : ''].join('').slice(0, 30000)
   };
 
@@ -683,7 +739,7 @@ async function applyFlow(J, g, { applyId, detail, s, source, sourceUrl, notes })
     if (docs.bid) return docs.bid;
     J.ctx.check();
     docs.bid = await g(rpc('resumes:create', {
-      company: detail.company, role: detail.title, job_link: job.job_link, apply_url: job.job_link,
+      company: detail.company, role: detail.title, job_link: job.job_link, apply_url: job.apply_url || job.job_link,
       location: detail.location || (detail.remote ? 'Remote (US)' : ''), salary: detail.salary || '', jd: job.jd,
       status: 'draft', template: s.behavior.template, notes, source, source_url: sourceUrl, bot_status: 'applying'
     }));
@@ -963,7 +1019,9 @@ async function runSteps(J, startTabId, { job, docs, ensureDocs, s }) {
     if (await g(acceptCookies(J, tabId))) await g(settle(tabId));
 
     let snap = await g(readyPage(tabId));
-    if (snap.fields.some((f) => f.kind === 'password')) {
+    const posting = postingWithApply(snap);
+    if (posting && step === 1) J.log(`  Job details are readable without an account; using "${posting.text}"`);
+    if (!posting && snap.fields.some((f) => f.kind === 'password')) {
       J.account = true;
       if (skipAccounts) return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
     }
@@ -1004,6 +1062,7 @@ async function runSteps(J, startTabId, { job, docs, ensureDocs, s }) {
     // a real application form: write the tailored resume + cover letter before filling it
     if (!docs.files && !snap.fields.some((f) => f.kind === 'password') && rp.page_type === 'application_form' && (rp.needsDocs || snap.fields.length >= 3)) {
       J.log('  Application form found; preparing the resume and cover letter');
+      job.apply_url = snap.url;
       await g(ensureDocs());
       rp = rulePlan(snap, ruleArgs());
     }
@@ -1031,7 +1090,7 @@ async function runSteps(J, startTabId, { job, docs, ensureDocs, s }) {
     }
 
     if (plan.page_type === 'requires_linkedin') return { status: 'skipped', reason: 'it can only be applied to through LinkedIn', answers };
-    if (plan.page_type === 'register' || plan.page_type === 'login') {
+    if ((plan.page_type === 'register' || plan.page_type === 'login') && !posting) {
       J.account = true;
       if (skipAccounts) return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
     }

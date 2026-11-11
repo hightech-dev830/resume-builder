@@ -711,7 +711,8 @@
     const h1 = textOf(document.querySelector('h1'));
     out.title = out.title || clean(h1 || meta('og:title') || document.title).slice(0, 120);
     // company from the ATS address: boards.greenhouse.io/acme, jobs.lever.co/acme, jobs.ashbyhq.com/acme, acme.wd5.myworkdayjobs.com
-    const m = /(?:greenhouse\.io|lever\.co|ashbyhq\.com|workable\.com|smartrecruiters\.com|breezy\.hr|recruitee\.com|jobvite\.com)\/([^/?#]+)/i.exec(location.href)
+    const m = /himalayas\.app\/companies\/([^/?#]+)/i.exec(location.href)
+      || /(?:greenhouse\.io|lever\.co|ashbyhq\.com|workable\.com|smartrecruiters\.com|breezy\.hr|recruitee\.com|jobvite\.com)\/([^/?#]+)/i.exec(location.href)
       || /^https?:\/\/([^.]+)\.(?:wd\d+\.myworkdayjobs|bamboohr|breezy|recruitee|applytojob|jobs\.personio)/i.exec(location.href);
     const fromUrl = m ? m[1].replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) : '';
     const fromTitle = (/ at ([^|–-]+)/i.exec(document.title) || /[|–-]\s*([^|–-]+)$/.exec(document.title) || [])[1] || '';

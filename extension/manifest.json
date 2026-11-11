@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Auto Bid for Jobright",
-  "version": "1.3.0",
-  "description": "Applies to remote jobs from Jobright.ai with an AI-tailored resume and cover letter, and saves every bid to Resume Builder.",
+  "name": "Auto Bid",
+  "version": "1.4.0",
+  "description": "Applies to remote jobs from Jobright.ai or from your own job links with an AI-tailored resume and cover letter, and saves every bid to Resume Builder.",
   "permissions": [
     "storage",
     "tabs",

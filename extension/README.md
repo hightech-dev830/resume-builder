@@ -1,6 +1,11 @@
-# Auto Bid for Jobright (Chrome extension)
+# Auto Bid (Chrome extension)
 
-Applies to remote jobs from your Jobright list, one after another. For each job, it:
+One extension, two modes (switch at the top of the side panel):
+
+- **Jobright:** applies to the jobs on your Jobright list.
+- **Job links:** applies to the job links you paste (Jobicy, Himalayas, DevITjobs, company pages, …).
+
+Both work the same way, one job at a time; only where the next job comes from differs. For each job, it:
 
 1. Opens the job on Jobright and reads the title, company, salary and description.
 2. Saves a bid in Supabase through the Resume Builder server (`source = jobright`).
@@ -43,10 +48,12 @@ The AI planner prompt lives on the server in `lib/agent.js`, and the server meth
 - **Order:** the bot opens the application first and creates the bid and the tailored resume + cover letter only when a real form needs them. Jobs it skips cost no AI calls.
 - **Side panel:** the toolbar icon opens the Auto Bid panel on the right side of Chrome. It stays open while you browse and while the bot switches tabs, so you can watch progress all the time. Close it with its ✕; the bot keeps running either way.
 - **Skip job:** each job being applied to has its own card in the panel with a **⏭ Skip** button. It drops that job at once (even mid-AI call or while waiting on a captcha), marks its bid "skipped", closes its tabs (if "close tabs" is on) and moves on. Skipped jobs are not retried.
-- **Job links mode:** in the panel, switch to **Job links**, paste links (one per line or any text with links; hundreds at once), press **Add links**, choose how many to run **at once** (1-4, each in its own window, side by side) and press Start. Duplicates are dropped; links whose bid is already applied or waiting for you are not done again. **Retry failed** puts failed/stopped links back in the queue.
+- **Job links mode:** in the panel, switch to **Job links**, paste links (one per line or any text with links; hundreds at once), press **Add links** and press Start. Links are done **one by one** in your current window: open the link, read the job description (after "Show more"), press its **Apply** button, and continue on the company page that opens (usually a new tab), the same way Jobright mode works. A link that is already the application form is filled right there. The same link can be added and applied to more than once (the log notes when a link was applied before). **Retry failed** puts failed/stopped links back in the queue.
+- **Jobicy links:** the bot opens the posting, reads the title and company, clicks every **Show more** and reads the whole **About this role**, the AI summary, the **Core skills** and the details (remote from, salary, employment, experience). All of that becomes the job description for the tailored resume and cover letter. Then it presses **Apply Now**, follows the company tab it opens and fills the application as usual. No sign-in on Jobicy; an account is made only if the company's application asks for one. The bid keeps the Jobicy link as the job link and the company page as the apply address.
+- **Other job boards:** Himalayas (description + Skills, then **Apply now**), DevITjobs (Requirements + Technologies; the newsletter pop-up after **APPLY** is closed, never filled in, and **APPLY** is pressed again) and any other site: the bot reads the page and clicks the button that means "apply" (Apply, Apply now, Create application, Start application, Apply on company site, …). Each job link is opened once and Apply clicked once; if it opens nothing, the job is skipped. No sign-in on the board.
 - **Accounts:** sites that need an account are tried: the bot signs up with your email and password (or signs in) and carries on. If it cannot get past the account step, the job is skipped. Settings → Jobs & behavior → "Sites that need an account" can skip them right away instead.
 - **Email verification:** keep Gmail open in a tab (signed in as the email in My info). When a site sends a code or a "verify your email" link, the bot reads the newest one or two messages, uses only an email that names the company/site (or a verification email that arrived while it waited), types the code or opens the link, and continues. Nothing from your mailbox is sent to the AI or the server. No email within the wait time (default 120 s): the job is skipped.
-- **Captchas / bot checks:** solved by you, not the bot. The tab comes to the front with a notification; the bot continues by itself once it is solved, and in Job links mode the other windows keep working meanwhile.
+- **Captchas / bot checks:** solved by you, not the bot. The tab comes to the front with a notification; the bot continues by itself once it is solved.
 - **Need you:** a job the bot leaves for you keeps its tabs, its bid and its resume files; nothing is closed or deleted, and the bot does not touch it again.
 - **Models per task:** Settings → AI & prompts lets the resume, the cover letter and the application pages each use their own model (e.g. strong / mid / small).
 - **LinkedIn:** jobs that send you to LinkedIn, or only allow Easy Apply / signing in with LinkedIn, are skipped.
