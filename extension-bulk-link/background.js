@@ -204,14 +204,19 @@ chrome.alarms.onAlarm.addListener(() => {});
 
 const createdTabs = []; // { id, opener, t }
 chrome.tabs.onCreated.addListener((tab) => {
-  createdTabs.push({ id: tab.id, opener: tab.openerTabId, t: Date.now() });
+  createdTabs.push({ id: tab.id, opener: tab.openerTabId, win: tab.windowId, t: Date.now() });
   if (createdTabs.length > 100) createdTabs.shift();
 });
+const ownTabs = new Set(); // tabs the bot opened itself (never mistaken for a tab a page opened)
 
+// The tab a click in `openerId` opened. Sites that open links with "noopener" leave no opener on the
+// new tab, so a tab without one in the same window right after the click counts too.
 async function waitNewTab(openerId, since, timeout) {
   const end = Date.now() + timeout;
+  const win = (await tabExists(openerId))?.windowId;
   while (Date.now() < end) {
-    const hit = createdTabs.find((c) => c.opener === openerId && c.t >= since);
+    const hit = createdTabs.find((c) => c.t >= since && !ownTabs.has(c.id) && c.id !== openerId &&
+      (c.opener === openerId || (c.opener == null && c.win === win)));
     if (hit) return hit.id;
     await sleep(300);
   }
@@ -613,6 +618,7 @@ async function processLink(item, s) {
 
     // 1. job page
     const detailId = (await chrome.tabs.create({ url: item.url, active: true })).id;
+    ownTabs.add(detailId);
     J.tabs.push(detailId);
     await g(settle(detailId));
     await inject(detailId, 'content/boards.js');
@@ -631,19 +637,44 @@ async function processLink(item, s) {
     item.company = detail.company;
     J.log(`Job: ${J.label} (description ${(detail.jd || '').length.toLocaleString()} characters)`);
 
-    // 2. company application page
+    // 2. company application page: click Apply once (twice only when a newsletter pop-up was in the way).
+    // The job page is never opened again and its Apply is never clicked by the application steps.
     J.phase('opening_apply');
+    const skip = (reason) => {
+      J.log(`Skipped ${J.label}: ${reason}`);
+      state.counts.skipped++;
+      J.outcome = 'skipped';
+      J.note = reason;
+    };
     let applyId = null;
-    if (!LINKEDIN.test(item.url) && !detail.formHere) {
-      const t0 = Date.now();
-      const clicked = await g(call(detailId, '__abBoards', 'clickApply').catch(() => null));
-      if (clicked?.clicked) {
+    if (LINKEDIN.test(item.url) || detail.formHere) {
+      applyId = detailId; // LinkedIn is skipped next; a link that is the form itself is filled right here
+    } else {
+      await call(detailId, '__abAgent', 'acceptCookies').catch(() => {});
+      let noButton = false;
+      for (let attempt = 1; attempt <= 2 && !applyId; attempt++) {
+        const t0 = Date.now();
+        const before = (await tabExists(detailId))?.url || item.url;
+        const clicked = await g(call(detailId, '__abBoards', 'clickApply').catch(() => null));
+        if (!clicked?.clicked) { noButton = attempt === 1; break; }
         J.log(`  Clicked "${clicked.text}"`);
-        applyId = await g(waitNewTab(detailId, t0, 10000));
+        const r = await g(afterApplyClick(detailId, t0, before));
+        if (r.tab) {
+          applyId = r.tab;
+        } else if (r.popup?.newsletter && attempt === 1) {
+          // e.g. DevITjobs: "Get a weekly email…": close it (never fill it in) and press Apply again
+          J.log(`  Closed a pop-up that is not the application ("${r.popup.text.slice(0, 60)}…")`);
+          await call(detailId, '__abBoards', 'closePopup').catch(() => {});
+        } else if ((r.popup?.open && !r.popup.newsletter) || r.fields >= 3) {
+          applyId = detailId; // the application (form or start dialog) opened on this page
+        } else if (clicked.href && /^https?:/.test(clicked.href) && clicked.href.split('#')[0] !== before.split('#')[0]) {
+          applyId = (await chrome.tabs.create({ url: clicked.href, active: true })).id; // the link, opened by hand
+          ownTabs.add(applyId);
+        }
       }
+      if (!applyId) return skip(noButton ? 'no Apply button on the job page' : 'the Apply button did not open the application');
     }
-    if (!applyId) applyId = detailId; // same-tab redirect, or the form is on this page
-    else J.tabs.push(applyId);
+    if (applyId !== detailId) J.tabs.push(applyId);
     // wait out redirects to the real application page
     for (let i = 0; i < 20; i++) {
       const t = await tabExists(applyId);
@@ -659,6 +690,28 @@ async function processLink(item, s) {
   item.bidId = J.bidId;
   item.note = J.note || '';
   item.t = Date.now();
+}
+
+// What an Apply click on the job page did: opened a new tab, moved this tab to another page,
+// or showed a pop-up / form on the page. Waits up to 10 s.
+async function afterApplyClick(tabId, since, before) {
+  const end = Date.now() + 10000;
+  let popup = null;
+  while (Date.now() < end) {
+    const tab = await waitNewTab(tabId, since, 400);
+    if (tab) return { tab };
+    const now = await tabExists(tabId);
+    if (!now) return {};
+    const url = now.pendingUrl || now.url || '';
+    if (url && url.split('#')[0] !== before.split('#')[0]) return { tab: tabId }; // went on in this tab
+    if (Date.now() - since > 2000) {
+      popup = await call(tabId, '__abBoards', 'popup').catch(() => null);
+      // a pop-up came up instead of a new page
+      if (popup?.open) return { popup };
+    }
+  }
+  const fields = await call(tabId, '__abBoards', 'fieldCount').catch(() => 0);
+  return { popup, fields };
 }
 
 // ---------------- the application, shared by both modes ----------------
