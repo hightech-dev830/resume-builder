@@ -210,21 +210,39 @@
 
     const buttons = [];
     const seen = new Set();
-    for (const el of deepAll('button, input[type="submit"], input[type="button"], [role="button"], a[href], [role="link"], [role="tab"]')) {
+    // dropdown buttons ("Apply Now ▾" opens a menu with "Apply Now" / "Apply with LinkedIn"):
+    // the toggle is marked `menu`, the entries of the open menu `inMenu`
+    const MENU_SEL = '[role="menu"], [role="menuitem"], [class*="dropdown-menu" i], [class*="dropdown-content" i], [class*="dropdown-list" i], [class*="popover" i], [class*="menu-list" i]';
+    const isToggle = (el) => /^(true|menu)$/i.test(el.getAttribute('aria-haspopup') || '') || el.hasAttribute('aria-expanded')
+      || /[▾▼⌄˅]\s*$/.test(el.innerText || '') || !!el.querySelector('[class*="caret" i], [class*="chevron" i], [class*="arrow-down" i]')
+      || /dropdown-toggle/i.test(el.className?.baseVal ?? el.className ?? '');
+    for (const el of deepAll('button, input[type="submit"], input[type="button"], [role="button"], a[href], [role="link"], [role="tab"], [role="menuitem"], [role="menu"] a, [class*="dropdown-menu" i] a, [class*="dropdown-menu" i] li')) {
       if (!visible(el) || seen.has(el)) continue;
       if (el.getAttribute('aria-haspopup') === 'listbox') continue;
       const text = clean(el.innerText || el.value || el.getAttribute('aria-label') || el.title).slice(0, 80);
       if (!text) continue;
+      const inMenu = !!el.closest(MENU_SEL);
+      if (el.tagName === 'LI' && el.querySelector('a, button')) continue; // its link/button is listed itself
       const isLink = el.tagName === 'A' && !el.getAttribute('role');
       // plain links are only interesting when they look like actions
       if (isLink && !/apply|application|next|continue|submit|sign ?in|log ?in|register|sign ?up|create|account|accept|agree|start|review|upload|resume|skip|proceed|manual|yes|no thanks|later|close/i.test(text)) continue;
       seen.add(el);
-      buttons.push({ id: idOf(el), kind: isLink ? 'link' : 'button', text, href: isLink ? String(el.getAttribute('href') || '').slice(0, 80) : '', disabled: el.disabled || el.getAttribute('aria-disabled') === 'true' });
+      buttons.push({
+        id: idOf(el), kind: isLink ? 'link' : 'button', text, href: isLink ? String(el.getAttribute('href') || '').slice(0, 80) : '',
+        disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+        ...(inMenu ? { inMenu: true } : !inMenu && isToggle(el) ? { menu: true } : {})
+      });
       if (buttons.length >= 90) break;
     }
 
     const errors = deepAll('[role="alert"], [aria-live="assertive"], [class*="error" i]:not(input):not(select), [class*="invalid" i]:not(input)')
-      .filter(visible).map(textOf).filter((t) => t && t.length < 200);
+      .filter(visible)
+      // an error summary ("Your form needs corrections" + one line per missing field) is read line by line
+      .flatMap((el) => {
+        const items = [...el.querySelectorAll('li')].filter(visible).map(textOf).filter(Boolean);
+        return items.length ? items : [textOf(el)];
+      })
+      .filter((t) => t && t.length < 400);
 
     const text = textOf(document.body).slice(0, 9000);
     return {

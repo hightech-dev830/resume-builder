@@ -291,6 +291,15 @@ function slug(s, max = 40) {
   return String(s || '').normalize('NFKD').replace(/[^\w\s-]/g, '').trim().replace(/[\s-]+/g, '_').slice(0, max) || 'Untitled';
 }
 
+// the "skip job sites" entry the URL contains ("https://www.icims.com/" is matched as "icims.com"), or ''
+function skippedSite(url, s) {
+  const u = String(url || '').toLowerCase();
+  if (!u) return '';
+  return String(s.behavior.skipUrls || '').split(/[\n,]+/)
+    .map((w) => w.trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/^www\./, '').replace(/\/+$/, ''))
+    .find((w) => w && u.includes(w)) || '';
+}
+
 const words = (csv) => String(csv || '').split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
 
 function filterReason(job, s) {
@@ -761,6 +770,14 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
         outcome = 'skipped';
         return;
       }
+      const blocked = skippedSite(applyTab.url, s);
+      if (blocked) {
+        rec.reason = `the site is on your skip list (${blocked})`;
+        log(`Skipped ${label}: the site is on your skip list (${blocked})`);
+        state.counts.skipped++;
+        outcome = 'skipped';
+        return;
+      }
       log(`Application page: ${new URL(applyTab.url).host}`);
 
       // 3. exact job description from the company page
@@ -1011,6 +1028,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
   let overrides = 0; // times the bot decided by itself instead of asking you
   let idle = 0; // pages that looked empty / still loading
   let lastRulesKey = ''; // page handled by rules alone last step; if it is still there, ask the AI
+  let lastClick = ''; // button clicked last step: a dropdown "Apply Now ▾" is followed by its menu's "Apply Now"
 
   for (let step = firstStep; step < firstStep + s.behavior.stepLimit; step++) {
     progress.step = step;
@@ -1021,6 +1039,8 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     const tab = await tabExists(tabId);
     if (!tab) return { status: 'attention', reason: 'the application tab was closed', answers };
     if (LINKEDIN.test(tab.url)) return { status: 'skipped', reason: 'it sends the application to LinkedIn', answers };
+    const blocked = skippedSite(tab.url, s);
+    if (blocked) return { status: 'skipped', reason: `the site is on your skip list (${blocked})`, answers };
 
     await g(settle(tabId));
     if (await g(acceptCookies(tabId))) await g(settle(tabId));
@@ -1051,7 +1071,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     const pageKey = `${snap.url}|${snap.fields.map((f) => f.id).join(',')}|${snap.buttons.map((b) => b.text).join(',')}`;
     const forceAI = pageKey === lastRulesKey || fixedByYou;
     fixedByYou = false;
-    const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI });
+    const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI, lastClick });
     const saved = await savedAnswers();
     let rp = rulePlan(snap, ruleArgs());
     // a real application form: write the tailored resume + cover letter before filling it
@@ -1084,7 +1104,11 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     }
 
     if (plan.page_type === 'requires_linkedin') return { status: 'skipped', reason: 'it can only be applied to through LinkedIn', answers };
-    if (s.behavior.skipAccounts && (plan.page_type === 'register' || plan.page_type === 'login')) {
+    // an "Enter your information" (iCIMS) / "Tell us about yourself" (ADP) step only asks who you are
+    // (email, name, phone, maybe a code sent to your email): not an account, so it is filled, not skipped
+    const identifyStep = !snap.fields.some((f) => f.kind === 'password')
+      && snap.fields.some((f) => f.kind === 'email' || /e-?mail/i.test(`${f.label} ${f.question} ${f.name || ''}`) || /verification code|receive (a |the |your )?code/i.test(`${f.label} ${f.question}`));
+    if (s.behavior.skipAccounts && (plan.page_type === 'register' || plan.page_type === 'login') && !identifyStep) {
       return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
     }
     // never follow a LinkedIn button
@@ -1158,6 +1182,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     }
 
     let clicked = '';
+    lastClick = plan.next_click || '';
     if (plan.next_click) {
       const btn = snap.buttons.find((b) => b.id === plan.next_click);
       clicked = btn?.text || plan.next_click;

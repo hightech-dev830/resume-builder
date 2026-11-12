@@ -16,6 +16,7 @@ const PROFILE_LABELS = {
   start_date: 'Earliest start date', notice_period: 'Notice period', salary_expectation: 'Salary expectation',
   gender: 'Gender', pronouns: 'Pronouns', sexual_orientation: 'Sexual orientation', race_ethnicity: 'Race / ethnicity', hispanic_latino: 'Hispanic or Latino', veteran_status: 'Veteran status', disability_status: 'Disability status',
   sms_consent: 'Consent to text messages', how_heard: 'How did you hear about us', licenses_certifications: 'Licenses / certifications',
+  interview_language: 'Preferred programming language (interviews)',
   other_info: 'Anything else the bot should know',
   password: 'Password for job-site accounts', ssn_last4: 'SSN last 4 digits', dob: 'Date of birth (YYYY-MM-DD)'
 };

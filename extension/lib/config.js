@@ -50,6 +50,7 @@ export const DEFAULT_SETTINGS = {
   behavior: {
     autoSubmit: true,      // false = stop on the final review/submit step for you to check
     skipAccounts: true,    // skip jobs whose site wants you to sign up or sign in
+    skipUrls: '',          // one per line (or comma-separated): skip jobs whose application URL contains any
     template: '',          // '' = the web app's default template
     uploadCover: true,
     delaySec: 8,           // pause between bids
@@ -76,6 +77,7 @@ export const DEFAULT_PROFILE = {
   gender: 'Male (Man)', pronouns: 'He/Him', sexual_orientation: 'Heterosexual', race_ethnicity: 'Asian (Not Hispanic or Latino)', hispanic_latino: 'No',
   veteran_status: 'I am not a protected veteran', disability_status: 'No, I do not have a disability',
   sms_consent: 'Yes', how_heard: 'Linkedin', licenses_certifications: 'None',
+  interview_language: 'Python', // "preferred programming language for your interviews"
   other_info: "Self-rating / comfort-level questions (for example \"Rate your comfort level translating ambiguous business requirements into technical architecture\", data warehouse architecture): choose \"Comfortable\", not the highest level.\n\"Have you led or owned the design of data models / data warehouse architecture?\": Yes.\nWilling to complete a take-home assignment or interview exercise: Yes.\nDisability questions: No. Sexual orientation: Heterosexual. Gender: Man / Male. Race: Asian.\nFor any other optional question with no answer in this profile, write N/A.",
   // secrets: never sent to the AI, only typed into the page; never in git
   password: '', ssn_last4: '', dob: ''

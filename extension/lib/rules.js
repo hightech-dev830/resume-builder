@@ -41,12 +41,38 @@ export function pickOption(options, prefs) {
 }
 
 const v = (k) => (p) => p[k] || '';
+// the chosen language first, then the usual fallbacks (never "C++" for "C", or "Java" for "JavaScript")
+const langPrefs = (lang) => {
+  const want = norm(lang || 'Python').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [new RegExp(`^${want}\\b(?![+#])`), new RegExp(`\\b${want}\\b(?![+#])`), /^python\b/, /^(javascript|typescript)\b/, /^java\b(?!script)/, /^c\+\+/];
+};
+// "years of experience with <skill>" choices: the option with the most years ("10+ years" over "5-10 years")
+const longestYears = (options) => {
+  let best = null, top = -1;
+  for (const o of options || []) {
+    const t = norm(o);
+    const nums = (t.match(/\d+(\.\d+)?/g) || []).map(Number);
+    if (!nums.length) continue;
+    const score = Math.max(...nums) + (/\+|more|over|above|greater|plus|or longer/.test(t) ? 0.5 : 0);
+    if (score > top) { top = score; best = o; }
+  }
+  return best;
+};
+const SKILL_YEARS_DEFAULT = '6';
 const yesno = (s) => (/^(yes|true)\b/i.test(String(s)) ? 'Yes' : /^(no|false)\b/i.test(String(s)) ? 'No' : '');
 
 // Each rule: match on the field's label/question; `choose` = option preferences, `text` = value to type.
 // Order matters: specific questions first (sponsorship before work authorization before address "state").
 const RULES = [
+  // --- identity check (ADP "Get your verification code": the phone number or the email) ---
+  { re: /verification code|receive (a |the |your )?code|send (the |a )?code to|where (should|would) (we|you like (us )?to) send/, choose: (p) => [new RegExp(`^${norm(p.email).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`), /@/, /e-?mail/] },
+  // iCIMS "If you are a European Union (EU) or United Kingdom (UK) resident, please check this box": you are not
+  { re: /(european union|\beu\b|united kingdom|\buk\b|gdpr).{0,40}resident|resident.{0,40}(european union|\beu\b|united kingdom|\buk\b)/, choose: () => NO, text: () => 'No' },
   // --- screening ---
+  // "In which of the following employment eligible countries are you seeking to work, if hired?" (Quora/Ashby)
+  { re: /countr(y|ies).*(seeking to work|want to work|work from|working from|be (based|working)|employ|eligible|if hired)|(seeking to work|work from|based in|employ(ment|ed) in|eligible).*countr(y|ies)/, not: /citizen/, choose: () => [/^united states( of america)?$/, /^usa?$/, /^united states/], text: () => 'United States' },
+  // "What is your preferred programming language for your interviews?"
+  { re: /(preferred|favou?rite|primary|strongest|choose a|which) (programming |coding )?language|programming language.*interview|(coding|programming) language/, not: /spoken|speak|fluen|english/, choose: (p) => langPrefs(p.interview_language), text: (p) => p.interview_language || 'Python' },
   { re: /without (the need for |requiring |needing )?(a )?(visa )?sponsor/, choose: () => YES, text: () => 'Yes' },
   { re: /sponsor|visa status|work visa|h-?1b|immigration (support|status)/, choose: (p) => (yesno(p.needs_sponsorship) === 'Yes' ? YES : NO), text: (p) => yesno(p.needs_sponsorship) || 'No' },
   { re: /authori[sz]ed to work|eligible to work|legally (able|permitted|entitled|allowed) to work|right to work|work authori[sz]ation|work permit|legally authori[sz]ed/, choose: (p) => (yesno(p.work_authorized_us) === 'No' ? NO : [...YES, /authori[sz]ed/, /citizen/]), text: () => 'Yes' },
@@ -99,6 +125,12 @@ const RULES = [
   { re: /school|university|college|institution/, not: /high school/, combo: v('school'), text: v('school') },
   { re: /\bdegree\b/, not: /year|date/, choose: () => [/^bachelor/, /bachelor/, /^bs\b|^b\.s/], text: v('highest_degree') },
   { re: /major|field of study|discipline|area of study/, choose: (p) => [new RegExp(norm(p.degree_field || 'computer science'))], text: v('degree_field') },
+  // years with a particular skill ("How many years of experience do you have with React?", "Years of Python experience"):
+  // pick the longest option; typed in, 6. "Do you have 5+ years of experience with X?" as yes/no: Yes
+  { re: /(years?|yrs)\b.{0,60}\bexperience\b.{0,30}\b(with|in|using|on)\b|(years?|yrs)( of)? (?!(of|professional|relevant|work|industry|total|overall|related|prior|previous)\b)[a-z0-9.+#/-]+( [a-z0-9.+#/-]+){0,3} experience|experience (with|in|using|working with) .{0,60}\b(years?|yrs)\b|how long have you (worked with|used|been using|been working with)/,
+    not: /total|overall|(with|in) (software|the industry|this field|your field|a professional|professional)\b/,
+    choose: (p, f) => [longestYears(f.options), ...YES].filter(Boolean),
+    text: (p, f) => (/^(do|have|are) you\b/.test(norm(f.question || f.label)) ? 'Yes' : SKILL_YEARS_DEFAULT) },
   { re: /total years|years of (professional |relevant |work |industry )?experience\b(?! (with|in|using))/, text: v('years_experience') },
   { re: /salary|compensation|pay expectation|desired pay|expected (pay|salary)|rate expectation/, text: v('salary_expectation') }
 ];
@@ -116,36 +148,54 @@ function ruleFor(f) {
 
 const APPLY_BTN = /^(apply|apply now|apply (for|to) (this )?(job|position|role)|apply online|apply here|start (my |your )?application|i'?m interested|begin application)$/;
 const START_BTN = [/^autofill with resume$/, /^(upload|apply with) (resume|cv)$/, /^apply manually$/];
+// the button of a "where should we send your verification code" dialog (it covers the form's Continue)
+const SEND_CODE_BTN = /^(send|send( the)?( verification)? code|get( verification)? code|send me (a |the )?code|email me( the code)?|request code)$/;
 const NEXT_BTN = [/^(save (and|&) continue|continue|next|next step|proceed|save and next|review( application)?|review and submit)$/,
   /^(submit|submit (your |my )?application|send( my)? application|submit (and|&) apply|apply|apply now|finish|complete( application)?)$/];
 const BAD_BTN = /linkedin|indeed|google|facebook|seek|glassdoor|easy apply|sign ?in|log ?in/;
 
 const btnText = (b) => norm(b.text).replace(/[^a-z0-9'&/ ]/g, '').trim();
+const usableButtons = (buttons) => buttons.filter((b) => !b.disabled && !BAD_BTN.test(norm(`${b.text} ${b.href || ''}`)));
 function findButton(buttons, patterns) {
-  const usable = buttons.filter((b) => !b.disabled && !BAD_BTN.test(norm(`${b.text} ${b.href || ''}`)));
+  const usable = usableButtons(buttons);
   for (const re of patterns) {
     const hit = usable.find((b) => re.test(btnText(b)));
     if (hit) return hit;
   }
   return null;
 }
+const findButtons = (buttons, re) => usableButtons(buttons).filter((b) => re.test(btnText(b)));
 
 /**
  * @returns {{ actions, next_click, page_type, summary, askAI, aiFields, needsDocs, handled }}
  */
-export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, coverLetter = '', forceAI = false }) {
+export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, coverLetter = '', forceAI = false, lastClick = '' }) {
   const actions = [];
   const leftover = [];
   let wantsCoverText = false;
   const fields = snap.fields.filter((f) => f.kind !== 'password');
   const fileFields = fields.filter((f) => f.kind === 'file');
+  // text of the form's error messages, to find the questions they name
+  const plain = (x) => norm(x).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const errLines = (snap.errors || []).map(plain);
+  const qKey = (q) => plain(q).slice(0, 60).trim();
+  const namedInErrors = (q) => {
+    const k = qKey(q);
+    return k.length >= 8 && errLines.some((e) => e.includes(k));
+  };
+  // error lines that name none of the questions (or only the "needs corrections" heading)
+  const unexplainedErrors = () => errLines.filter((e) => !/^(your )?form (needs|has) (corrections|errors)$|^please (fix|correct)/.test(e)
+    && !fields.some((f) => { const k = qKey(f.question || f.label); return k.length >= 8 && e.includes(k); }));
   const realResume = fileFields.find((f) => !isAutofillUpload(f) && /resume|\bcv\b|curriculum/.test(fieldText(f)))
     || (fileFields.some(isAutofillUpload) ? fileFields.find((f) => !isAutofillUpload(f) && !/cover|transcript|portfolio|additional|other|photo|image/.test(fieldText(f))) : null);
 
   for (const f of fields) {
     const t = fieldText(f);
-    const filled = isFilled(f);
+    // the page's error summary names this question ("Missing entry for required field: <question>"):
+    // whatever the field shows, the site did not take the answer, so answer it again
     const q = f.question || f.label || '';
+    const named = namedInErrors(q);
+    const filled = isFilled(f) && !named;
     let act = null;
     let handled = false;
 
@@ -160,7 +210,10 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
         else handled = false;
       }
     } else if (f.kind === 'checkbox') {
-      if (CONSENT.test(t)) {
+      if (/(european union|eu|united kingdom|uk).{0,40}resident|resident.{0,40}(european union|eu|united kingdom|uk)/.test(t)) {
+        handled = true; // iCIMS: "if you are an EU or UK resident, check this box": not you, leave it empty
+        if (f.checked) act = { op: 'uncheck' };
+      } else if (CONSENT.test(t)) {
         handled = true;
         if (!f.checked) act = { op: 'check' };
       }
@@ -172,13 +225,13 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
       const rule = ruleFor(f);
       if (rule?.skip) handled = true;
       else if (rule && isChoice(f) && rule.choose) {
-        const opt = pickOption(f.options, rule.choose(p));
+        const opt = pickOption(f.options, rule.choose(p, f));
         if (opt) {
           handled = true;
-          if (norm(f.value) !== norm(opt)) act = { op: f.kind === 'combobox' ? 'choose' : 'select', value: opt, question: q };
+          if (named || norm(f.value) !== norm(opt)) act = { op: f.kind === 'combobox' ? 'choose' : 'select', value: opt, question: q };
         }
       } else if (rule && !isChoice(f) && TEXTY.has(f.kind)) {
-        const val = f.kind === 'combobox' && rule.combo ? rule.combo(p) : rule.text?.(p);
+        const val = f.kind === 'combobox' && rule.combo ? rule.combo(p) : rule.text?.(p, f);
         if (val) {
           handled = true;
           if (!filled) act = { op: f.kind === 'combobox' ? 'choose' : 'fill', value: val };
@@ -192,7 +245,7 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
             const opt = pickOption(f.options, String(hit.answer).split(' | '));
             if (opt) {
               handled = true;
-              if (norm(f.value) !== norm(opt)) act = { op: f.kind === 'combobox' ? 'choose' : 'select', value: opt, question: q, saved: true };
+              if (named || norm(f.value) !== norm(opt)) act = { op: f.kind === 'combobox' ? 'choose' : 'select', value: opt, question: q, saved: true };
             }
           } else if (TEXTY.has(f.kind)) {
             handled = true;
@@ -204,7 +257,9 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
 
     if (act) actions.push({ id: f.id, ...act });
     // the AI gets required questions the rules could not answer, and anything the site flagged
-    if (f.error || (!handled && !filled && isRequired(f)) || (forceAI && !filled)) leftover.push(f);
+    // a box for the code that was emailed/texted: only you have it (the AI then hands the page to you)
+    const codeBox = !isChoice(f) && TEXTY.has(f.kind) && /verification code|one[- ]time (pass)?code|security code|passcode|enter (the |your )?code|otp/.test(t);
+    if (f.error || (!handled && !filled && (isRequired(f) || named || codeBox)) || (named && !act) || (forceAI && !filled)) leftover.push(named && !f.error ? { ...f, required: true, error: 'the form says this required answer is missing' } : f);
   }
 
   const needsDocs = actions.some((a) => a.op.startsWith('upload')) || wantsCoverText;
@@ -217,14 +272,21 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
   if (!forceAI && start) {
     return { actions: [], next_click: start.id, page_type: 'job_posting', summary: `start option "${start.text}"`, askAI: false, aiFields: [], needsDocs: false };
   }
-  const apply = findButton(snap.buttons, [APPLY_BTN]);
+  // "Apply Now ▾" can be a dropdown whose menu has another "Apply Now": the first click opens the menu,
+  // the second (on the menu entry) starts the application. Prefer the open menu's entry, and never
+  // click the same Apply button twice in a row (that would just close the menu again).
+  const applies = findButtons(snap.buttons, APPLY_BTN);
+  const fresh = applies.filter((b) => b.id !== lastClick);
+  const apply = fresh.find((b) => b.inMenu) || fresh.find((b) => !b.menu) || fresh[0] || null;
   if (!forceAI && apply && formish < 3 && !fileFields.length) {
     return { actions: [], next_click: apply.id, page_type: 'job_posting', summary: `clicking "${apply.text}"`, askAI: false, aiFields: [], needsDocs: false };
   }
 
-  const next = findButton(snap.buttons, NEXT_BTN);
+  const codeDialog = fields.some((f) => isChoice(f) && /verification code|receive (a |the |your )?code|send (the |a )?code to/.test(fieldText(f)));
+  const next = findButton(snap.buttons, codeDialog ? [SEND_CODE_BTN, ...NEXT_BTN] : NEXT_BTN);
   const isForm = fields.length > 0;
-  const askAI = forceAI || !isForm || leftover.length > 0 || !next || !!snap.errors?.length;
+  // errors that name questions the rules just answered need no AI; any other error does
+  const askAI = forceAI || !isForm || leftover.length > 0 || !next || unexplainedErrors().length > 0;
   return {
     actions, next_click: next?.id || '', page_type: isForm ? 'application_form' : 'other',
     summary: `${isForm ? `form with ${fields.length} fields, ` : ''}${summaryBits.join(', ')}${next ? `, then "${next.text}"` : ''}`,
