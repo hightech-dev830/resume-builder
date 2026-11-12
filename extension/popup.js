@@ -33,17 +33,17 @@ function render() {
   $('#startBtn').classList.toggle('hidden', b.running);
   $('#stopBtn').classList.toggle('hidden', !b.running);
   $('#singleBtn').disabled = b.running;
+  $('#skipBtn').disabled = !b.running || !(b.jobs || []).length;
   $$('#modes button').forEach((x) => (x.disabled = b.running));
   for (const k of ['applied', 'attention', 'failed', 'skipped']) $('#c' + k[0].toUpperCase() + k.slice(1)).textContent = b.counts?.[k] || 0;
 
-  // one card per job being applied to, each with its own Skip
+  // the job being applied to (Skip is next to Start / Stop)
   $('#jobs').innerHTML = (b.running ? b.jobs || [] : []).map((j) => `
     <div class="card job">
       <div class="info">
         <div class="t" title="${esc(j.url)}">${esc(j.title || 'Job')}${j.company ? ` @ ${esc(j.company)}` : ''}</div>
         <div class="muted">${[(b.workers > 1) && `#${j.w + 1}`, PHASES[j.phase] || j.phase, j.bidId && `Bid #${j.bidId}`, j.step && `step ${j.step}`].filter(Boolean).join(' · ')}</div>
       </div>
-      <button data-skip="${j.w}" title="Drop this job now and go to the next one">⏭ Skip</button>
     </div>`).join('');
 
   const log = $('#log');
@@ -81,10 +81,7 @@ $('#modes').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-mode]');
   if (b && !b.disabled) setMode(b.dataset.mode);
 });
-$('#jobs').addEventListener('click', (e) => {
-  const b = e.target.closest('button[data-skip]');
-  if (b) send('skip', { w: Number(b.dataset.skip) });
-});
+$('#skipBtn').addEventListener('click', () => send('skip'));
 $('#startBtn').addEventListener('click', () => send('start', { mode }));
 $('#stopBtn').addEventListener('click', () => send('stop'));
 $('#singleBtn').addEventListener('click', async () => {

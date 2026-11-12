@@ -5,13 +5,15 @@
   <title>Auto Bid</title>
   <link rel="stylesheet" href="ui.css">
   <style>
-    body { min-width: 320px; }
+    body { min-width: 320px; overflow-x: hidden; }
     header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
     header h1 { font-size: 15px; margin: 0; flex: 1; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: #9ca3af; }
     .dot.on { background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 25%, transparent); }
     .dot.human { background: var(--warn); }
-    main { padding: 12px 14px; display: grid; gap: 10px; }
+    /* minmax(0, 1fr): a long link can never make the panel wider */
+    main { padding: 12px 14px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    main > * { min-width: 0; }
     .phase { font-weight: 600; }
     .card { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; }
     .card .t { font-weight: 600; }
@@ -22,24 +24,24 @@
     .job { display: flex; align-items: center; gap: 8px; }
     .job .info { flex: 1; min-width: 0; }
     .job .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .job button { padding: 3px 10px; font-size: 12px; }
     .jobs { display: grid; gap: 6px; }
     .counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
     .counts div { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px; text-align: center; }
     .counts b { display: block; font-size: 17px; }
     .counts span { font-size: 11px; color: var(--muted); }
     .actions { display: flex; gap: 8px; }
-    .actions button { flex: 1; }
+    .actions button { flex: 3; min-width: 0; }
+    .actions #skipBtn { flex: 1; }
     #links textarea { width: 100%; min-height: 70px; box-sizing: border-box; font-size: 12px; }
     .lrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
     .lrow input { width: 52px; }
     #linkList { max-height: 150px; overflow: auto; font-size: 11.5px; margin-top: 6px; }
-    #linkList div { display: flex; gap: 6px; border-bottom: 1px dashed var(--line); padding: 2px 0; }
+    #linkList div { display: flex; gap: 6px; border-bottom: 1px dashed var(--line); padding: 2px 0; min-width: 0; }
     #linkList .st { width: 64px; flex: none; font-weight: 600; }
-    #linkList .u { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #linkList .u { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .st.applied { color: var(--accent-dark); } .st.attention { color: var(--warn); } .st.failed { color: #dc2626; }
     #log { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; height: max(210px, calc(100vh - 520px)); overflow: auto; padding: 6px 8px; font-size: 11.5px; line-height: 1.45; }
-    #log div { border-bottom: 1px dashed var(--line); padding: 2px 0; }
+    #log div { border-bottom: 1px dashed var(--line); padding: 2px 0; overflow-wrap: anywhere; }
     #log time { color: var(--muted); margin-right: 5px; }
     footer { display: flex; justify-content: space-between; padding: 0 14px 12px; }
     footer a { color: var(--accent-dark); cursor: pointer; text-decoration: none; font-size: 12px; }
@@ -82,6 +84,7 @@
     </div>
     <div id="usage" class="muted" style="font-size:12px"></div>
     <div class="actions">
+      <button id="skipBtn" title="Drop the job being applied to now and go to the next one" disabled>⏭ Skip</button>
       <button class="primary" id="startBtn">▶ Start bot</button>
       <button class="danger hidden" id="stopBtn">■ Stop</button>
       <button id="singleBtn" title="Apply to the Jobright job open in this tab">Apply to this job</button>
