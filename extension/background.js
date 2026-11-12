@@ -683,10 +683,29 @@ async function processLink(item, s) {
         if (info && JOB_BOARDS.test(boardHost) && toBoardAccount(info.href)) {
           return skip(`${boardHost.replace(/^www\./, '')} wants you signed in before Apply: sign in to it in this browser once, then retry`);
         }
-        const clicked = await g(call(detailId, '__abBoards', 'clickApply').catch(() => null));
+        // Buttons such as Himalayas' "Apply now" open the company page with window.open(). A scripted click
+        // has no user gesture, so Chrome blocks that pop-up: record the address the page tried to open instead.
+        await chrome.scripting.executeScript({
+          target: { tabId: detailId }, world: 'MAIN',
+          func: () => {
+            if (window.__abOpenHook) return;
+            window.__abOpenHook = true;
+            const orig = window.open;
+            window.open = function (url, ...rest) {
+              try { if (url) document.documentElement.dataset.abOpened = new URL(url, location.href).href; } catch {}
+              return orig.call(this, url, ...rest);
+            };
+          }
+        }).catch(() => {});
+        // the click may navigate the page away mid-call: then the answer never comes and the click still counts
+        const clicked = await g(Promise.race([
+          call(detailId, '__abBoards', 'clickApply').catch(() => null),
+          sleep(4000).then(() => ({ clicked: true, text: info?.text || 'Apply', href: info?.href || '' }))
+        ]));
         if (!clicked?.clicked) { noButton = attempt === 1; break; }
         J.log(`  Clicked "${clicked.text}"`);
-        const r = await g(afterApplyClick(detailId, t0, before));
+        // a window.open the page asked for: if no tab shows up in 3 s, Chrome blocked it and the address is opened below
+        const r = await g(afterApplyClick(detailId, t0, before, clicked.opened ? 3000 : 10000));
         if (r.tab) {
           applyId = r.tab;
         } else if (r.popup?.newsletter && attempt === 1) {
@@ -725,8 +744,8 @@ const JOB_BOARDS = /(^|\.)(himalayas\.app|jobicy\.com|devitjobs\.(com|us)|remote
 
 // What an Apply click on the job page did: opened a new tab, moved this tab to another page,
 // or showed a pop-up / form on the page. Waits up to 10 s.
-async function afterApplyClick(tabId, since, before) {
-  const end = Date.now() + 10000;
+async function afterApplyClick(tabId, since, before, wait = 10000) {
+  const end = Date.now() + wait;
   let popup = null;
   while (Date.now() < end) {
     const tab = await waitNewTab(tabId, since, 400);

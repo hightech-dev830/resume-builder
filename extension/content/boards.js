@@ -251,12 +251,22 @@
     return el ? { text: label(el), href: el.href || '' } : null;
   }
 
-  function clickApply() {
+  // Clicks Apply. When the button opens its page with window.open (Himalayas), the address the page asked
+  // for is returned as href, so the bot can open it itself if Chrome blocked the pop-up.
+  async function clickApply() {
     const el = findApply();
     if (!el) return { clicked: false };
-    el.scrollIntoView({ block: 'center' });
+    delete document.documentElement.dataset.abOpened;
+    el.scrollIntoView({ block: 'nearest' }); // no jump to the middle of the page (sticky side cards)
     el.click();
-    return { clicked: true, text: label(el), href: el.href || '' };
+    let opened = '';
+    // a real link navigates (this script goes away), so only a button without an address is waited on
+    const realLink = el.href && !/^javascript:|^#/.test(el.getAttribute('href') || '#');
+    for (let i = 0; i < 10 && !opened && !realLink; i++) {
+      await sleep(150);
+      opened = document.documentElement.dataset.abOpened || '';
+    }
+    return { clicked: true, text: label(el), href: el.href || opened, opened: !!opened };
   }
 
   // The job on this page, like Jobright's scrapeDetail: title, company, location, salary and the job description.
