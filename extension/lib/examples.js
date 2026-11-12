@@ -3,7 +3,10 @@
 //  - examplesForAI(): the worked examples, notes, ATS flow and learned answers closest to the questions
 //    the AI is about to answer, as a text block for its prompt
 //  - learnFrom(): new questions the AI answered, kept so later forms (and the AI) can reuse them
-import KB from '../data/examples.json' with { type: 'json' };
+// Loaded with fetch (loadKB), not a JSON import: Chrome service workers cannot import .json modules everywhere.
+let KB = { rules: [], applications: [], notes: [], ats: [] };
+let ALL_QA = [];
+let loaded = null;
 
 const rx = (s) => (s ? new RegExp(s) : null);
 const pref = (s) => (/^\/.+\/$/.test(s) ? new RegExp(s.slice(1, -1)) : s);
@@ -15,12 +18,13 @@ const pref = (s) => (/^\/.+\/$/.test(s) ? new RegExp(s.slice(1, -1)) : s);
 //   today:    today's date
 //   cover:    the tailored cover letter text (e.g. "Message to the Hiring Team")
 //   check / never: a checkbox whose own text matches is ticked / never ticked
-export const EXAMPLES = KB.rules.map((r) => ({
+const compile = (r) => ({
   q: rx(r.q), not: rx(r.not), check: rx(r.check), never: rx(r.never),
   answer: r.pick ? r.pick.map(pref) : r.text ? [r.text] : null,
   text: r.text || (r.pick || []).find((p) => !/^\/.+\/$/.test(p)) || '',
   leave: !!r.leave, today: !!r.today, cover: !!r.cover, from: r.from
-}));
+});
+export const EXAMPLES = []; // filled in place by setKB, so rules.js always sees the current list
 
 export const fillProfile = (s, p = {}) => String(s || '').replace(/\{profile\.(\w+)\}/g, (_, k) => p[k] || '');
 
@@ -33,7 +37,21 @@ function similarity(a, b) {
   return n / Math.min(a.size, b.size) * (n / Math.max(a.size, b.size)) ** 0.25;
 }
 
-const ALL_QA = KB.applications.flatMap((app) => app.qa.map((x) => ({ ...x, from: `${app.company} (${app.ats})`, w: words(x.q) })));
+export function setKB(kb) {
+  KB = { rules: [], applications: [], notes: [], ats: [], ...kb };
+  EXAMPLES.length = 0;
+  EXAMPLES.push(...KB.rules.map(compile));
+  ALL_QA = KB.applications.flatMap((app) => app.qa.map((x) => ({ ...x, from: `${app.company} (${app.ats})`, w: words(x.q) })));
+}
+
+// Reads data/examples.json once per service-worker start. A broken file is logged and the bot carries on without it.
+export function loadKB() {
+  loaded ||= fetch(chrome.runtime.getURL('data/examples.json'))
+    .then((r) => r.json())
+    .then(setKB)
+    .catch((e) => { console.warn('data/examples.json could not be read:', e); loaded = null; });
+  return loaded;
+}
 
 // Text block for the AI: general notes, how this ATS works, then the closest example questions.
 export function examplesForAI(fields, { url = '', profile = {}, learned = [], max = 18 } = {}) {

@@ -6,7 +6,7 @@
 // write the tailored resume + cover letter when a real form appears, submit. Bids go to Supabase.
 import { getSettings, getProfile, seedProfile, profileForAI, secretsFor, rpc } from './lib/config.js';
 import { rulePlan, answersToSave, isFilled, postingWithApply } from './lib/rules.js';
-import { examplesForAI, learnFrom, mergeLearned } from './lib/examples.js';
+import { examplesForAI, learnFrom, mergeLearned, loadKB } from './lib/examples.js';
 
 const JOBRIGHT = /^https:\/\/([a-z]+\.)?jobright\.ai\//;
 const LINKEDIN = /^https:\/\/([a-z]+\.)?linkedin\.com\//i;
@@ -1091,6 +1091,7 @@ async function runSteps(J, startTabId, { job, docs, ensureDocs, s }) {
     //    If the last rules-only step did not move the page on, let the AI look at the whole form.
     const pageKey = `${snap.url}|${snap.fields.map((f) => f.id).join(',')}|${snap.buttons.map((b) => b.text).join(',')}`;
     const forceAI = pageKey === lastRulesKey;
+    await loadKB();
     const saved = await savedAnswers();
     const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI, jobSalary: job.salary });
     let rp = rulePlan(snap, ruleArgs());
