@@ -1,15 +1,49 @@
 // Extension settings, profile and server client. Shared by the service worker, popup and options page.
 
+// Job boards the bot can read jobs from. Each has a content script with the same interface
+// (scrapeList, loadMore, openCard, scrapeDetail, clickApply, confirmApplied); after the
+// "Apply" click the company application is handled the same way for every board.
+export const SITES = {
+  jobright: {
+    label: 'Jobright',
+    howHeard: 'Jobright.ai',
+    listUrl: 'https://jobright.ai/jobs/recommend',
+    host: /^https:\/\/([a-z]+\.)?jobright\.ai\//,
+    isList: (url) => /jobright\.ai\/jobs\/(recommend|search|list)/.test(url),
+    isDetail: (url) => /jobright\.ai\/jobs\/info\//.test(url),
+    script: 'content/jobright.js',
+    ns: '__abJobright',
+    detailPage: true // each job has its own page on the board; "Apply" is clicked there
+  },
+  hiringcafe: {
+    label: 'HiringCafe',
+    howHeard: 'HiringCafe',
+    listUrl: 'https://hiringcafe.com/classic',
+    host: /^https:\/\/([a-z]+\.)?(hiring\.cafe|hiringcafe\.com)\//,
+    // the search page (/, /classic, ?searchState=… with your filters); not a single job's page
+    isList: (url) => /^https:\/\/([a-z]+\.)?(hiring\.cafe|hiringcafe\.com)(\/|$)/.test(url) && !/\/(viewjob|jobs?)\//.test(url.split('?')[0]),
+    pointer: true, // hover and click with a real mouse cursor (the hover buttons and the new tab need it)
+    isDetail: () => false,
+    script: 'content/hiringcafe.js',
+    ns: '__abHiringCafe',
+    detailPage: false // "Apply Directly" is clicked on the card in the list
+  }
+};
+
+export const siteOf = (s) => SITES[s?.site] || SITES.jobright;
+export const listUrlOf = (s) => s?.listUrls?.[s.site] || siteOf(s).listUrl;
+
 export const DEFAULT_SETTINGS = {
   serverUrl: 'http://localhost:3000', // Resume Builder web app (local `npm run dev` or the Vercel URL)
   token: '',
-  listUrl: 'https://jobright.ai/jobs/recommend',
+  site: 'jobright', // key of SITES
+  listUrls: { jobright: SITES.jobright.listUrl, hiringcafe: SITES.hiringcafe.listUrl },
   filters: {
     remoteOnly: true,
     maxAgeHours: 24,       // "today's jobs": posted within the last 24 hours
     maxBids: 25,           // stop after this many submitted applications per run
-    refreshMin: 5,         // reload the Jobright list this often (minutes); the bot waits for new jobs
-    minMatch: 0,           // skip jobs below this Jobright match %
+    refreshMin: 5,         // reload the job list this often (minutes); the bot waits for new jobs
+    minMatch: 0,           // skip jobs below this Jobright match % (other boards show no match %)
     titleExclude: '',      // comma-separated words; skip titles containing any
     companyExclude: ''     // comma-separated company names to skip
   },
@@ -25,23 +59,25 @@ export const DEFAULT_SETTINGS = {
   }
 };
 
-// Personal details the bot types into forms. Filled from profile.local.json on install
-// (kept out of git) and editable on the options page.
+// Personal details the bot types into forms: Kevin's profile, so a new browser starts filled in.
+// The street address and the secrets (password, SSN last 4, date of birth) are NOT here, because
+// this repo is public: they come from profile.local.json (kept out of git) or the options page.
 export const DEFAULT_PROFILE = {
-  first_name: '', last_name: '', full_name: '', preferred_name: '',
-  email: '', phone: '', phone_country_code: '+1',
-  address_line1: '', city: '', state: '', state_full: '', zip: '', county: '', country: 'United States',
-  current_location: '',
-  linkedin: '', github: '', website: '',
-  current_title: '', current_company: '', years_experience: '',
-  highest_degree: '', degree_field: '', school: '', graduation_year: '',
-  work_authorized_us: 'Yes', needs_sponsorship: 'No', citizenship: '',
+  first_name: 'Kevin', last_name: 'Burgess', full_name: 'Kevin Burgess', preferred_name: 'Kevin',
+  email: 'kevinburgess219000@gmail.com', phone: '310-981-3618', phone_country_code: '+1',
+  address_line1: '', city: 'Rancho Palos Verdes', state: 'CA', state_full: 'California', zip: '90275', county: 'Los Angeles', country: 'United States',
+  current_location: 'Rancho Palos Verdes, CA, United States',
+  linkedin: 'https://www.linkedin.com/in/kevin-burgess-357505446/', github: 'https://github.com/hightech-dev830', website: 'https://portfolio-kb-219.vercel.app/',
+  current_title: 'Senior Software Engineer', current_company: '', years_experience: '11',
+  highest_degree: "Bachelor's Degree", degree_field: 'Computer Science', school: 'California State University Dominguez Hills', graduation_year: '2014',
+  work_authorized_us: 'Yes, authorized to work for any employer in the US', needs_sponsorship: 'No, now or in the future', citizenship: '',
   willing_to_relocate: 'No', remote_preference: 'Remote',
-  start_date: '', notice_period: '', salary_expectation: '',
-  gender: '', pronouns: '', sexual_orientation: '', race_ethnicity: '', hispanic_latino: '', veteran_status: '', disability_status: '',
-  sms_consent: 'Yes', how_heard: 'Jobright.ai', licenses_certifications: 'None',
-  other_info: '',
-  // secrets: never sent to the AI, only typed into the page
+  start_date: '2026-12-01 (or immediately if the form asks for availability)', notice_period: 'Available immediately', salary_expectation: '',
+  gender: 'Male (Man)', pronouns: 'He/Him', sexual_orientation: 'Heterosexual', race_ethnicity: 'Asian (Not Hispanic or Latino)', hispanic_latino: 'No',
+  veteran_status: 'I am not a protected veteran', disability_status: 'No, I do not have a disability',
+  sms_consent: 'Yes', how_heard: 'Linkedin', licenses_certifications: 'None',
+  other_info: "Self-rating / comfort-level questions (for example \"Rate your comfort level translating ambiguous business requirements into technical architecture\", data warehouse architecture): choose \"Comfortable\", not the highest level.\n\"Have you led or owned the design of data models / data warehouse architecture?\": Yes.\nWilling to complete a take-home assignment or interview exercise: Yes.\nDisability questions: No. Sexual orientation: Heterosexual. Gender: Man / Male. Race: Asian.\nFor any other optional question with no answer in this profile, write N/A.",
+  // secrets: never sent to the AI, only typed into the page; never in git
   password: '', ssn_last4: '', dob: ''
 };
 
@@ -52,8 +88,14 @@ export async function getSettings() {
   const s = settings || {};
   // 25 was the old default page limit; multi-step sites (Workday) need more
   if (s.behavior?.stepLimit === 25) s.behavior.stepLimit = DEFAULT_SETTINGS.behavior.stepLimit;
+  // before 1.2.1 there was one list URL (Jobright's)
+  const { listUrl, ...rest } = s;
+  const listUrls = { ...DEFAULT_SETTINGS.listUrls, ...(listUrl ? { jobright: listUrl } : {}), ...(s.listUrls || {}) };
+  if (listUrls.hiringcafe === 'https://hiring.cafe/') listUrls.hiringcafe = SITES.hiringcafe.listUrl; // 1.2.1's default
   return {
-    ...DEFAULT_SETTINGS, ...s,
+    ...DEFAULT_SETTINGS, ...rest,
+    site: SITES[s.site] ? s.site : DEFAULT_SETTINGS.site,
+    listUrls,
     filters: { ...DEFAULT_SETTINGS.filters, ...(s.filters || {}) },
     behavior: { ...DEFAULT_SETTINGS.behavior, ...(s.behavior || {}) }
   };
@@ -61,7 +103,7 @@ export async function getSettings() {
 
 export async function saveSettings(patch) {
   const cur = await getSettings();
-  const next = { ...cur, ...patch, filters: { ...cur.filters, ...(patch.filters || {}) }, behavior: { ...cur.behavior, ...(patch.behavior || {}) } };
+  const next = { ...cur, ...patch, listUrls: { ...cur.listUrls, ...(patch.listUrls || {}) }, filters: { ...cur.filters, ...(patch.filters || {}) }, behavior: { ...cur.behavior, ...(patch.behavior || {}) } };
   await chrome.storage.local.set({ settings: next });
   return next;
 }
@@ -81,16 +123,18 @@ export async function saveProfile(profile) {
 // Also reloads it when the file's "_version" is newer than the saved profile's.
 export async function seedProfile() {
   const { profile } = await chrome.storage.local.get('profile');
+  let file = null;
   try {
     const res = await fetch(chrome.runtime.getURL('profile.local.json'));
-    if (!res.ok) return false;
-    const file = await res.json();
-    if (profile?.email && (Number(file._version) || 0) <= (Number(profile._version) || 0)) return false;
-    await saveProfile(file);
-    return true;
+    if (res.ok) file = await res.json();
   } catch {
-    return false;
+    // no profile.local.json in this copy (e.g. a fresh clone): the built-in profile is used
   }
+  const newer = file && (Number(file._version) || 0) > (Number(profile?._version) || 0);
+  if (profile?.email && !newer) return false;
+  // a new browser, or a profile saved empty: start from the built-in profile (+ the local file, if any)
+  await chrome.storage.local.set({ profile: { ...DEFAULT_PROFILE, ...(file || {}), _version: file?._version || profile?._version || 0 } });
+  return true;
 }
 
 function dobParts(dob) {

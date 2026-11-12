@@ -1,4 +1,4 @@
-import { getSettings, rpc } from './lib/config.js';
+import { getSettings, saveSettings, rpc, SITES, siteOf, listUrlOf } from './lib/config.js';
 
 const $ = (s) => document.querySelector(s);
 const PHASES = {
@@ -15,6 +15,7 @@ function render(bot) {
   $('#startBtn').classList.toggle('hidden', b.running);
   $('#stopBtn').classList.toggle('hidden', !b.running);
   $('#singleBtn').disabled = b.running;
+  $('#site').disabled = b.running; // the running bot keeps the board it started on
   for (const k of ['applied', 'attention', 'failed', 'skipped']) $('#c' + k[0].toUpperCase() + k.slice(1)).textContent = b.counts?.[k] || 0;
   const c = b.current;
   $('#current').classList.toggle('hidden', !c);
@@ -25,7 +26,7 @@ function render(bot) {
   }
   const log = $('#log');
   const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
-  log.innerHTML = (b.log || []).slice(-80).map((l) =>
+  log.innerHTML = (b.log || []).slice(-200).map((l) =>
     `<div class="${l.level === 'error' ? 'err' : l.level === 'warn' ? 'warn' : l.level === 'ok' ? 'ok' : ''}"><time>${new Date(l.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>${esc(l.msg)}</div>`).join('');
   if (atBottom) log.scrollTop = log.scrollHeight;
 }
@@ -47,13 +48,69 @@ $('#singleBtn').addEventListener('click', async () => {
   send('runSingle', { tabId: tab.id });
 });
 $('#clearLog').addEventListener('click', () => send('clearLog'));
+
+// "Apply again": carry on with a "need you" job after you fixed its page.
+// Uses the active tab when it is one of those jobs, else the newest one still open.
+let attention = {};
+async function showAgain() {
+  const all = (await chrome.storage.session.get('attentionTabs')).attentionTabs || {};
+  const open = new Set((await chrome.tabs.query({})).map((t) => t.id));
+  attention = Object.fromEntries(Object.entries(all).filter(([id]) => open.has(Number(id))));
+  const n = Object.keys(attention).length;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const here = tab && attention[tab.id];
+  const pick = here || Object.values(attention).sort((a, b) => b.t - a.t)[0];
+  $('#againBtn').classList.toggle('hidden', !n);
+  $('#againInfo').textContent = pick ? `· ${pick.job?.role || 'job'}${pick.job?.company ? ` @ ${pick.job.company}` : ''}${n > 1 ? ` (+${n - 1} more)` : ''}` : '';
+}
+$('#againBtn').addEventListener('click', async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  $('#msg').textContent = '';
+  const res = await chrome.runtime.sendMessage({ type: 'applyAgain', tabId: tab?.id });
+  if (!res?.ok) {
+    $('#msg').textContent = res?.error || 'Something went wrong';
+    $('#msg').className = 'err';
+  } else if (res.queued) {
+    $('#msg').textContent = 'Queued: the bot applies again right after the current job.';
+    $('#msg').className = 'muted';
+  }
+});
+chrome.storage.onChanged.addListener((_ch, area) => area === 'session' && showAgain());
+chrome.tabs.onActivated.addListener(showAgain);
+chrome.tabs.onRemoved.addListener(() => setTimeout(showAgain, 200));
+showAgain();
+
+// History page (one tab, reused): the counters open it filtered to their status
+async function openHistory(status = '') {
+  const base = chrome.runtime.getURL('history.html');
+  const tab = (await chrome.tabs.query({})).find((t) => (t.url || '').startsWith(base));
+  if (tab) {
+    await chrome.tabs.update(tab.id, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'historyStatus', status }).catch(() => {});
+  } else {
+    chrome.tabs.create({ url: base + (status ? `?status=${status}` : '') });
+  }
+}
+document.querySelectorAll('.counts [data-status]').forEach((el) => el.addEventListener('click', () => openHistory(el.dataset.status)));
+$('#openHistory').addEventListener('click', () => openHistory());
 $('#openOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
 $('#openOptions2').addEventListener('click', () => chrome.runtime.openOptionsPage());
-$('#openJobright').addEventListener('click', async () => chrome.tabs.create({ url: (await getSettings()).listUrl }));
+$('#openBoard').addEventListener('click', async () => chrome.tabs.create({ url: listUrlOf(await getSettings()) }));
+
+// job site picker
+$('#site').innerHTML = Object.entries(SITES).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
+function showSite(s) {
+  $('#site').value = s.site;
+  $('#openBoard').textContent = `Open ${siteOf(s).label}`;
+}
+$('#site').addEventListener('change', async () => showSite(await saveSettings({ site: $('#site').value })));
+chrome.storage.onChanged.addListener((ch) => ch.settings && getSettings().then(showSite));
 
 chrome.storage.onChanged.addListener((ch) => ch.bot && render(ch.bot.newValue));
 chrome.storage.local.get('bot').then(({ bot }) => render(bot));
 getSettings().then((s) => {
+  showSite(s);
   $('#signin').classList.toggle('hidden', !!s.token);
   if (s.token) showUsage();
 });
@@ -71,6 +128,14 @@ async function showUsage() {
     $('#usage').textContent = '';
   }
 }
-chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-  $('#singleBtn').classList.toggle('hidden', !/jobright\.ai\/jobs\/info\//.test(tab?.url || ''));
-});
+// the side panel stays open across tabs: show "Apply to this job" only on a Jobright job page
+function checkTab() {
+  chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+    $('#singleBtn').classList.toggle('hidden', !/jobright\.ai\/jobs\/info\//.test(tab?.url || ''));
+  });
+}
+checkTab();
+chrome.tabs.onActivated.addListener(checkTab);
+chrome.tabs.onUpdated.addListener((_id, info) => info.url && checkTab());
+// refresh the AI cost line every minute
+setInterval(() => getSettings().then((s) => s.token && showUsage()), 60000);

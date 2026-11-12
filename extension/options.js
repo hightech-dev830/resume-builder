@@ -1,4 +1,4 @@
-import { getSettings, saveSettings, getProfile, saveProfile, seedProfile, DEFAULT_PROFILE, SECRET_KEYS, rpc, login } from './lib/config.js';
+import { getSettings, saveSettings, getProfile, saveProfile, seedProfile, DEFAULT_PROFILE, SECRET_KEYS, rpc, login, SITES } from './lib/config.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -39,12 +39,15 @@ $('#nav').addEventListener('click', (e) => {
 });
 
 // ---------- profile ----------
+// shown as dots on this page; the date of birth stays readable (it is still kept from the AI, see SECRET_KEYS)
+const MASKED = SECRET_KEYS.filter((k) => k !== 'dob');
+
 function renderProfile(p) {
   $('#profileGrid').innerHTML = Object.keys(DEFAULT_PROFILE).map((k) => {
     const wide = k === 'other_info' ? ' class="wide"' : '';
     const input = k === 'other_info'
       ? `<textarea id="p-${k}" rows="3"></textarea>`
-      : `<input id="p-${k}" ${SECRET_KEYS.includes(k) ? 'type="password" class="secret"' : ''} autocomplete="off">`;
+      : `<input id="p-${k}" ${MASKED.includes(k) ? 'type="password" class="secret"' : ''} autocomplete="off">`;
     return `<label${wide}>${PROFILE_LABELS[k] || k}${input}</label>`;
   }).join('');
   for (const k of Object.keys(DEFAULT_PROFILE)) $(`#p-${k}`).value = p[k] ?? '';
@@ -57,7 +60,9 @@ function collectProfile() {
 // ---------- local settings ----------
 function renderSettings(s) {
   $('#serverUrl').value = s.serverUrl;
-  $('#listUrl').value = s.listUrl;
+  $('#site').innerHTML = Object.entries(SITES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('');
+  $('#site').value = s.site;
+  for (const k of Object.keys(SITES)) $(`#listUrl-${k}`).value = s.listUrls[k] || SITES[k].listUrl;
   for (const [k, v] of Object.entries(s.filters)) {
     const el = $(`#f-${k}`);
     if (el) el.type === 'checkbox' ? (el.checked = !!v) : (el.value = v);
@@ -75,7 +80,7 @@ function collectSettings() {
     if (!el) return [k, obj[k]];
     return [k, el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value.trim()];
   }));
-  return { serverUrl: $('#serverUrl').value.trim().replace(/\/+$/, ''), listUrl: $('#listUrl').value.trim(), filtersRaw: read('f', current.filters), behaviorRaw: read('b', current.behavior) };
+  return { serverUrl: $('#serverUrl').value.trim().replace(/\/+$/, ''), site: $('#site').value, listUrls: Object.fromEntries(Object.keys(SITES).map((k) => [k, $(`#listUrl-${k}`).value.trim() || SITES[k].listUrl])), filtersRaw: read('f', current.filters), behaviorRaw: read('b', current.behavior) };
 }
 
 let current = null;
@@ -212,16 +217,32 @@ $('#resetDone').addEventListener('click', async () => {
 });
 
 async function showDoneCount() {
-  const { done } = await chrome.storage.local.get('done');
+  const { done, answers } = await chrome.storage.local.get(['done', 'answers']);
   $('#doneCount').textContent = `${Object.keys(done || {}).length} jobs handled so far`;
+  $('#answerCount').textContent = `${Object.keys(answers || {}).length} answers saved`;
 }
+
+const escHtml = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+$('#showAnswers').addEventListener('click', async () => {
+  const { answers } = await chrome.storage.local.get('answers');
+  const rows = Object.values(answers || {}).sort((a, b) => b.t - a.t);
+  $('#answerList').innerHTML = rows.length
+    ? rows.map((r) => `<div><b>${escHtml(r.q)}</b> → ${escHtml(r.answer)}</div>`).join('')
+    : 'No saved answers yet.';
+});
+$('#clearAnswers').addEventListener('click', async () => {
+  if (!confirm('Forget every saved answer? The AI will answer those questions again (and save them again).')) return;
+  await chrome.storage.local.remove('answers');
+  $('#answerList').innerHTML = '';
+  showDoneCount();
+});
 
 // ---------- save ----------
 $('#saveBtn').addEventListener('click', async () => {
   status('Saving…');
   try {
     const c = collectSettings();
-    current = await saveSettings({ serverUrl: c.serverUrl, listUrl: c.listUrl, filters: c.filtersRaw, behavior: c.behaviorRaw });
+    current = await saveSettings({ serverUrl: c.serverUrl, site: c.site, listUrls: c.listUrls, filters: c.filtersRaw, behavior: c.behaviorRaw });
     await saveProfile(collectProfile());
     if (server) {
       captureAi();

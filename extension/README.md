@@ -1,16 +1,18 @@
-# Auto Bid for Jobright (Chrome extension)
+# Auto Bid (Chrome extension)
 
-Applies to remote jobs from your Jobright list, one after another. For each job, it:
+Applies to remote jobs from your job list on **Jobright** or **HiringCafe**, one after another. Pick the site in the side panel (**Job site**) or in the settings. For each job, it:
 
-1. Opens the job on Jobright and reads the title, company, salary and description.
-2. Saves a bid in Supabase through the Resume Builder server (`source = jobright`).
-3. Clicks **Apply with autofill** and follows it to the company's application page, where it reads the full job description.
+1. Reads the title, company, salary and description. On Jobright it opens the job's page; on HiringCafe it reads the job box on the list.
+2. Saves a bid in Supabase through the Resume Builder server (`source = jobright` or `hiringcafe`).
+3. Goes to the company's application page, where it reads the full job description. On Jobright it clicks **Apply with autofill** on the job page; on HiringCafe it moves the cursor onto the job box and clicks **Apply Directly**. From here on, both sites are handled the same way.
 4. Generates a tailored resume and cover letter with your prompts. The server saves them like the desktop app does: `G:/Document/Resume_bot/<date>/<id>_<Company>/` gets the resume PDF, the cover letter PDF, `resume.json`, `job.txt` and `cover_letter.txt`. Change the folder under **Jobs & behavior** in the settings. This needs the server running on your PC; on Vercel the files go to Supabase Storage.
 5. Fills the application page by page. The AI planner reads each page (fields, buttons, text) and decides what to type, pick, check and upload, and which button to press next. Cookie banners are accepted automatically. If a site asks for an account, it signs in or registers with your email and password.
-6. Detects the thank-you page, marks the bid **applied**, and clicks **Yes, I applied!** on Jobright.
+6. Detects the thank-you page, marks the bid **applied**, and marks the job applied on the board: **Yes, I applied!** on Jobright, **Save** on the HiringCafe job box. Saved HiringCafe jobs are never bid on again, and the list is reloaded every 5 minutes (setting: refresh the job list every … minutes).
 7. Shows a notification, then moves to the next job.
 
 If a step needs you (a captcha, an email verification code, or a question it can't answer), it notifies you, leaves that tab open, marks the bid `needs_attention`, and moves on. For a captcha, it first waits a few minutes for you to solve it.
+
+**Apply again:** after you fix a "need you" job on its tab (solve the bot check, add a missing answer), press **↻ Apply again** in the side panel (under Start/Stop). The bot carries on with that job on its tab, reusing its bid and tailored resume, submits it and marks it like any other bid (Save on HiringCafe, History). It uses the "need you" job in the active tab, else the newest one still open. While the bot is busy with another job, the retry is queued and runs right after it.
 
 ## Setup
 
@@ -20,19 +22,21 @@ If a step needs you (a captcha, an email verification code, or a question it can
 4. **Settings** (right-click the icon, then **Options**):
    - **Connection:** enter the server URL and sign in with the web app login (`jkr` / `jkr`).
    - **AI & prompts:** pick Claude, OpenAI or Gemini, paste the API key, and choose models. You can use a faster model for reading application pages. These settings are shared with the web app.
-   - **My info:** filled from `profile.local.json` on first load. Your password, SSN last 4 and date of birth never go to the AI; it sees placeholders, and the real values are typed straight into the page.
+   - **My info:** comes pre-filled with Kevin's profile (built into `lib/config.js`), so a new browser or a fresh clone starts filled in. Only the street address, password, SSN last 4 and date of birth are not built in (this repo is public): they come from `profile.local.json` when it is present, or you type them once in My info. Your password, SSN last 4 and date of birth never go to the AI; it sees placeholders, and the real values are typed straight into the page.
    - **Jobs & behavior:** remote only, posting age (default 24 h = today's jobs), maximum bids per run, template, auto-submit, cover letter, local copies.
-5. On Jobright, set your search filters (role, Remote, Past 24 hours). Then open the extension popup and press **Start bot**. To run the bot on one job only, open that job's Jobright page and press **Apply to this job**.
+5. On Jobright or HiringCafe, set your search filters (role, Remote, Past 24 hours; on HiringCafe also "Remote only" and **Sort by: Date**). Choose the same site under **Job site** in the side panel and press **Start bot**. The bot uses the open list tab of that site, or opens the list URL from the settings. To run the bot on one job only, open that job's Jobright page and press **Apply to this job** (Jobright only).
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `background.js` | The bid loop: Jobright list → job → application → confirmation |
+| `background.js` | The bid loop: job list → job → application → confirmation |
 | `content/jobright.js` | Reads Jobright cards and job pages, clicks Apply and "Yes, I applied!" |
+| `content/hiringcafe.js` | Reads HiringCafe job boxes, hovers one and clicks "Apply Directly", later "Save" |
 | `content/agent.js` | Runs in every frame of the application tab: snapshots fields and buttons, fills fields, uploads files |
-| `lib/config.js` | Settings, profile (and secret placeholders), server client |
-| `popup.*` | Start/Stop, live status, counters, log |
+| `lib/config.js` | Job sites (`SITES`), settings, profile (and secret placeholders), server client |
+| `popup.*` | Start/Stop, job site, live status, counters (click one to open its history), log |
+| `history.*` | History page: every job the bot handled (applied, need you, failed, skipped, stopped) with a status filter; older bids come from Resume Builder (`bot:history`) |
 | `options.*` | Settings page |
 | `profile.local.json` | Your personal details. **Not in git** (it holds your password) |
 
@@ -41,11 +45,20 @@ The AI planner prompt lives on the server in `lib/agent.js`, and the server meth
 ## Notes
 
 - **Order:** the bot opens the application first and creates the bid and the tailored resume + cover letter only when a real form needs them. Jobs it skips cost no AI calls.
-- **Skip job:** while the bot works on a job, the popup shows **⏭ Skip job** under its title. It drops that job at once (even mid-AI call or while waiting on a captcha), marks its bid "skipped", closes its tabs (if "close tabs" is on) and moves to the next job. Skipped jobs are not retried.
+- **Side panel:** the toolbar icon opens the Auto Bid panel on the right side of Chrome. It stays open while you browse and while the bot switches tabs, so you can watch progress all the time. Close it with its ✕; the bot keeps running either way.
+- **Skip job:** while the bot works on a job, the panel shows **⏭ Skip job** under its title. It drops that job at once (even mid-AI call or while waiting on a captcha), marks its bid "skipped", closes its tabs (if "close tabs" is on) and moves to the next job. Skipped jobs are not retried.
 - **Accounts:** jobs whose site asks you to sign up or sign in (Workday, iCIMS, Taleo…) are skipped, with no bid and no AI cost. Turn off "Skip jobs that need an account" in Settings → Jobs & behavior to let the bot create accounts with your email and password instead.
 - **LinkedIn:** jobs that send you to LinkedIn, or only allow Easy Apply / signing in with LinkedIn, are skipped.
 - **Job list:** reloaded every 5 minutes (setting). When no new jobs are left, the bot waits for the next reload instead of stopping.
+- **Low AI use:** each page is first handled by rules (`lib/rules.js`) with no AI:
+  - The "Apply" and "Autofill with Resume" buttons are clicked without the AI.
+  - Contact details, address, links, work authorization and sponsorship are filled from My info, along with relocation, the EEO questions, "how did you hear", uploads and consent boxes.
+  - The AI is only asked about the required questions that are left, and it sees only those fields. Usually that's the "Why this company?" kind of question.
+  - Other screening questions the AI answered once are saved (Settings → Jobs & behavior → Saved answers) and reused on later jobs.
+  - If a page doesn't move on after a rules-only step (a validation error, an unusual form), the next step goes to the AI with the whole form.
+  - For the AI calls that remain, choose a small model under Settings → AI & prompts → Agent model.
 - **AI cost:** the popup shows today's and the last 30 days' cost; Settings → AI & prompts shows totals per model and lets you set prices (US$ per 1M tokens) for models without a built-in price.
+- **Dropdowns:** the bot opens each custom dropdown once to read its real options, and the AI must pick one of them (your answer is mapped to the closest offered option, e.g. "Male (Man)" → "Male"). A value the form does not offer is never forced; the AI is told the options and picks again. "Other" is avoided; for "How did you hear about us" it picks Jobright, else Indeed, else another job board.
 - **Answers:** edit `profile.local.json` and raise its `_version` to push changes into the extension; changes made on the settings page stay until the version goes up again.
 
 ## Limits

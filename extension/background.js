@@ -1,10 +1,24 @@
-// Auto Bid service worker: walks the Jobright job list, and for each new remote job posted today
-// reads the job, generates a tailored resume + cover letter through the Resume Builder server,
-// opens the company application, fills it page by page with the AI planner, and finally
-// confirms "Yes, I applied!" on Jobright. Every bid is saved to Supabase by the server.
-import { getSettings, getProfile, seedProfile, profileForAI, secretsFor, rpc } from './lib/config.js';
+// Auto Bid service worker: walks the job list of the chosen board (Jobright or HiringCafe), and
+// for each new remote job posted today reads the job, generates a tailored resume + cover letter
+// through the Resume Builder server, opens the company application, fills it page by page with
+// the AI planner, and finally marks the job applied on the board ("Yes, I applied!" on Jobright,
+// "Save" on HiringCafe). Every bid is saved to Supabase by the server.
+import { getSettings, getProfile, seedProfile, profileForAI, secretsFor, rpc, SITES, siteOf, listUrlOf } from './lib/config.js';
+import { rulePlan, answersToSave, isAutofillUpload } from './lib/rules.js';
 
-const JOBRIGHT = /^https:\/\/([a-z]+\.)?jobright\.ai\//;
+// Answers the AI gave to reusable screening questions, reused on later applications without the AI.
+async function savedAnswers() {
+  const { answers } = await chrome.storage.local.get('answers');
+  return answers || {};
+}
+async function rememberAnswers(add) {
+  if (!Object.keys(add).length) return;
+  const all = { ...(await savedAnswers()), ...add };
+  const keys = Object.keys(all);
+  if (keys.length > 3000) keys.sort((a, b) => all[a].t - all[b].t).slice(0, keys.length - 3000).forEach((k) => delete all[k]);
+  await chrome.storage.local.set({ answers: all });
+}
+
 const LINKEDIN = /^https:\/\/([a-z]+\.)?linkedin\.com\//i;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -122,7 +136,8 @@ chrome.tabs.onCreated.addListener((tab) => {
 async function waitNewTab(openerId, since, timeout) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
-    const hit = createdTabs.find((c) => c.opener === openerId && c.t >= since);
+    // openerId null: any tab opened since `since`
+    const hit = createdTabs.find((c) => (openerId == null || c.opener === openerId) && c.t >= since);
     if (hit) return hit.id;
     await sleep(300);
   }
@@ -173,9 +188,69 @@ async function call(tabId, ns, method, args = [], { allFrames = false, frameId }
   return allFrames ? res : res[0]?.result;
 }
 
-async function jobright(tabId, method, ...args) {
-  await inject(tabId, 'content/jobright.js');
-  return call(tabId, '__abJobright', method, args);
+// Real mouse input (chrome.debugger), for pages whose hover buttons and new tabs only react to a
+// real cursor; a scripted click has no user gesture, so the browser blocks the tab it opens.
+// Chrome shows "Auto Bid started debugging this browser" while attached.
+async function withDebugger(tabId, fn) {
+  const target = { tabId };
+  let attached = false;
+  try {
+    await chrome.debugger.attach(target, '1.3');
+    attached = true;
+  } catch (err) {
+    if (!/already attached/i.test(err.message)) throw err;
+  }
+  try {
+    return await fn((method, params) => chrome.debugger.sendCommand(target, method, params));
+  } finally {
+    if (attached) await chrome.debugger.detach(target).catch(() => {});
+  }
+}
+
+// Moves the cursor to (x, y) in small steps; clicks there when `click` is set.
+async function realMouse(tabId, { x, y }, { click = false } = {}) {
+  await withDebugger(tabId, async (send) => {
+    const from = realMouse.last?.[tabId] || { x: Math.max(0, x - 120), y: Math.max(0, y - 80) };
+    for (let i = 1; i <= 6; i++) {
+      const p = { x: Math.round(from.x + ((x - from.x) * i) / 6), y: Math.round(from.y + ((y - from.y) * i) / 6) };
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...p });
+      await sleep(40);
+    }
+    realMouse.last = { ...(realMouse.last || {}), [tabId]: { x, y } };
+    if (click) {
+      await sleep(120);
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+      await sleep(60);
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
+    }
+  });
+}
+
+// On a pointer board (HiringCafe): cursor onto the job box, wait for its hover buttons,
+// then a real click on the button. what = 'apply' | 'save'. Returns { clicked, href, error, saved }.
+// A job already saved on the board is not applied to again (saved = true, clicked = false).
+async function pointerClick(site, tabId, card, what) {
+  const spot = await board(site, tabId, 'target', card, 'card');
+  if (!spot || spot.error) return { clicked: false, error: spot?.error || 'no reply from the page' };
+  await realMouse(tabId, spot);
+  let btn = null;
+  for (let i = 0; i < 12; i++) {
+    await sleep(350);
+    btn = await board(site, tabId, 'target', card, what);
+    if (btn && (btn.saved || !btn.error)) break;
+    if (i % 3 === 2) await realMouse(tabId, { x: spot.x + (i % 2 ? 6 : -6), y: spot.y + 4 }); // nudge to re-trigger hover
+  }
+  if (what === 'apply' && btn?.saved) return { clicked: false, saved: true, error: 'already saved on the board' };
+  if (what === 'save' && btn?.already) return { clicked: true, saved: true };
+  if (!btn || btn.error) return { clicked: false, error: btn?.error || 'no reply from the page', href: btn?.href || '' };
+  await realMouse(tabId, btn, { click: true });
+  return { clicked: true, href: btn.href || '' };
+}
+
+// Calls the job board's content script (content/jobright.js, content/hiringcafe.js …).
+async function board(site, tabId, method, ...args) {
+  await inject(tabId, site.script);
+  return call(tabId, site.ns, method, args);
 }
 
 async function settle(tabId) {
@@ -195,6 +270,23 @@ async function focusTab(tabId, attention = false) {
 
 // ---------------- helpers ----------------
 
+// The form's own address for applicant systems that show the posting and the form on separate pages.
+//   Ashby: jobs.ashbyhq.com/<company>/<uuid>  -> …/<uuid>/application  (the "Application" tab)
+//   Lever: jobs.lever.co/<company>/<uuid>     -> …/<uuid>/apply
+function directApplyUrl(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return '';
+  }
+  const uuid = /^\/[^/]+\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i;
+  if (/(^|\.)ashbyhq\.com$/.test(u.hostname) && uuid.test(u.pathname)) u.pathname = u.pathname.replace(/\/?$/, '/application');
+  else if (/(^|\.)lever\.co$/.test(u.hostname) && uuid.test(u.pathname)) u.pathname = u.pathname.replace(/\/?$/, '/apply');
+  else return '';
+  return u.toString();
+}
+
 function slug(s, max = 40) {
   return String(s || '').normalize('NFKD').replace(/[^\w\s-]/g, '').trim().replace(/[\s-]+/g, '_').slice(0, max) || 'Untitled';
 }
@@ -203,6 +295,7 @@ const words = (csv) => String(csv || '').split(',').map((w) => w.trim().toLowerC
 
 function filterReason(job, s) {
   const f = s.filters;
+  if (job.saved) return 'already saved on the job board';
   if (f.remoteOnly && !job.remote) return 'not remote';
   if (f.maxAgeHours && job.ageHours != null && job.ageHours >= f.maxAgeHours) return `posted ${job.posted}`;
   if (f.minMatch && job.match && job.match < f.minMatch) return `match ${job.match}%`;
@@ -216,6 +309,16 @@ function filterReason(job, s) {
 async function processed() {
   const { done } = await chrome.storage.local.get('done');
   return done || {};
+}
+
+// Every job's result (applied, attention, failed, skipped, stopped), newest last; the History page reads it.
+async function addHistory(entry, { replaceBid = false } = {}) {
+  const { history = [] } = await chrome.storage.local.get('history');
+  const at = replaceBid && entry.bidId ? history.findLastIndex((h) => h.bidId === entry.bidId) : -1;
+  if (at >= 0) history.splice(at, 1);
+  history.push({ t: Date.now(), ...entry });
+  if (history.length > 5000) history.splice(0, history.length - 5000);
+  await chrome.storage.local.set({ history });
 }
 
 async function markProcessed(id, status) {
@@ -264,11 +367,11 @@ async function withTemplate(s) {
   return { ...s, filesDir: server.local_output_dir || '', behavior: { ...s.behavior, template: s.behavior.template || server.default_template || 'kevin' } };
 }
 
-async function listTab(s) {
-  const tabs = await chrome.tabs.query({ url: 'https://jobright.ai/jobs/*' });
-  const list = tabs.find((t) => /\/jobs\/(recommend|search|list)/.test(t.url));
+async function listTab(s, site) {
+  const tabs = await chrome.tabs.query({});
+  const list = tabs.find((t) => site.host.test(t.url || '') && site.isList(t.url));
   if (list) return list.id;
-  const tab = await chrome.tabs.create({ url: s.listUrl, active: true });
+  const tab = await chrome.tabs.create({ url: listUrlOf(s), active: true });
   await waitComplete(tab.id);
   await sleep(2500);
   return tab.id;
@@ -276,14 +379,18 @@ async function listTab(s) {
 
 async function runLoop() {
   const s = await withTemplate(await getSettings());
-  const listId = await listTab(s);
+  const site = siteOf(s);
+  log(`Job board: ${site.label}`);
+  const listId = await listTab(s, site);
   const tried = new Set();
   let emptyRounds = 0;
   const refreshMs = Math.max(1, Number(s.filters.refreshMin) || 5) * 60000;
   let lastRefresh = Date.now();
+  let diagnosed = false;
+  let lastCount = 0;
 
   const refreshList = async () => {
-    log('Refreshing the Jobright job list');
+    log(`Refreshing the ${site.label} job list`);
     await chrome.tabs.reload(listId);
     await waitComplete(listId);
     await sleep(3000);
@@ -292,14 +399,23 @@ async function runLoop() {
   };
 
   while (!stopRequested && state.counts.applied < s.filters.maxBids) {
+    while (retryQueue.length && !stopRequested) await retryAttention(retryQueue.shift(), s);
+    if (stopRequested) break;
     setPhase('scanning', null);
-    if (!(await tabExists(listId))) throw new Error('The Jobright list tab was closed.');
+    if (!(await tabExists(listId))) throw new Error(`The ${site.label} list tab was closed.`);
     if (Date.now() - lastRefresh >= refreshMs) await refreshList();
-    let cards = (await jobright(listId, 'scrapeList')) || [];
+    let cards = (await board(site, listId, 'scrapeList')) || [];
     if (!cards.length) {
       await sleep(3000);
-      cards = (await jobright(listId, 'scrapeList')) || [];
+      cards = (await board(site, listId, 'scrapeList')) || [];
+      if (!cards.length && !diagnosed) {
+        diagnosed = true;
+        const d = site.ns === '__abHiringCafe' ? await board(site, listId, 'diagnose').catch(() => null) : null;
+        log(`No job boxes found on the ${site.label} list${d ? `. Page: ${JSON.stringify(d)}` : ''}`, 'warn');
+      }
     }
+    if (cards.length && cards.length !== lastCount) log(`Found ${cards.length} jobs on the list`);
+    lastCount = cards.length;
     const done = await processed();
     const fresh = cards.filter((c) => !tried.has(c.id || c.title + c.company) && !(c.id && done[c.id]));
     const seen = fresh.length ? await rpc('bot:seen', fresh.map((c) => c.url).filter(Boolean)).catch(() => []) : [];
@@ -311,6 +427,7 @@ async function runLoop() {
       if (seenUrls.has(c.url)) continue;
       const why = filterReason(c, s);
       if (why) {
+        log(`Skipped ${c.title || 'job'} @ ${c.company || '?'}: ${why}`);
         if (c.id) await markProcessed(c.id, 'skipped');
         continue;
       }
@@ -321,21 +438,22 @@ async function runLoop() {
     if (!next) {
       // nothing usable on screen: load more, give up after a few empty scrolls
       const before = cards.length;
-      const after = await jobright(listId, 'loadMore');
+      const after = await board(site, listId, 'loadMore');
       emptyRounds = after > before ? 0 : emptyRounds + 1;
       if (emptyRounds >= 3) {
         // wait for the next refresh instead of stopping; new jobs keep arriving
         const at = new Date(lastRefresh + refreshMs);
         log(`No new matching jobs right now; checking again at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
         setPhase('waiting_jobs', null);
-        while (!stopRequested && Date.now() < at.getTime()) await sleep(3000);
+        while (!stopRequested && !retryQueue.length && Date.now() < at.getTime()) await sleep(3000);
+        if (retryQueue.length) continue;
         if (stopRequested) break;
         await refreshList();
       }
       continue;
     }
 
-    await processJob(next, { listId, settings: s });
+    await processJob(next, { listId, settings: s, site });
     if (!stopRequested) await sleep(s.behavior.delaySec * 1000);
   }
   if (state.counts.applied >= s.filters.maxBids) log(`Reached the limit of ${s.filters.maxBids} bids for this run.`);
@@ -343,7 +461,200 @@ async function runLoop() {
 
 // ---------------- one job ----------------
 
-async function processJob(card, { listId, settings: s, detailTabId }) {
+// Tailored resume + cover letter for a bid: written by the AI, exported to PDF, read back for upload.
+async function generateDocs(bid, job, s, g = (p) => p) {
+  const jobForAi = { ...job, bid_id: bid.id };
+  log('Tailoring the resume…');
+  const tailored = await g(rpc('ai:tailor', jobForAi));
+  log('Writing the cover letter…');
+  const letter = await g(rpc('ai:coverLetter', { resume: tailored.resume, job: jobForAi }));
+  bid = await g(rpc('resumes:update', bid.id, { resume_json: tailored.resume, cover_letter: letter, ...tailored.meta }));
+  bid = await g(rpc('resumes:exportPdf', bid.id));
+  bid = await g(rpc('resumes:exportCover', bid.id));
+  const docs = { bid, resume: tailored.resume, coverLetter: letter, ...(await g(readDocFiles(bid, s))) };
+  log(`Resume and cover letter ready (${tailored.keywords?.length || 0} JD keywords matched)${s.filesDir ? `, saved in ${s.filesDir}/${bid.resume_dir}` : ''}`);
+  return docs;
+}
+
+// The bid's PDFs as uploadable files.
+async function readDocFiles(bid, s) {
+  const [resumePdf, coverPdf] = await Promise.all([rpc('files:get', bid.pdf_path), bid.cover_letter_path ? rpc('files:get', bid.cover_letter_path) : null]);
+  return {
+    files: {
+      resume: { b64: resumePdf.__b64, name: bid.pdf_path.split('/').pop() },
+      cover: s.behavior.uploadCover && coverPdf ? { b64: coverPdf.__b64, name: bid.cover_letter_path.split('/').pop() } : null
+    }
+  };
+}
+
+// ---------------- "Apply again" for jobs that need you ----------------
+// A "need you" job keeps its tab open; the bot remembers what it needs to carry on there
+// (session storage survives service-worker restarts). After you fix the page (bot check,
+// a missing answer…), "Apply again" continues the same bid on that tab.
+
+async function attentionJobs() {
+  const { attentionTabs = {} } = await chrome.storage.session.get('attentionTabs');
+  return attentionTabs;
+}
+async function rememberAttention(tabId, entry) {
+  const all = await attentionJobs();
+  all[tabId] = { ...entry, t: Date.now() };
+  await chrome.storage.session.set({ attentionTabs: all });
+}
+async function forgetAttention(tabId) {
+  const all = await attentionJobs();
+  delete all[tabId];
+  await chrome.storage.session.set({ attentionTabs: all });
+}
+chrome.tabs.onRemoved.addListener((tabId) => { forgetAttention(tabId).catch(() => {}); });
+
+const retryQueue = []; // tab ids waiting for the running bot to finish its current job
+
+// Which "need you" job to apply to again: the one in `tabId`, else the newest whose tab is still open.
+async function pickAttention(tabId) {
+  const all = await attentionJobs();
+  if (all[tabId] && (await tabExists(tabId))) return Number(tabId);
+  for (const [id, e] of Object.entries(all).sort((a, b) => b[1].t - a[1].t)) {
+    if (await tabExists(Number(id))) return Number(id);
+    delete all[id];
+  }
+  await chrome.storage.session.set({ attentionTabs: all });
+  return null;
+}
+
+async function applyAgain(activeTabId) {
+  const tabId = await pickAttention(activeTabId);
+  if (tabId == null) throw new Error('No "need you" job is open. Its tab must still be open (the bot leaves it open for you).');
+  if (retryQueue.includes(tabId)) return { queued: true };
+  if (state.running) {
+    retryQueue.push(tabId);
+    log('"Apply again" queued; it runs after the current job');
+    return { queued: true };
+  }
+  let s = await getSettings();
+  if (!s.token) throw new Error('Sign in to the Resume Builder server first (extension settings).');
+  s = await withTemplate(s);
+  state = { ...blank(), running: true, startedAt: Date.now(), log: state.log.slice(-50) };
+  stopRequested = false;
+  startKeepAlive();
+  retryAttention(tabId, s).finally(finish);
+  return { queued: false };
+}
+
+// Carries on with a "need you" job on its tab, then finishes it like a normal bid.
+async function retryAttention(tabId, s) {
+  const entry = (await attentionJobs())[tabId];
+  if (!entry || !(await tabExists(tabId))) return;
+  const site = SITES[entry.site] || siteOf(s);
+  const { job, card } = entry;
+  const label = `${job.role || 'job'} @ ${job.company || '?'}`;
+  const tabs = [tabId];
+  const ctx = jobContext();
+  currentJob = ctx;
+  const g = ctx.guard;
+  let bid = null;
+  let outcome = 'attention';
+  let reason = '';
+  setPhase('applying', { title: job.role, company: job.company, url: entry.postingUrl, bidId: entry.bidId, step: 0 });
+  log(`↻ Applying again: ${label}${entry.bidId ? ` (bid #${entry.bidId})` : ''}`);
+  try {
+    await focusTab(tabId);
+    // the bid and its resume / cover letter, when they were made already
+    bid = entry.bidId ? await rpc('resumes:get', entry.bidId).catch(() => null) : null;
+    const docs = { bid, files: null, resume: bid?.resume_json || null, coverLetter: bid?.cover_letter || '' };
+    if (bid?.pdf_path) Object.assign(docs, await readDocFiles(bid, s).catch(() => ({})));
+    const ensureDocs = async () => {
+      if (docs.files) return false;
+      if (!bid) {
+        bid = await rpc('resumes:create', {
+          company: job.company, role: job.role, job_link: job.job_link, apply_url: job.job_link, location: job.location, salary: job.salary, jd: job.jd,
+          status: 'draft', template: s.behavior.template, notes: `Auto-bid from ${site.label} (applied again).`,
+          source: entry.site, source_url: entry.postingUrl, bot_status: 'applying'
+        });
+        state.current.bidId = bid.id;
+        log(`Bid #${bid.id} created for ${label}`);
+      }
+      setPhase('generating');
+      Object.assign(docs, await generateDocs(bid, job, s, g));
+      bid = docs.bid;
+      setPhase('applying');
+      return true;
+    };
+    if (bid) await rpc('bot:log', bid.id, 'Applying again after your fix', { bot_status: 'applying' }).catch(() => {});
+
+    const progress = { step: 0, history: [], answers: [], ...(entry.progress || {}) };
+    if (progress.step) log(`  Continuing at step ${progress.step + 1} (stopped at step ${progress.step}: ${progress.fixed || 'needed you'})`);
+    const result = await g(runApplication(tabId, { job, docs, ensureDocs, settings: s, site, tabs, ctx, progress }));
+    bid = docs.bid || bid;
+    reason = result.reason || result.note || '';
+    if (bid) await rpc('resumes:update', bid.id, { answers: result.answers }).catch(() => {});
+    if (result.status === 'applied') {
+      outcome = 'applied';
+      state.counts.applied++;
+      if (bid) await rpc('resumes:update', bid.id, { status: 'applied', bot_status: 'applied', applied_at: new Date().toISOString() });
+      log(`✓ Applied (again): ${label}`, 'ok');
+      notify('Application submitted', `${job.role} at ${job.company}${bid ? ` (bid #${bid.id})` : ''}`);
+      await forgetAttention(tabId);
+      // tell the job board, like a normal bid
+      if (site.pointer && entry.listId && (await tabExists(entry.listId))) {
+        await focusTab(entry.listId);
+        const yes = (await pointerClick(site, entry.listId, card, 'save').catch(() => ({}))).clicked
+          || (await board(site, entry.listId, 'confirmApplied', 12000, card).catch(() => false));
+        log(yes ? `Saved the job on ${site.label}` : `Could not click "Save" on ${site.label} (is the job still on the list?)`);
+      } else if (site.detailPage && entry.detailId && (await tabExists(entry.detailId))) {
+        await focusTab(entry.detailId);
+        const yes = await board(site, entry.detailId, 'confirmApplied', 12000, card).catch(() => false);
+        log(yes ? `Marked as applied on ${site.label}` : `${site.label} "Did you apply?" dialog did not appear`);
+      }
+      if (s.behavior.closeTabs) for (const id of tabs) await chrome.tabs.remove(id).catch(() => {});
+    } else if (result.status === 'skipped') {
+      outcome = 'skipped';
+      state.counts.skipped++;
+      log(`Skipped ${label}: ${reason}`);
+      if (bid) await rpc('bot:log', bid.id, `Skipped: ${reason}`, { bot_status: 'skipped' }).catch(() => {});
+      await forgetAttention(tabId);
+    } else if (result.status === 'stopped') {
+      outcome = 'stopped';
+      reason = 'stopped by you';
+    } else {
+      // still needs you: keep it for another "Apply again", on the tab it ended on
+      state.counts.attention++;
+      log(`⚠ ${label}: ${reason}. Tab left open for you; press Apply again after fixing it.`, 'warn');
+      if (bid) await rpc('bot:log', bid.id, `Needs attention: ${reason}`, { bot_status: 'needs_attention' }).catch(() => {});
+      const last = tabs[tabs.length - 1];
+      if (last !== tabId) await forgetAttention(tabId);
+      await rememberAttention(last, {
+        ...entry, bidId: bid?.id || entry.bidId,
+        progress: { step: progress.step, history: progress.history.slice(-20), answers: progress.answers, fixed: reason }
+      });
+      await notify('Application needs you', `${job.role} at ${job.company}: ${reason}`, { tabId: last, sticky: true });
+    }
+  } catch (err) {
+    if (err instanceof SkipError || ctx.skipped) {
+      outcome = 'skipped';
+      reason = 'you pressed Skip';
+      state.counts.skipped++;
+      await forgetAttention(tabId);
+    } else {
+      outcome = 'failed';
+      reason = err.message;
+      state.counts.failed++;
+    }
+    log(`${outcome === 'failed' ? '✗' : '⏭'} ${label}: ${reason}`, outcome === 'failed' ? 'error' : 'warn');
+    if (bid) await rpc('bot:log', bid.id, `${outcome === 'failed' ? 'Failed' : 'Skipped'}: ${reason}`, { bot_status: outcome }).catch(() => {});
+  } finally {
+    if (currentJob === ctx) currentJob = null;
+    if (entry.cardId) await markProcessed(entry.cardId, outcome);
+    await addHistory({
+      status: outcome, reason: outcome === 'applied' ? 'applied again after your fix' : reason, site: entry.site, bidId: bid?.id || entry.bidId || null,
+      title: job.role, company: job.company, location: job.location, salary: job.salary, postingUrl: entry.postingUrl, applyUrl: job.job_link
+    }, { replaceBid: true }).catch(() => {});
+    state.current = null;
+    save();
+  }
+}
+
+async function processJob(card, { listId, settings: s, site = siteOf(s), detailTabId }) {
   const label = `${card.title || 'job'} @ ${card.company || '?'}`;
   setPhase('opening', { title: card.title, company: card.company, url: card.url, step: 0 });
   log(`Opening ${label}`);
@@ -351,30 +662,37 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
   let detailId = detailTabId;
   let bid = null;
   let outcome = 'failed';
+  const rec = { reason: '', applyUrl: '', detail: null }; // for the History page
   const ctx = jobContext();
   currentJob = ctx;
   const g = ctx.guard;
 
   try {
     const work = (async () => {
-      // 1. job page on Jobright
-      if (!detailId) {
+      // 1. job page on the board (HiringCafe has none: the card on the list is used)
+      if (!site.detailPage) {
+        detailId = listId;
+      } else if (!detailId) {
         if (card.url) {
           detailId = (await chrome.tabs.create({ url: card.url, active: true })).id;
         } else {
           const t0 = Date.now();
-          await jobright(listId, 'openCard', card.index);
+          await board(site, listId, 'openCard', card.index);
           detailId = await waitNewTab(listId, t0, 10000);
           if (!detailId) throw new Error('Could not open the job card.');
         }
         tabs.push(detailId);
       }
-      await g(waitComplete(detailId));
-      await g(sleep(2000));
-      const detail = { ...card, ...((await g(jobright(detailId, 'scrapeDetail'))) || {}) };
+      if (site.detailPage) {
+        await g(waitComplete(detailId));
+        await g(sleep(2000));
+      }
+      const detail = { ...card, ...((await g(board(site, detailId, 'scrapeDetail', card))) || {}) };
       detail.company = detail.company || card.company;
       detail.title = detail.title || card.title;
+      rec.detail = detail;
       if (s.filters.remoteOnly && !detail.remote && !card.remote) {
+        rec.reason = 'not remote';
         log(`Skipped ${label}: not remote`);
         state.counts.skipped++;
         outcome = 'skipped';
@@ -385,26 +703,59 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
       // 2. company application page
       setPhase('opening_apply');
       let applyId = null;
+      if (!site.detailPage) await focusTab(listId); // the hover and click happen on the visible list
       const t0 = Date.now();
-      if (await g(jobright(detailId, 'clickApply'))) applyId = await g(waitNewTab(detailId, t0, 15000));
+      let clicked = null;
+      if (site.pointer) {
+        log('  Moving the cursor to the job box and clicking "Apply Directly"');
+        clicked = await g(pointerClick(site, detailId, card, 'apply').catch((err) => ({ clicked: false, error: `real cursor failed (${err.message})` })));
+        if (clicked.saved) {
+          // saved on HiringCafe = bid on before: never again
+          rec.reason = `already saved on ${site.label}`;
+          log(`Skipped ${label}: already saved on ${site.label}`);
+          state.counts.skipped++;
+          outcome = 'skipped';
+          return;
+        }
+        if (!clicked.clicked) {
+          log(`  ${clicked.error}; trying a scripted click`);
+          clicked = await g(board(site, detailId, 'clickApply', card));
+        }
+      } else {
+        clicked = await g(board(site, detailId, 'clickApply', card));
+      }
+      if (clicked && clicked.clicked !== false) {
+        // on the list, a link with rel="noopener" may open a tab that does not name the list as its opener
+        applyId = await g(waitNewTab(site.detailPage ? detailId : null, t0, 15000));
+      } else log(`  Could not click Apply${clicked && clicked.error ? `: ${clicked.error}` : ''}`);
       if (!applyId) {
         const cur = await tabExists(detailId);
-        if (cur && !JOBRIGHT.test(cur.url)) applyId = detailId; // same-tab redirect
+        if (cur && !site.host.test(cur.url)) {
+          // same-tab redirect; on a board without job pages the list must stay, so move it to its own tab
+          if (site.detailPage) applyId = detailId;
+          else {
+            applyId = (await chrome.tabs.create({ url: cur.url, active: true })).id;
+            await chrome.tabs.goBack(listId).catch(() => {});
+          }
+        }
       }
-      if (!applyId && detail.applyUrl) applyId = (await chrome.tabs.create({ url: detail.applyUrl, active: true })).id;
+      const applyUrl = detail.applyUrl || (clicked && clicked.href) || '';
+      if (!applyId && applyUrl) applyId = (await chrome.tabs.create({ url: applyUrl, active: true })).id;
       if (!applyId) throw new Error('Could not open the company application page.');
       if (applyId !== detailId) tabs.push(applyId);
-      // wait out Jobright's redirect to the real posting
+      // wait out the board's redirect to the real posting
       for (let i = 0; i < 30; i++) {
         const t = await tabExists(applyId);
-        if (t && t.url && !JOBRIGHT.test(t.url) && !/^about:|^chrome/.test(t.url)) break;
+        if (t && t.url && !site.host.test(t.url) && !/^about:|^chrome/.test(t.url)) break;
         await g(sleep(700));
       }
       await focusTab(applyId);
       await g(settle(applyId));
       const applyTab = await tabExists(applyId);
+      rec.applyUrl = applyTab?.url || '';
       // LinkedIn applications (Easy Apply / sign in with LinkedIn) are skipped
       if (LINKEDIN.test(applyTab.url)) {
+        rec.reason = 'the application is on LinkedIn';
         log(`Skipped ${label}: the application is on LinkedIn`);
         state.counts.skipped++;
         outcome = 'skipped';
@@ -414,6 +765,13 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
 
       // 3. exact job description from the company page
       const page = await g(call(applyId, '__abAgent', 'pageText').catch(() => null));
+      // posting pages with the form on a separate tab/page (Ashby "Application", Lever "Apply"): go straight to the form
+      const formUrl = directApplyUrl(applyTab.url);
+      if (formUrl) {
+        log('  Job description read; opening the application form');
+        await chrome.tabs.update(applyId, { url: formUrl });
+        await g(settle(applyId));
+      }
       const job = {
         company: detail.company, role: detail.title, location: detail.location || 'Remote (US)', salary: detail.salary || '',
         job_link: applyTab.url,
@@ -429,8 +787,8 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
           company: detail.company, role: detail.title, job_link: job.job_link, apply_url: job.job_link,
           location: detail.location || (detail.remote ? 'Remote (US)' : ''), salary: detail.salary || '', jd: job.jd,
           status: 'draft', template: s.behavior.template,
-          notes: `Auto-bid from Jobright${detail.match ? ` (match ${detail.match}%)` : ''}. Posted ${detail.posted || '?'}.`,
-          source: 'jobright', source_url: detail.url, bot_status: 'applying'
+          notes: `Auto-bid from ${site.label}${detail.match ? ` (match ${detail.match}%)` : ''}. Posted ${detail.posted || '?'}.`,
+          source: s.site || 'jobright', source_url: detail.url, bot_status: 'applying'
         }));
         bid = docs.bid;
         state.current.bidId = bid.id;
@@ -441,31 +799,18 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
         if (docs.files) return false;
         await ensureBid();
         setPhase('generating');
-        const jobForAi = { ...job, bid_id: bid.id };
-        log('Tailoring the resume…');
-        const tailored = await g(rpc('ai:tailor', jobForAi));
-        log('Writing the cover letter…');
-        const letter = await g(rpc('ai:coverLetter', { resume: tailored.resume, job: jobForAi }));
-        bid = await g(rpc('resumes:update', bid.id, { resume_json: tailored.resume, cover_letter: letter, ...tailored.meta }));
-        bid = await g(rpc('resumes:exportPdf', bid.id));
-        bid = await g(rpc('resumes:exportCover', bid.id));
-        docs.bid = bid;
-        const [resumePdf, coverPdf] = await g(Promise.all([rpc('files:get', bid.pdf_path), rpc('files:get', bid.cover_letter_path)]));
-        docs.files = {
-          resume: { b64: resumePdf.__b64, name: bid.pdf_path.split('/').pop() },
-          cover: s.behavior.uploadCover ? { b64: coverPdf.__b64, name: bid.cover_letter_path.split('/').pop() } : null
-        };
-        docs.resume = tailored.resume;
-        docs.coverLetter = letter;
-        log(`Resume and cover letter ready (${tailored.keywords?.length || 0} JD keywords matched)${s.filesDir ? `, saved in ${s.filesDir}/${bid.resume_dir}` : ''}`);
+        Object.assign(docs, await generateDocs(bid, job, s, g));
+        bid = docs.bid;
         setPhase('applying');
         return true;
       };
 
       // 5. fill and submit the application
       setPhase('applying');
-      const result = await g(runApplication(applyId, { job, docs, ensureDocs, settings: s, tabs, ctx }));
+      const progress = { step: 0, history: [], answers: [] };
+      const result = await g(runApplication(applyId, { job, docs, ensureDocs, settings: s, site, tabs, ctx, progress }));
       ctx.check();
+      rec.reason = result.reason || result.note || '';
       if (result.status === 'skipped') {
         log(`Skipped ${label}: ${result.reason}`);
         state.counts.skipped++;
@@ -482,25 +827,35 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
         await rpc('resumes:update', bid.id, { status: 'applied', bot_status: 'applied', applied_at: new Date().toISOString() });
         log(`✓ Applied: ${label}`, 'ok');
         notify('Application submitted', `${detail.title} at ${detail.company} (bid #${bid.id})`);
-        // 7. tell Jobright
+        // 7. tell the job board
         if (await tabExists(detailId)) {
-          if (applyId === detailId) {
+          if (applyId === detailId && site.detailPage) {
             await chrome.tabs.update(detailId, { url: detail.url });
             await waitComplete(detailId);
             await sleep(1500);
           }
           await focusTab(detailId);
-          const yes = await jobright(detailId, 'confirmApplied', 12000);
-          log(yes ? 'Marked as applied on Jobright' : 'Jobright "Did you apply?" dialog did not appear');
+          let yes = false;
+          if (site.pointer) yes = (await pointerClick(site, detailId, card, 'save').catch(() => ({}))).clicked;
+          if (!yes) yes = await board(site, detailId, 'confirmApplied', 12000, card);
+          log(site.detailPage
+            ? (yes ? `Marked as applied on ${site.label}` : `${site.label} "Did you apply?" dialog did not appear`)
+            : (yes ? `Saved the job on ${site.label}` : `Could not click "Save" on ${site.label}`));
         }
       } else if (result.status === 'stopped') {
         outcome = 'stopped';
+        rec.reason = 'stopped by you';
         await rpc('bot:log', bid.id, 'Stopped by user', { bot_status: 'needs_attention' });
       } else {
         outcome = 'attention';
         state.counts.attention++;
         await rpc('bot:log', bid.id, `Needs attention: ${result.reason}`, { bot_status: 'needs_attention' });
-        log(`⚠ ${label}: ${result.reason}. Tab left open for you.`, 'warn');
+        log(`⚠ ${label}: ${result.reason}. Tab left open for you; press Apply again after fixing it.`, 'warn');
+        await rememberAttention(tabs[tabs.length - 1], {
+          job, bidId: bid.id, site: s.site || 'jobright', card: { index: card.index, title: card.title, company: card.company },
+          cardId: card.id || '', postingUrl: detail.url, listId: listId || null, detailId: site.detailPage ? detailId : null,
+          progress: { step: progress.step, history: progress.history.slice(-20), answers: progress.answers, fixed: result.reason }
+        });
         await notify('Application needs you', `${detail.title} at ${detail.company}: ${result.reason}`, { tabId: tabs[tabs.length - 1], sticky: true });
       }
     })();
@@ -508,15 +863,17 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
     await g(work);
   } catch (err) {
     if (outcome === 'applied') {
-      // Skip pressed after the application went through (while confirming on Jobright): keep it applied
+      // Skip pressed after the application went through (while confirming on the board): keep it applied
     } else if (err instanceof SkipError || ctx.skipped) {
       outcome = 'skipped';
       state.counts.skipped++;
+      rec.reason = 'you pressed Skip';
       log(`⏭ Skipped ${label}: you pressed Skip`, 'warn');
       if (bid) await rpc('bot:log', bid.id, 'Skipped by you', { bot_status: 'skipped' }).catch(() => {});
     } else {
       outcome = 'failed';
       state.counts.failed++;
+      rec.reason = err.message;
       log(`✗ ${label}: ${err.message}`, 'error');
       if (bid) await rpc('bot:log', bid.id, `Failed: ${err.message}`, { bot_status: 'failed' }).catch(() => {});
     }
@@ -528,6 +885,12 @@ async function processJob(card, { listId, settings: s, detailTabId }) {
       if (cost?.calls) log(`  AI for this bid: ${cost.calls} calls, ${cost.tokens.toLocaleString()} tokens, ${cost.unpriced ? 'cost unknown for some models' : `$${cost.cost.toFixed(4)}`}`);
     }
     if (card.id) await markProcessed(card.id, outcome);
+    const d = rec.detail || card;
+    await addHistory({
+      status: outcome, reason: rec.reason, site: s.site || 'jobright', bidId: bid?.id || null,
+      title: d.title || card.title || '', company: d.company || card.company || '', location: d.location || '', salary: d.salary || '',
+      postingUrl: d.url || card.url || '', applyUrl: rec.applyUrl
+    }).catch(() => {});
     state.current = null;
     save();
     // close the job's tabs after a clean finish; keep them when you need to look
@@ -620,22 +983,37 @@ async function readyPage(tabId) {
 // Pages where the resume (and cover letter) are needed: generated then, not before.
 const NEEDS_DOCS = new Set(['application_form', 'review']);
 
-async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, tabs, ctx = jobContext() }) {
+// `progress` ({ step, history, answers, fixed }) is owned by the caller and kept up to date here,
+// so "Apply again" can carry on at the step where the job stopped, with what was done so far.
+async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, site = siteOf(s), tabs, ctx = jobContext(), progress = { step: 0, history: [], answers: [] } }) {
   const g = ctx.guard;
   const profile = await getProfile();
+  // "How did you hear about us": the board the bot is on, unless you set something else yourself
+  if (!profile.how_heard || Object.values(SITES).some((x) => x.howHeard === profile.how_heard)) profile.how_heard = site.howHeard;
   const baseResume = await rpc('base:get').catch(() => null);
   const aiProfile = profileForAI(profile);
   const secrets = secretsFor(profile);
-  const history = [];
-  const answers = [];
+  progress.history ||= [];
+  progress.answers ||= [];
+  const history = progress.history;
+  const answers = progress.answers;
+  const firstStep = (progress.step || 0) + 1;
+  // continuing after you fixed the page: tell the AI, and let it look at the whole page first
+  let fixedByYou = !!progress.fixed;
+  if (fixedByYou) {
+    history.push(`The bot stopped here before ("${progress.fixed}"). The user has now fixed that on this page (for example passed the bot check or filled what was missing). Continue from the current page; do not start the application over.`);
+    progress.fixed = '';
+  }
   let tabId = startTabId;
   let lastKey = '';
   let repeats = 0;
   let captchaWaits = 0;
   let overrides = 0; // times the bot decided by itself instead of asking you
   let idle = 0; // pages that looked empty / still loading
+  let lastRulesKey = ''; // page handled by rules alone last step; if it is still there, ask the AI
 
-  for (let step = 1; step <= s.behavior.stepLimit; step++) {
+  for (let step = firstStep; step < firstStep + s.behavior.stepLimit; step++) {
+    progress.step = step;
     if (stopRequested) return { status: 'stopped', answers };
     ctx.check();
     state.current = { ...state.current, step };
@@ -647,7 +1025,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     await g(settle(tabId));
     if (await g(acceptCookies(tabId))) await g(settle(tabId));
 
-    const snap = await g(readyPage(tabId));
+    let snap = await g(readyPage(tabId));
     // a password box means the site wants an account: skip before spending an AI call
     if (s.behavior.skipAccounts && snap.fields.some((f) => f.kind === 'password')) {
       return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
@@ -662,13 +1040,48 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
       return { status: 'attention', reason: `${snap.captcha} not solved`, answers };
     }
 
-    setPhase('thinking');
-    const plan = await g(rpc('bot:plan', {
-      snapshot: snap, job, profile: aiProfile, resume: docs.resume || baseResume, coverLetter: docs.coverLetter,
-      history: history.slice(-8), files: { resume: true, cover: !docs.files || !!docs.files.cover }, bidId: docs.bid?.id
-    }));
-    setPhase('applying');
-    log(`Step ${step} [${plan.page_type}]: ${plan.summary}`);
+    // read the real choices of custom dropdowns so the AI only picks values the form offers
+    if (snap.fields.some((f) => f.kind === 'combobox' && !f.options)) {
+      const probed = await g(call(tabId, '__abAgent', 'probeOptions', [], { allFrames: true }).catch(() => []));
+      if (probed.some((r) => r.result)) snap = await g(snapshotTab(tabId));
+    }
+
+    // 1. rules first: the profile answers the usual questions and the obvious button needs no AI.
+    //    If the last rules-only step did not move the page on, let the AI look at the whole form.
+    const pageKey = `${snap.url}|${snap.fields.map((f) => f.id).join(',')}|${snap.buttons.map((b) => b.text).join(',')}`;
+    const forceAI = pageKey === lastRulesKey || fixedByYou;
+    fixedByYou = false;
+    const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI });
+    const saved = await savedAnswers();
+    let rp = rulePlan(snap, ruleArgs());
+    // a real application form: write the tailored resume + cover letter before filling it
+    if (!docs.files && rp.page_type === 'application_form' && (rp.needsDocs || snap.fields.length >= 3)) {
+      log('  Application form found; preparing the resume and cover letter');
+      await g(ensureDocs());
+      rp = rulePlan(snap, ruleArgs());
+    }
+
+    let plan;
+    if (!rp.askAI) {
+      plan = { page_type: rp.page_type, summary: rp.summary, actions: rp.actions, next_click: rp.next_click, done: false, needs_human: '' };
+      lastRulesKey = pageKey;
+      log(`Step ${step} [${plan.page_type}] no AI: ${plan.summary}`);
+    } else {
+      // 2. the AI only sees the questions the rules could not answer
+      setPhase('thinking');
+      const aiSnap = { ...snap, fields: rp.aiFields };
+      const ai = await g(rpc('bot:plan', {
+        snapshot: aiSnap, prefilled: snap.fields.length - rp.aiFields.length, job, profile: aiProfile, resume: docs.resume || baseResume,
+        coverLetter: rp.aiFields.some((f) => /cover letter/i.test(`${f.label} ${f.question || ''}`)) ? docs.coverLetter : '',
+        history: history.slice(-5), files: { resume: true, cover: !docs.files || !!docs.files.cover }, bidId: docs.bid?.id
+      }));
+      setPhase('applying');
+      lastRulesKey = '';
+      const aiIds = new Set(ai.actions.map((a) => a.id));
+      plan = { ...ai, actions: [...rp.actions.filter((a) => !aiIds.has(a.id)), ...ai.actions], next_click: ai.next_click || rp.next_click };
+      rememberAnswers(answersToSave(snap, ai.actions)).catch(() => {});
+      log(`Step ${step} [${plan.page_type}]: ${plan.summary}${rp.actions.length ? ` (+${rp.actions.length} filled by rules)` : ''}`);
+    }
 
     if (plan.page_type === 'requires_linkedin') return { status: 'skipped', reason: 'it can only be applied to through LinkedIn', answers };
     if (s.behavior.skipAccounts && (plan.page_type === 'register' || plan.page_type === 'login')) {
@@ -719,6 +1132,13 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     lastKey = key;
     if (repeats >= 2) return { status: 'attention', reason: `stuck on the same ${plan.page_type.replace('_', ' ')} step`, answers };
 
+    // never upload into an "Autofill from resume" box when the form has its own resume field
+    // (the site would re-type the form from the file, over the answers)
+    if (snap.fields.some((f) => f.kind === 'file' && !isAutofillUpload(f))) {
+      const autofill = new Set(snap.fields.filter(isAutofillUpload).map((f) => f.id));
+      plan.actions = plan.actions.filter((a) => !(a.op.startsWith('upload') && autofill.has(a.id)));
+    }
+
     // carry out the actions, frame by frame, in order
     const results = [];
     for (const a of plan.actions) {
@@ -762,7 +1182,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     }
     history.push(`${plan.page_type} at ${snap.url.slice(0, 100)}: ${results.length} actions${failed.length ? ` (${failed.length} failed: ${failed.map((f) => f.note).join(', ').slice(0, 160)})` : ''}${clicked ? `, clicked "${clicked}"` : ''}${snap.errors.length ? `; page errors: ${snap.errors.join(' | ').slice(0, 200)}` : ''}`);
   }
-  return { status: 'attention', reason: `no confirmation after ${s.behavior.stepLimit} steps`, answers };
+  return { status: 'attention', reason: `no confirmation after ${progress.step} steps`, answers };
 }
 
 // Runs the full bid on a Jobright job page the user has open.
@@ -777,7 +1197,8 @@ async function runSingle(tabId) {
   stopRequested = false;
   startKeepAlive();
   const id = (/([0-9a-f]{24})/.exec(tab.url) || [])[1] || '';
-  processJob({ id, url: tab.url.split('?')[0], title: tab.title }, { settings: { ...s, filters: { ...s.filters, remoteOnly: false } }, detailTabId: tabId })
+  // "Apply to this job" works on Jobright job pages, whichever board the bot runs on
+  processJob({ id, url: tab.url.split('?')[0], title: tab.title }, { settings: { ...s, site: 'jobright', filters: { ...s.filters, remoteOnly: false } }, site: SITES.jobright, detailTabId: tabId })
     .finally(finish);
 }
 
@@ -790,6 +1211,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       case 'stop': stop(); return { ok: true };
       case 'skip': skipCurrent(); return { ok: true };
       case 'runSingle': await runSingle(msg.tabId); return { ok: true };
+      case 'applyAgain': return { ok: true, ...(await applyAgain(msg.tabId)) };
       case 'resetDone': await chrome.storage.local.remove('done'); return { ok: true };
       case 'clearLog': state.log = []; save(); return { ok: true };
       default: return { ok: false, error: 'unknown message' };
@@ -798,7 +1220,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   return true;
 });
 
+// The toolbar icon opens the side panel, which stays open while you browse (a popup closes on every click).
+chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+
 chrome.runtime.onInstalled.addListener(async () => {
+  // 1.2.1 skipped every HiringCafe job as "not remote" (and could not click Apply): let those be tried again
+  const done = await processed();
+  const keep = Object.fromEntries(Object.entries(done).filter(([id, v]) => !(id.startsWith('hc:') && /skipped|failed/.test(v.status))));
+  if (Object.keys(keep).length !== Object.keys(done).length) await chrome.storage.local.set({ done: keep });
   if (await seedProfile()) console.log('[auto-bid] profile loaded from profile.local.json');
 });
 

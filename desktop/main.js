@@ -67,9 +67,23 @@ function handle(channel, fn, { requireAuth = true } = {}) {
       return { ok: true, data: await fn(...args) };
     } catch (err) {
       console.error(`[${channel}]`, err);
-      return { ok: false, error: err.message || String(err) };
+      return { ok: false, error: errorText(err) };
     }
   });
+}
+
+// Node reports a failed "localhost" connect (IPv6 + IPv4 tried) as an AggregateError
+// with an empty message, so spell out the inner errors and explain a refused DB connection.
+function errorText(err) {
+  const inner = [err, err?.cause, ...(err?.errors || []), ...(err?.cause?.errors || [])].filter(Boolean);
+  const refused = inner.find((e) => e.code === 'ECONNREFUSED');
+  const dbPort = (() => { try { return db.loadConfig().port; } catch { return 5432; } })();
+  if (refused && refused.port === dbPort) {
+    const { host, port } = db.loadConfig();
+    return `Database connection failed: nothing is listening on ${host}:${port}. Start the PostgreSQL service (services.msc → postgresql) and try again.`;
+  }
+  const msg = err?.message || (err?.errors || []).map((e) => e.message).filter(Boolean).join('; ');
+  return msg || String(err);
 }
 
 function slug(s, max = 40) {
@@ -161,8 +175,8 @@ handle('auth:login', async ({ username, password }) => {
   try {
     await db.init();
   } catch (e) {
-    const err = new Error(`Database connection failed: ${e.message}`);
-    throw err;
+    const text = errorText(e);
+    throw new Error(text.startsWith('Database connection failed') ? text : `Database connection failed: ${text}`);
   }
   authed = true;
   await win.loadFile(path.join(__dirname, 'renderer', 'app.html'));

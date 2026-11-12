@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Auto Bid History</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { padding: 0 0 24px; }
+    header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+    header h1 { font-size: 16px; margin: 0; margin-right: auto; }
+    header label { display: flex; align-items: center; gap: 6px; color: var(--text); font-weight: 600; }
+    header select, header input { width: auto; margin: 0; }
+    header input[type="search"] { width: 220px; }
+    header input[type="date"] { width: 140px; }
+    .dates { display: flex; align-items: center; gap: 6px; }
+    .dates .muted { font-weight: 400; }
+    main { padding: 14px 20px; }
+    #summary { margin-bottom: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 11px; cursor: pointer; font-size: 12px; }
+    .chip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); font-weight: 600; }
+    .chip b { margin-left: 4px; }
+    .wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+    th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    td.time { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+    td.job a { color: var(--text); font-weight: 600; text-decoration: none; }
+    td.job a:hover, td.links a:hover { text-decoration: underline; }
+    td.links { white-space: nowrap; }
+    td.links a { color: var(--accent-dark); text-decoration: none; margin-right: 8px; }
+    td.reason { color: var(--muted); max-width: 380px; }
+    td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .badge { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+    .s-applied { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+    .s-attention { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+    .s-failed { background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); }
+    .s-skipped, .s-stopped { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--muted); }
+    .src { font-size: 11px; color: var(--muted); }
+    #empty { padding: 30px; text-align: center; color: var(--muted); }
+    #note { font-size: 12px; margin-top: 10px; }
+    @media (prefers-color-scheme: dark) { .s-applied { color: #34d399; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Auto Bid · History</h1>
+    <label>Status
+      <select id="status">
+        <option value="">All</option>
+        <option value="applied">Applied</option>
+        <option value="attention">Need you</option>
+        <option value="failed">Failed</option>
+        <option value="skipped">Skipped</option>
+        <option value="stopped">Stopped</option>
+      </select>
+    </label>
+    <label>Site
+      <select id="site"><option value="">All sites</option></select>
+    </label>
+    <div class="dates">
+      <label>Date <input id="from" type="date" title="From this day"></label>
+      <span class="muted">to</span>
+      <input id="to" type="date" title="To this day (same as From = one day)">
+      <button id="today" title="Only today">Today</button>
+      <button id="allDates" title="Clear the dates">All dates</button>
+    </div>
+    <input id="search" type="search" placeholder="Search job, company, reason…">
+    <button id="refresh">↻ Refresh</button>
+  </header>
+  <main>
+    <div id="summary"></div>
+    <div class="wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Status</th><th>Job</th><th>Company</th><th>Site</th><th>Reason</th><th>Bid</th><th>Links</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="hidden">No jobs with this status yet.</div>
+    </div>
+    <div id="note" class="muted"></div>
+  </main>
+  <script type="module" src="history.js"></script>
+</body>
+</html>
