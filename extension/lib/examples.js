@@ -13,12 +13,13 @@ const pref = (s) => (/^\/.+\/$/.test(s) ? new RegExp(s.slice(1, -1)) : s);
 //   text:     what to type in a text box (may use {profile.key})
 //   leave:    keep the field empty (cleared if something else filled it)
 //   today:    today's date
+//   cover:    the tailored cover letter text (e.g. "Message to the Hiring Team")
 //   check / never: a checkbox whose own text matches is ticked / never ticked
 export const EXAMPLES = KB.rules.map((r) => ({
   q: rx(r.q), not: rx(r.not), check: rx(r.check), never: rx(r.never),
   answer: r.pick ? r.pick.map(pref) : r.text ? [r.text] : null,
   text: r.text || (r.pick || []).find((p) => !/^\/.+\/$/.test(p)) || '',
-  leave: !!r.leave, today: !!r.today, from: r.from
+  leave: !!r.leave, today: !!r.today, cover: !!r.cover, from: r.from
 }));
 
 export const fillProfile = (s, p = {}) => String(s || '').replace(/\{profile\.(\w+)\}/g, (_, k) => p[k] || '');

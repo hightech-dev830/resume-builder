@@ -57,7 +57,7 @@ const RULES = [
   { re: /transgender/, choose: () => [/^no\b/] },
   { re: /sexual orientation/, choose: () => [/heterosexual|straight/] },
   { re: /hispanic|latin[oax]/, not: /\brace\b/, choose: (p) => (yesno(p.hispanic_latino) === 'Yes' ? YES : [/^no\b/, /not hispanic/]) },
-  { re: /\brace\b|ethnicit/, choose: (p) => (/asian/i.test(p.race_ethnicity) ? [/^asian\b/, /\basian\b/] : [new RegExp('^' + norm(p.race_ethnicity).split(' ')[0])]) },
+  { re: /\brace\b|ethnicit/, choose: (p) => (/asian/i.test(p.race_ethnicity) ? [/^asian\b/, /\basian\b/] : norm(p.race_ethnicity) ? [new RegExp('^' + norm(p.race_ethnicity).split(' ')[0])] : [/decline|not (wish|want) to|don'?t wish|prefer not/]) },
   { re: /gender|\bsex\b/, not: /orientation|transgender|pronoun/, choose: (p) => (/female|woman/i.test(p.gender) ? [/^female\b/, /^woman\b/, /\bfemale\b/] : [/^male\b/, /^man\b/, /\bmale\b/, /\bman\b/]) },
   { re: /veteran/, choose: () => [/not a (protected )?veteran/, /^i am not/, /^no\b/] },
   { re: /disabilit/, choose: () => [/^no\b/, /do not have a disability|don'?t have a disability/] },
@@ -208,6 +208,10 @@ export function rulePlan(snap, { profile, saved = {}, uploadCover = true, coverL
       if (ex?.leave) {
         handled = true;
         if (filled) act = { op: 'fill', value: '' };
+      } else if (ex?.cover && (f.kind === 'textarea' || f.kind === 'richtext' || TEXTY.has(f.kind))) {
+        handled = true;
+        wantsCoverText = true;
+        if (!filled && coverLetter) act = { op: 'fill', value: coverLetter };
       } else if (ex?.today) {
         handled = true;
         if (!filled) act = { op: 'fill', value: today(f.kind === 'date') };
@@ -239,7 +243,9 @@ export function rulePlan(snap, { profile, saved = {}, uploadCover = true, coverL
         const val = f.kind === 'combobox' && rule.combo ? rule.combo(p) : rule.text?.(p);
         if (val) {
           handled = true;
-          if (!filled) act = { op: f.kind === 'combobox' ? 'choose' : 'fill', value: val };
+          // sites that read the resume prefill the wrong town (Rolling Hills): put the profile's city back
+          const wrongTown = filled && /rolling hills/i.test(f.value) && !/rolling hills/i.test(val);
+          if (!filled || wrongTown) act = { op: f.kind === 'combobox' ? 'choose' : 'fill', value: val };
         }
       }
       // the same question answered before (by the AI) on another application

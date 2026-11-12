@@ -215,7 +215,18 @@
     // any short label that is about applying
     [/\bapply\b|\bapplication\b/i, 2]
   ];
-  const NOT_APPLY = /linkedin|indeed|filter|how to apply|applied|applications? (status|tracker)|my applications|sign in|log ?in|save|alert|share|similar|withdraw/i;
+  const NOT_APPLY = /linkedin|indeed|filter|how to apply|applied|applications? (status|tracker)|my applications|sign in|log ?in|save|alert|share|similar|withdraw|expired|report/i;
+  // the board's own "Apply now" card (Himalayas: "Please let <Company> know you found this job on Himalayas")
+  const APPLY_CARD = /know you found this job|found this job on|mention (that )?you found/i;
+  const inApplyCard = (el) => {
+    for (let p = el.parentElement, i = 0; p && i < 4; p = p.parentElement, i++) {
+      const t = p.textContent || '';
+      // past the card (the rest of the page): long text, or another Apply button inside
+      if (t.length > 500 || all('a, button', p).some((b) => b !== el && /^apply\b/i.test(label(b)))) break;
+      if (APPLY_CARD.test(t)) return true;
+    }
+    return false;
+  };
   const label = (el) => one(el.textContent || el.value || el.getAttribute('aria-label') || el.title || '');
 
   function findApply() {
@@ -228,7 +239,7 @@
       if (!t || t.length > 50 || NOT_APPLY.test(t) || el.disabled) continue;
       const word = APPLY_WORDS.find(([re]) => re.test(t));
       if (!word) continue;
-      const score = word[1] + (/^apply now$/i.test(t) ? 1 : 0) + (ext(el) ? 2 : 0) + (el.target === '_blank' ? 1 : 0) + (visible(el) ? 1 : -3);
+      const score = word[1] + (/^apply now$/i.test(t) ? 1 : 0) + (ext(el) ? 2 : 0) + (el.target === '_blank' ? 1 : 0) + (visible(el) ? 1 : -3) + (inApplyCard(el) ? 3 : 0);
       if (score > bestScore) { best = el; bestScore = score; }
     }
     return best;

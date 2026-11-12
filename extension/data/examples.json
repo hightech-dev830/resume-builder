@@ -9,8 +9,14 @@
     "City is always Rancho Palos Verdes (not Rolling Hills). Location typeaheads: 'Rancho Palos Verdes, California, United States'.",
     "Employer website in an employment-history section is the employer's own site (Jaburg & Wilk, P.C. -> https://www.jaburgwilk.com), never the candidate's portfolio.",
     "Employment dates: follow the format the form shows (MM/YY to MM/YY -> 04/24 to 10/26). Dates come from the resume.",
-    "Education: Bachelor's Degree in Computer Science, California State University Dominguez Hills. Pick 'Bachelor's Degree' and 'Computer Science' from the offered options.",
-    "Never click 'Apply with LinkedIn' or 'Sign in with LinkedIn/Google'; they are not needed."
+    "Education: Bachelor's Degree in Computer Science, California State University Dominguez Hills, from 2010 to 2014 (graduated 2014). Pick 'Bachelor's Degree' and 'Computer Science' from the offered options.",
+    "Location text boxes: 'Rancho Palos Verdes, CA' (or 'Rancho Palos Verdes, CA, USA' when the form shows a country). Some sites prefill Rolling Hills from the resume: replace it with Rancho Palos Verdes.",
+    "Current company: Jaburg & Wilk, P.C.",
+    "Salary asked as a range (base / OTE): give a range such as '$X - $Y' around the figure; with a posted range use that range. Salary with currency and period boxes: US Dollar, Yearly.",
+    "Answer the question that is asked. A question about the largest team managed needs team size and direct/indirect reports; a question about a recent hands-on issue needs one concrete incident. Never paste the answer of one box into another.",
+    "Never tick 'agree to receive text messages / SMS' boxes; tick the privacy / data-processing consent the application needs.",
+    "Never click 'Apply with LinkedIn', 'Apply with Indeed', 'Use My Indeed Resume' or 'Sign in with LinkedIn/Google'; upload the resume file instead.",
+    "Captchas (drag-the-piece puzzles, 'I am not a robot') are left to Kevin: stop and wait."
   ],
 
   "ats": [
@@ -33,6 +39,16 @@
       "name": "Greenhouse",
       "url": "greenhouse\\.io|grnh\\.se",
       "flow": "One page: first, last, email, country +1 and phone, Resume/CV Attach, Education (school, degree, discipline) dropdowns, the company's questions, Website and LinkedIn, then Voluntary Self-Identification (gender, Hispanic/Latino, race, veteran, disability) -> Submit application."
+    },
+    {
+      "name": "SmartRecruiters",
+      "url": "smartrecruiters\\.com",
+      "flow": "One page 'Easy Apply': skip 'Apply With Indeed'; Personal information (first, last, email, confirm email, Country/Region United States, City Rancho Palos Verdes, phone +1), Your Profiles (LinkedIn, Website; Facebook and X left empty), Resume (upload the tailored PDF), Message to the Hiring Team (the cover letter text), tick the privacy notice box -> Submit."
+    },
+    {
+      "name": "Lever",
+      "url": "lever\\.co",
+      "flow": "One page: skip 'Apply with LinkedIn'; Resume/CV upload, Full name, Email, Phone, Current location, Current company, Links (LinkedIn, GitHub, Portfolio), the company's questions (Yes/No dropdowns and radios, free text), U.S. EEO (Gender, Race, Veteran) -> Submit Application."
     }
   ],
 
@@ -62,11 +78,22 @@
     { "from": "NRC Health (Jobvite)", "q": "address line 2|address 2", "leave": true },
     { "from": "Canonical (Greenhouse)", "q": "agree to use only my own words|use of ai or other generated content", "pick": ["No", "/^no\\b/"] },
     { "from": "Canonical (Greenhouse)", "q": "how did you perform in (mathematics|math|your native language|english)", "pick": ["Cannot recall", "/cannot recall|can'?t recall|do not recall|don'?t remember/", "/prefer not/"] },
-    { "from": "Canonical (Greenhouse)", "q": "bachelor'?s (university )?degree result|degree result|university (grade|result)|\\bgpa\\b|grade point average", "not": "high school", "text": "Bachelor's Degree in Computer Science, California State University Dominguez Hills, 2004. GPA approximately 3.2/4.0 (US grading system: 4.0 = A, 3.0 = B, 2.0 = C, 1.0 = D)." },
+    { "from": "Canonical (Greenhouse)", "q": "bachelor'?s (university )?degree result|degree result|university (grade|result)|\\bgpa\\b|grade point average", "not": "high school", "text": "Bachelor's Degree in Computer Science, California State University Dominguez Hills, 2010-2014. GPA approximately 3.2/4.0 (US grading system: 4.0 = A, 3.0 = B, 2.0 = C, 1.0 = D)." },
     { "from": "Canonical (Greenhouse)", "q": "rationale or evidence for the high school performance|justify your selections", "text": "I completed high school coursework with strong performance in math and language. I do not have specific rank or score details available, so I am providing the most accurate summary I can." },
     { "from": "Canonical (Greenhouse)", "q": "how many companies have you worked for|number of companies|companies have you worked", "pick": ["/^10\\s*\\+/", "/10\\+|10 or more|more than 10/"] },
     { "from": "Canonical (Greenhouse)", "q": "which country do you currently work|country do you currently (work|live|reside)|current location from the dropdown", "pick": ["/^united states.*california/", "United States of America", "/^united states/"] },
-    { "from": "Canonical (Greenhouse)", "q": "read and agree to .{0,60}(privacy|recruitment)|privacy notice and privacy policy", "pick": ["/acknowledge|confirm/", "/^(i )?agree/", "/^yes\\b/"] },
+    { "from": "Canonical (Greenhouse), Toast", "q": "read and agree to .{0,60}(privacy|recruitment)|privacy notice and privacy policy|by selecting \"?i agree\"?|privacy statement|processed in accordance with", "pick": ["/acknowledge|confirm/", "/^(i )?agree/", "/^yes\\b/"] },
+    { "from": "Toast", "check": "^asian\\b" },
+    { "from": "VetsEZ", "never": "(agree|consent|opt.?in).{0,40}(text messages?|sms)|receive (informational )?(text messages?|sms)" },
+    { "from": "SmartRecruiters (The Intect)", "q": "message to the hiring team|let the company know about your interest|additional message|note to (the )?(hiring|recruit)", "cover": true },
+    { "from": "PDI Technologies (Lever)", "q": "^current company|current employer", "text": "Jaburg & Wilk, P.C." },
+    { "from": "PDI Technologies (Lever)", "q": "were you referred|referred (to this (position|job|role) )?by an? (current )?.{0,40}employee", "not": "name", "pick": ["No", "/^no\\b/"] },
+    { "from": "PDI Technologies (Lever)", "q": "if yes,? (please )?provide (their|the) name|referr(er|al)'?s? name|name of (the )?(employee|person) who referred|who referred you", "text": "N/A" },
+    { "from": "VetsEZ", "q": "willing to (undergo|obtain|apply for|go through).{0,30}clearance|clearance (process|investigation)", "pick": ["Yes", "/^yes\\b/"] },
+    { "from": "VetsEZ", "q": "willing to work (as )?(an? )?(full.?time )?w-?2|w-?2 employee", "pick": ["Yes", "/^yes\\b/"] },
+    { "from": "VetsEZ", "q": "own (business|company)|\\bllc\\b", "pick": ["No", "/^no\\b/"] },
+    { "from": "VetsEZ", "q": "highest (level of )?education|education level|highest degree", "pick": ["Bachelor's Degree", "/^bachelor/", "/bachelor/", "/4.?year|undergraduate/"] },
+    { "from": "VetsEZ", "q": "desired salary|salary expectation|expected salary", "pick": ["/^us dollar|^usd|\\(\\$\\)/", "/^year|annual/"] },
     { "from": "Canonical (Greenhouse)", "q": "nationality|citizenship", "not": "dual|other than", "pick": ["American", "/^american/", "/united states/"] }
   ],
 
@@ -140,7 +167,7 @@
         { "q": "During this application process I agree to use only my own words. I understand that plagiarism, the use of AI or other generated content will disqualify my application.", "type": "select", "a": "No" },
         { "q": "How did you perform in mathematics at high school?", "type": "select", "a": "Cannot recall" },
         { "q": "How did you perform in your native language at high school?", "type": "select", "a": "Cannot recall" },
-        { "q": "What was your bachelor's university degree result? Please include the grading system.", "type": "text", "a": "Bachelor's Degree in Computer Science, California State University Dominguez Hills, 2004. GPA approximately 3.2/4.0 (US grading system: 4.0 = A, 3.0 = B, 2.0 = C, 1.0 = D)." },
+        { "q": "What was your bachelor's university degree result? Please include the grading system.", "type": "text", "a": "Bachelor's Degree in Computer Science, California State University Dominguez Hills, 2010-2014. GPA approximately 3.2/4.0 (US grading system: 4.0 = A, 3.0 = B, 2.0 = C, 1.0 = D)." },
         { "q": "Please share your rationale or evidence for the high school performance selections above.", "type": "textarea", "a": "I completed high school coursework with strong performance in math and language. I do not have specific rank or score details available, so I am providing the most accurate summary I can." },
         { "q": "Briefly describe your experience with Automated Software Testing and/or Distributed Systems.", "type": "textarea", "how": "ai", "a": "I have 11+ years of experience building and testing distributed systems in Python and Go across Linux, Kubernetes, AWS, Azure, and CI/CD environments. My work has included automated test frameworks, contract and integration testing, load and resilience testing, and release validation for APIs, queues, databases, and cloud-native services. I have also built test infrastructure that reduced manual validation time and improved feedback speed for engineering teams." },
         { "q": "We require all colleagues to meet in person 2-4 times a year ... international travel ... Are you willing and able to commit to this?", "type": "select", "a": "No" },
@@ -154,6 +181,77 @@
         { "q": "Voluntary Self-Identification: Gender / Are you Hispanic/Latino? / Please identify your race", "type": "select", "a": "Male / No / Asian" },
         { "q": "Veteran Status", "type": "select", "a": "I am not a protected veteran" },
         { "q": "Disability Status", "type": "select", "a": "No, I do not have a disability and have not had one in the past" }
+      ]
+    },
+    {
+      "company": "Toast", "ats": "Greenhouse-style single page", "date": "2026-11-11",
+      "qa": [
+        { "q": "Location", "type": "text", "a": "Rancho Palos Verdes, CA" },
+        { "q": "What's your postal code?", "type": "text", "a": "90275" },
+        { "q": "Resume / Cover Letter", "type": "file", "a": "the tailored resume PDF / the tailored cover letter PDF" },
+        { "q": "LinkedIn Profile / Website", "type": "url", "a": "{profile.linkedin} / {profile.website}" },
+        { "q": "Are you legally authorized to work in the country where this job is located?", "type": "select", "a": "Yes" },
+        { "q": "Do you now, or will you ever, require employment sponsorship to work in the country where this job is located?", "type": "select", "a": "No" },
+        { "q": "By selecting \"I agree\", I understand that the information I have provided as part of this job application will be processed in accordance with Toast's Applicant Privacy Statement.", "type": "select", "a": "I agree" },
+        { "q": "Veteran Status", "type": "select", "a": "I am not a protected Veteran" },
+        { "q": "Gender Identity", "type": "select", "a": "Man" },
+        { "q": "Race/Ethnicity (Select all that apply)", "type": "checkboxes", "a": "Asian (only that box ticked)" }
+      ]
+    },
+    {
+      "company": "The Intect", "ats": "SmartRecruiters", "date": "2026-11-11", "role": "AWS Cloud Architect (Windows IIS, AD, SQL)", "found_on": "Himalayas: the 'Apply now' button in the card on the right of the posting",
+      "qa": [
+        { "q": "Easy Apply: Choose a file / Apply With Indeed", "type": "file", "a": "upload the tailored resume; never Apply With Indeed" },
+        { "q": "First name / Last name / Email / Confirm your email", "type": "text", "a": "Kevin / Burgess / {profile.email} / {profile.email}" },
+        { "q": "Country/Region / City / Phone number", "type": "combobox", "a": "United States / Rancho Palos Verdes / +1 310 933 9572" },
+        { "q": "LinkedIn / Facebook / X (fka Twitter) / Website", "type": "url", "a": "{profile.linkedin} / (empty) / (empty) / {profile.website}" },
+        { "q": "Resume", "type": "file", "a": "Kevin_Burgess_<Company>_Resume.pdf" },
+        { "q": "Message to the Hiring Team: Let the company know about your interest working there", "type": "textarea", "how": "the tailored cover letter text", "a": "... At Jaburg & Wilk, I designed a Multi-AZ AWS target architecture for Windows Server workloads using EC2 Auto Scaling, ALB, Route 53, Systems Manager, IIS, SQL Server, and AWS Managed Microsoft AD across 40+ instances. ... I'd be glad to talk about how I would approach the AD, SQL replication, IIS farm, MSMQ, DFS, and DR pieces for this project. Best regards, Kevin Burgess" },
+        { "q": "Please be informed that your application to this job offer will trigger some processing of your personal data by the recruiting company ... privacy notice.", "type": "checkbox", "a": "(ticked)" }
+      ]
+    },
+    {
+      "company": "PDI Technologies", "ats": "Lever", "date": "2026-11-11", "role": "Senior Manager, SRE",
+      "qa": [
+        { "q": "Resume/CV / Full name / Email / Phone", "type": "text", "a": "uploaded / Kevin Burgess / {profile.email} / 3109339572" },
+        { "q": "Current location", "type": "text", "a": "Rancho Palos Verdes, CA, USA" },
+        { "q": "Current company", "type": "text", "a": "Jaburg & Wilk, P.C." },
+        { "q": "LinkedIn URL / Twitter URL / GitHub URL / Portfolio URL / Other website", "type": "url", "a": "{profile.linkedin} / (empty) / {profile.github} / {profile.website} / (empty)" },
+        { "q": "Are you currently authorized to work in the United States for any employer?", "type": "radio", "a": "Yes" },
+        { "q": "If yes, do you now or will you in the future require sponsorship for employment visa status (e.g., H-1B visa, transfer, etc.) to work with our company?", "type": "select", "a": "No, I will not require sponsorship at any time in the future." },
+        { "q": "Have you previously worked for PDI Technologies or any company that has since been acquired by PDI?", "type": "select", "a": "No" },
+        { "q": "Are you currently employed by PDI Technologies or any company that has since been acquired by PDI?", "type": "select", "a": "No" },
+        { "q": "Were you referred to this position by a current PDI Technologies employee?", "type": "radio", "a": "No" },
+        { "q": "If yes, please provide their name.", "type": "textarea", "a": "N/A" },
+        { "q": "What is your target total compensation (OTE)? Please include your desired base salary range (annual, in USD) and a range for any bonus or commission.", "type": "textarea", "how": "job-specific: a range", "a": "$90000 - $110000" },
+        { "q": "Do you have 8+ years of experience in Site Reliability Engineering, DevOps, Infrastructure Engineering, or Platform Engineering?", "type": "select", "a": "Yes" },
+        { "q": "Do you have at least 4 years of people-management experience, including directly managing managers or team leads?", "type": "select", "a": "Yes" },
+        { "q": "Which of the following technologies do you have recent, hands-on production experience with? (Select all that apply)", "type": "checkboxes", "how": "ai: tick every one the resume shows (AWS, Azure, Kubernetes, Terraform ...), never 'None of the above'", "a": "AWS | Azure | Kubernetes | Terraform / OpenTofu" },
+        { "q": "Do you have experience leading SRE/DevOps teams responsible for high-availability, customer-facing production systems?", "type": "select", "a": "Yes" },
+        { "q": "Briefly describe the largest team or organization you have managed. How many direct and indirect reports did you have, and did your direct reports include managers or team leads?", "type": "textarea", "how": "ai: answer with the team size, direct and indirect reports and whether leads reported in, from the resume", "a": "(team size, direct/indirect reports, leads)" },
+        { "q": "Please briefly describe a recent example where you personally worked on or troubleshot a production infrastructure issue involving cloud infrastructure, Kubernetes, CI/CD, or Infrastructure as Code.", "type": "textarea", "how": "ai", "a": "At Jaburg & Wilk, our Airflow pipelines on Kubernetes started failing during peak loads. I traced it through pod logs and database metrics to parallel tasks exhausting PostgreSQL's connection limit, and fixed it with PgBouncer connection pooling and capped concurrency, while also rebuilding our CD pipeline with signed, Trivy-scanned images and smoke-tested deploys." },
+        { "q": "Briefly describe your experience leading incident management for critical production systems, including Sev1/Sev2 incidents, postmortems, SLOs/SLIs, or reliability improvements.", "type": "textarea", "how": "ai", "a": "I've owned production reliability for critical legal and government systems, leading issues from triage through root-cause fix and follow-up: PgBouncer pooling for database connection exhaustion, retries and failure alerts on Airflow pipelines, OCR provider fallback with per-provider accuracy tracking, and smoke-tested, signed Kubernetes deploys to cut release risk. I haven't run a formal Sev1/Sev2 incident command process or defined SLOs and error budgets in a dedicated SRE team, but I've applied the same principles in practice and am ready to formalize them." },
+        { "q": "Gender / Race / Veteran status", "type": "select", "a": "Male / Asian (Not Hispanic or Latino) / I am not a veteran" }
+      ]
+    },
+    {
+      "company": "VetsEZ", "ats": "careers site (multi-step)", "date": "2026-11-11", "role": "Full-stack SMART Application Developer (Remote)",
+      "qa": [
+        { "q": "Attach resume / Use My Indeed Resume / Apply Using LinkedIn", "type": "file", "a": "attach the tailored resume; never the Indeed or LinkedIn buttons" },
+        { "q": "Full Name / Email Address / Phone Number", "type": "text", "a": "Kevin Burgess / {profile.email} / 3109339572" },
+        { "q": "By providing your phone number you agree to receive informational text messages from VetsEZ.", "type": "checkbox", "a": "(unticked)" },
+        { "q": "Desired Salary (currency / amount / period)", "type": "select", "a": "US Dollar ($) / 130000 / Yearly" },
+        { "q": "Location (City/State)", "type": "text", "a": "Rancho Palos Verdes" },
+        { "q": "Are you authorized to work legally in the United States?", "type": "select", "a": "Yes" },
+        { "q": "Will you now or in the future require visa sponsorship for employment with VetsEZ?", "type": "select", "a": "No" },
+        { "q": "Are you willing to undergo a security clearance process?", "type": "select", "a": "Yes" },
+        { "q": "Are you willing to work as a full-time W2 employee?", "type": "select", "a": "Yes" },
+        { "q": "Do you currently have your own business or LLC?", "type": "select", "a": "No" },
+        { "q": "What is the highest level of education you have completed?", "type": "select", "a": "Bachelor's Degree" },
+        { "q": "LinkedIn/Social Profile Link", "type": "url", "a": "{profile.linkedin}" },
+        { "q": "Race or Ethnicity / Gender", "type": "radio", "a": "Asian (not Hispanic or Latino) / Male" },
+        { "q": "Please check one of the boxes below (protected veteran)", "type": "radio", "a": "I AM NOT A PROTECTED VETERAN" },
+        { "q": "CCPA Recruitment Privacy Notice: I've read the Privacy Notice below and consent the processing of my data as part of my job application.", "type": "checkbox", "a": "(ticked)" }
       ]
     }
   ]
