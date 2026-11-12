@@ -550,10 +550,17 @@ async function runSingle(tabId) {
 // The queue lives in memory while the worker runs and is mirrored to storage for the side panel.
 let linkQueue = []; // { url, status: pending|running|applied|attention|skipped|failed|stopped, title, company, bidId, note, t }
 let linksTimer = null;
-function saveLinks() {
+function saveLinks(now = false) {
   clearTimeout(linksTimer);
+  if (now) return chrome.storage.local.set({ links: linkQueue });
   linksTimer = setTimeout(() => chrome.storage.local.set({ links: linkQueue }), 200);
 }
+// The saved queue, read when the service worker wakes up. "Add links" can be what wakes it, so adding
+// waits for this first; otherwise the saved list would replace the links just added.
+let linksReady = null;
+const restoreLinks = () => (linksReady ||= chrome.storage.local.get('links').then(({ links }) => {
+  linkQueue = (links || []).map((l) => (l.status === 'running' ? { ...l, status: 'pending' } : l));
+}));
 
 const normUrl = (u) => {
   try {
@@ -567,9 +574,11 @@ const normUrl = (u) => {
 };
 
 // Every link is added, also one that is already in the list or was applied to before (repeats are allowed).
-function addLinks(text) {
+async function addLinks(text) {
+  await restoreLinks();
   const have = new Set(linkQueue.map((l) => l.url));
-  const found = String(text || '').match(/https?:\/\/[^\s"'<>]+/g) || [];
+  // one link per match, also when links are glued together or separated by commas / semicolons
+  const found = String(text || '').match(/https?:\/\/.+?(?=https?:\/\/|[\s"'<>,;|]|$)/g) || [];
   let added = 0;
   let dupes = 0;
   for (const raw of found) {
@@ -580,20 +589,22 @@ function addLinks(text) {
     linkQueue.push({ url, status: 'pending', t: Date.now() });
     added++;
   }
-  saveLinks();
+  await saveLinks(true); // straight away, so the list shows them at once
   return { added, dupes, total: linkQueue.length };
 }
 
-function clearLinks(which) {
+async function clearLinks(which) {
+  await restoreLinks();
   if (which === 'all') linkQueue = linkQueue.filter((l) => l.status === 'running');
   else if (which === 'retry') linkQueue.forEach((l) => { if (['failed', 'stopped'].includes(l.status)) l.status = 'pending'; });
   else linkQueue = linkQueue.filter((l) => l.status === 'pending' || l.status === 'running');
-  saveLinks();
+  await saveLinks(true);
   return { total: linkQueue.length };
 }
 
 // Same loop as Jobright mode, except the next job comes from your link list instead of the Jobright board.
 async function runLinks() {
+  await restoreLinks();
   const s = await withTemplate(await getSettings());
   linkQueue.forEach((l) => { if (l.status === 'running') l.status = 'pending'; });
   saveLinks();
@@ -1261,8 +1272,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       case 'stop': stop(); return { ok: true };
       case 'skip': skipJob(msg.w); return { ok: true };
       case 'runSingle': await runSingle(msg.tabId); return { ok: true };
-      case 'addLinks': return { ok: true, ...addLinks(msg.text) };
-      case 'clearLinks': return { ok: true, ...clearLinks(msg.which) };
+      case 'addLinks': return { ok: true, ...(await addLinks(msg.text)) };
+      case 'clearLinks': return { ok: true, ...(await clearLinks(msg.which)) };
       case 'resetDone': await chrome.storage.local.remove('done'); return { ok: true };
       case 'clearLog': state.log = []; save(); return { ok: true };
       default: return { ok: false, error: 'unknown message' };
@@ -1279,9 +1290,9 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 // A restarted service worker cannot resume a half-done bid; reset to idle.
-chrome.storage.local.get(['bot', 'links']).then(({ bot, links }) => {
+restoreLinks();
+chrome.storage.local.get('bot').then(({ bot }) => {
   state = { ...blank(), ...(bot || {}) };
-  linkQueue = (links || []).map((l) => (l.status === 'running' ? { ...l, status: 'pending' } : l));
   if (state.running) {
     state.running = false;
     log('Service worker restarted; bot stopped. Press Start to continue.', 'warn');
@@ -1289,6 +1300,6 @@ chrome.storage.local.get(['bot', 'links']).then(({ bot, links }) => {
   state.phase = 'idle';
   state.jobs = [];
   save();
-  saveLinks();
+  restoreLinks().then(() => saveLinks());
   updateBadge();
 });
