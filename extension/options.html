@@ -40,7 +40,7 @@
 <body>
   <header>
     <div class="wrap">
-      <h1>⚡ Auto Bid</h1>
+      <h1>⚡ Auto Bid <small id="ver" style="font-weight:400;font-size:.6em;opacity:.7"></small></h1>
       <nav id="nav">
         <button data-tab="connection" class="active">Connection</button>
         <button data-tab="profile">My info</button>
@@ -112,6 +112,7 @@
           <label class="check"><input type="checkbox" id="b-autoSubmit"> Submit automatically (off = stop at the final step for review)</label>
           <label class="check"><input type="checkbox" id="b-skipAccounts"> Skip jobs that need an account (sign up / sign in)</label>
           <label class="wide">Skip job sites whose URL contains (one per line)<textarea id="b-skipUrls" rows="4" placeholder="myworkdayjobs.com&#10;icims.com&#10;careers.example.com/apply"></textarea></label>
+          <label class="check"><input type="checkbox" id="b-generateCover"> Auto generate cover letter</label>
           <label class="check"><input type="checkbox" id="b-uploadCover"> Attach the cover letter when the form allows it</label>
           <label class="check"><input type="checkbox" id="b-closeTabs"> Close the job tabs after a successful bid</label>
         </div>
@@ -145,7 +146,10 @@
         <div class="grid" style="margin-top:12px">
           <label class="wide"><span id="keyLabel">API key</span><input id="aiKey" class="secret" autocomplete="off"></label>
           <label>Model (resume &amp; cover letter)<select id="aiModel"></select></label>
+          <p class="wide hint" style="margin:4px 0 0">Reading application pages (filling the forms) can use a different provider, for example resumes on Claude and forms on OpenAI.</p>
+          <label>Provider for reading application pages<select id="agentProvider"><option value="">Same as above</option><option value="anthropic">Claude</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></label>
           <label>Model for reading application pages<select id="agentModel"></select></label>
+          <label class="wide hidden" id="agentKeyRow"><span id="agentKeyLabel">API key</span><input id="agentKey" class="secret" autocomplete="off"></label>
         </div>
         <div class="row"><button id="loadModels">Load models</button><span id="aiStatus" class="muted"></span></div>
       </div>

@@ -22,7 +22,8 @@ const PROFILE_LABELS = {
 };
 
 let server = null; // server settings (AI, prompts, base resume)
-const ai = { provider: 'anthropic', keys: {}, models: {}, lists: {} };
+const ai = { provider: 'anthropic', agentProvider: '', keys: {}, models: {}, lists: {} };
+const PROVIDER_LABEL = { anthropic: 'Claude', openai: 'OpenAI', gemini: 'Gemini' };
 const KEY_FIELD = { anthropic: 'claude_api_key', openai: 'openai_api_key', gemini: 'gemini_api_key' };
 const MODEL_FIELD = { anthropic: 'claude_model', openai: 'openai_model', gemini: 'gemini_model' };
 
@@ -73,6 +74,7 @@ function renderSettings(s) {
     if (el && el.tagName !== 'SELECT') el.type === 'checkbox' ? (el.checked = !!v) : (el.value = v);
   }
   $('#b-template').dataset.value = s.behavior.template;
+  syncCoverBoxes();
 }
 
 function collectSettings() {
@@ -97,6 +99,7 @@ async function loadServer() {
       ai.models[p] = s[MODEL_FIELD[p]] || '';
     }
     ai.agentModel = s.agent_model || '';
+    ai.agentProvider = s.agent_provider || '';
     $('#promptResume').value = s.prompt_resume;
     $('#promptCover').value = s.prompt_cover;
     $('#baseResume').value = s.base_resume;
@@ -109,7 +112,7 @@ async function loadServer() {
     renderProvider();
     $('#connStatus').textContent = '✓ Connected';
     $('#connStatus').className = 'ok';
-    if (ai.keys[ai.provider]) loadModels(true);
+    if (ai.keys[ai.provider] || ai.keys[ai.agentProvider]) loadModels(true);
     loadUsage();
   } catch (err) {
     $('#connStatus').textContent = err.message;
@@ -122,7 +125,13 @@ function captureAi() {
   ai.keys[ai.provider] = $('#aiKey').value.trim();
   if ($('#aiModel').value) ai.models[ai.provider] = $('#aiModel').value;
   ai.agentModel = $('#agentModel').value;
+  // the page reader's own provider key (only shown when it differs from the provider above)
+  const ap = ai.agentProvider;
+  if (ap && ap !== ai.provider && !$('#agentKeyRow').classList.contains('hidden')) ai.keys[ap] = $('#agentKey').value.trim();
 }
+
+// the provider the page reader actually uses
+const agentProv = () => ai.agentProvider || ai.provider;
 
 function modelOptions(list, currentId, blankLabel) {
   const opts = list ? [...list] : [];
@@ -136,20 +145,36 @@ function renderProvider() {
   $('#aiKey').value = ai.keys[ai.provider] || '';
   const list = ai.lists[ai.provider];
   $('#aiModel').innerHTML = modelOptions(list, ai.models[ai.provider]) || '<option value="">Load models first</option>';
-  $('#agentModel').innerHTML = modelOptions(list, ai.agentModel, 'Same as above');
+  // page reader: its own provider, model and (when different from above) API key
+  const ap = agentProv();
+  $('#agentProvider').value = ai.agentProvider;
+  $('#agentModel').innerHTML = modelOptions(ai.lists[ap], ai.agentModel,
+    ap === ai.provider ? 'Same as above' : `${PROVIDER_LABEL[ap]} default (${ai.models[ap] || 'its default model'})`);
+  const ownKey = ap !== ai.provider;
+  $('#agentKeyRow').classList.toggle('hidden', !ownKey);
+  if (ownKey) {
+    $('#agentKeyLabel').textContent = `${PROVIDER_LABEL[ap]} API key (for reading application pages)`;
+    $('#agentKey').value = ai.keys[ap] || '';
+  }
 }
 
+// Loads the model lists of the provider above and of the page reader's provider.
 async function loadModels(quiet) {
   captureAi();
-  if (!ai.keys[ai.provider]) return !quiet && ($('#aiStatus').textContent = 'Enter the API key first.');
+  const provs = [...new Set([ai.provider, agentProv()])].filter((p) => ai.keys[p]);
+  if (!provs.length) return !quiet && ($('#aiStatus').textContent = 'Enter the API key first.');
   $('#aiStatus').textContent = 'Loading models…';
-  try {
-    ai.lists[ai.provider] = await rpc('settings:listModels', { provider: ai.provider, apiKey: ai.keys[ai.provider] });
-    renderProvider();
-    $('#aiStatus').textContent = `✓ ${ai.lists[ai.provider].length} models`;
-  } catch (err) {
-    $('#aiStatus').textContent = err.message;
+  const done = [];
+  for (const p of provs) {
+    try {
+      ai.lists[p] = await rpc('settings:listModels', { provider: p, apiKey: ai.keys[p] });
+      done.push(`✓ ${PROVIDER_LABEL[p]}: ${ai.lists[p].length} models`);
+    } catch (err) {
+      done.push(`${PROVIDER_LABEL[p]}: ${err.message}`);
+    }
   }
+  renderProvider();
+  $('#aiStatus').textContent = done.join('  ·  ');
 }
 
 $('#provider').addEventListener('click', (e) => {
@@ -161,6 +186,17 @@ $('#provider').addEventListener('click', (e) => {
   if (ai.keys[ai.provider] && !ai.lists[ai.provider]) loadModels(true);
 });
 $('#loadModels').addEventListener('click', () => loadModels(false));
+$('#agentProvider').addEventListener('change', () => {
+  captureAi();
+  ai.agentProvider = $('#agentProvider').value;
+  ai.agentModel = ''; // a model of the old provider does not apply
+  renderProvider();
+  if (ai.keys[agentProv()] && !ai.lists[agentProv()]) loadModels(true);
+});
+$('#agentKey').addEventListener('change', () => {
+  captureAi();
+  if (ai.keys[agentProv()]) loadModels(true);
+});
 $$('[data-reset]').forEach((b) => b.addEventListener('click', async () => {
   const d = await rpc('settings:defaultPrompts');
   $(b.dataset.reset === 'resume' ? '#promptResume' : '#promptCover').value = d[b.dataset.reset];
@@ -253,6 +289,7 @@ $('#saveBtn').addEventListener('click', async () => {
         [KEY_FIELD.anthropic]: ai.keys.anthropic || '', [MODEL_FIELD.anthropic]: ai.models.anthropic || '',
         [KEY_FIELD.openai]: ai.keys.openai || '', [MODEL_FIELD.openai]: ai.models.openai || '',
         [KEY_FIELD.gemini]: ai.keys.gemini || '', [MODEL_FIELD.gemini]: ai.models.gemini || '',
+        agent_provider: ai.agentProvider || '',
         agent_model: ai.agentModel || '',
         prompt_resume: $('#promptResume').value.trim(),
         prompt_cover: $('#promptCover').value.trim(),
@@ -279,3 +316,16 @@ $('#saveBtn').addEventListener('click', async () => {
     $('#connStatus').className = 'warn';
   }
 })();
+
+// version label: "1.3.01_R" (manifest version_name)
+{ const m = chrome.runtime.getManifest(); const v = document.querySelector("#ver"); if (v) v.textContent = m.version_name || m.version; }
+
+// "Attach the cover letter" only matters when a cover letter is written
+function syncCoverBoxes() {
+  const gen = $('#b-generateCover');
+  const att = $('#b-uploadCover');
+  if (!gen || !att) return;
+  att.disabled = !gen.checked;
+  att.closest('label').style.opacity = gen.checked ? '' : '.5';
+}
+$('#b-generateCover')?.addEventListener('change', syncCoverBoxes);

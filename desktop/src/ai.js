@@ -84,8 +84,8 @@ const DEFAULT_COVER_PROMPT = `Write a short, simple and realistic cover letter f
 
 // ---------------- structured output schema ----------------
 
-// The model writes only what changes per job; employers, dates, locations,
-// contact details and education always come from the base profile.
+// The model rewrites the resume content as the Settings prompt says, company names included.
+// Fixed: the second job's company (LOCKED_COMPANY_INDEXES), the name, contact details and education.
 const TAILOR_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -115,16 +115,21 @@ const TAILOR_SCHEMA = {
     },
     work: {
       type: 'array',
-      description: 'One entry per base-profile job, same order, same count',
+      description: 'One entry per base-profile job (same order, same count). Every field is written as the instructions say; the company name of work[1] (the second job) must stay exactly as in the base profile.',
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['index', 'position', 'description', 'highlights'],
+        required: ['index', 'name', 'position', 'context', 'location', 'startDate', 'endDate', 'description', 'highlights'],
         properties: {
           index: { type: 'integer', description: '0-based index of the job in the base profile' },
-          position: { type: 'string' },
-          description: { type: 'string' },
-          highlights: { type: 'array', items: { type: 'string' } }
+          name: { type: 'string', description: 'Company name (for index 1, exactly the base profile company name)' },
+          position: { type: 'string', description: 'Job title' },
+          context: { type: 'string', description: 'Short line on the company / project domain shown next to the company name ("" for none)' },
+          location: { type: 'string', description: 'Work location' },
+          startDate: { type: 'string', description: 'YYYY-MM; keep the base profile date unless the instructions say otherwise' },
+          endDate: { type: 'string', description: 'YYYY-MM, or "" for present; keep the base profile date unless the instructions say otherwise' },
+          description: { type: 'string', description: 'One-line description of the role' },
+          highlights: { type: 'array', items: { type: 'string' }, description: 'Bullets' }
         }
       }
     },
@@ -261,15 +266,30 @@ function jobBlock(job) {
   ].filter((l) => l !== '').join('\n');
 }
 
+// Added after the Settings prompt: only how the answer is returned. Everything about what to write
+// comes from the Settings prompt, which wins over anything here except the fixed company names.
+// Jobs whose company name never changes: the second job (work[1], rTurner Consulting, LLC).
+const LOCKED_COMPANY_INDEXES = [1];
+const JOB_FIELDS = ['position', 'context', 'location', 'startDate', 'endDate'];
+
+const TAILOR_OUTPUT_RULES = `
+
+---
+Output format (the app fills the resume from this; it does not change the instructions above):
+- Return one JSON object in the given schema: label (headline), summary, highlights (core competencies), skills (groups), work, keywords_matched.
+- work: one entry per job in <base_profile> (same order and count, "index" = its 0-based position). Write every job fully (company name, position, context, location, dates, description, bullets) as the instructions above say.
+- Fixed: the SECOND job's company name (work[1].name in <base_profile>) stays exactly as given. The candidate's name, contact details and education also stay as in <base_profile>.
+- Everything else follows the instructions above; they are the most important part of this request.`;
+
 async function tailorResume({ cfg, prompt, base, job }) {
   const text = await complete(cfg, {
-    system: prompt || DEFAULT_RESUME_PROMPT,
+    system: (prompt || DEFAULT_RESUME_PROMPT) + TAILOR_OUTPUT_RULES,
     schema: TAILOR_SCHEMA,
     maxTokens: 32000,
     effort: 'high',
     user: `<base_profile>\n${JSON.stringify(base, null, 2)}\n</base_profile>\n\n${jobBlock(job)}${
       job.instructions ? `\n\n<extra_instructions>\n${job.instructions}\n</extra_instructions>` : ''
-    }\n\nReturn the tailored resume content as JSON.`
+    }\n\nWrite the resume for this job exactly as the system instructions say, and return it as JSON.`
   });
   let tailored;
   try {
@@ -289,7 +309,12 @@ function mergeTailored(base, t) {
   for (const w of t.work || []) {
     const job = resume.work[w.index];
     if (!job) continue;
-    job.position = w.position || job.position;
+    // every field of the job comes from the AI; the locked jobs keep their base company name
+    const keys = LOCKED_COMPANY_INDEXES.includes(w.index) ? JOB_FIELDS : ['name', ...JOB_FIELDS];
+    for (const k of keys) {
+      const v = String(w[k] ?? '').trim();
+      if (v) job[k] = v;
+    }
     job.description = w.description ?? job.description;
     if (Array.isArray(w.highlights) && w.highlights.length) job.highlights = w.highlights;
   }

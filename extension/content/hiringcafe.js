@@ -258,5 +258,134 @@
     return true;
   }
 
-  window.__abHiringCafe = { scrapeList, diagnose, loadMore, openCard, scrapeDetail, target, clickApply, confirmApplied };
+  // ---- pagination ("‹ 1 2 3 4 5 6 ›" under the list) ----
+  // The page buttons: a row of small number buttons outside the job boxes (the boxes have digit-only
+  // view/save counts too), lowest on the page. Returns { nums: [{ el, n }], row } or null.
+  function pager() {
+    const cards = cardElements();
+    const inCard = (el) => cards.some((c) => c.contains(el));
+    const nums = [...document.querySelectorAll('button, a, li, [role="button"], span, div')]
+      .filter((e) => /^\d{1,3}$/.test(textOf(e)) && ![...e.children].some((c) => /^\d{1,3}$/.test(textOf(c))))
+      .map((e) => e.closest('button, a, [role="button"], li') || e)
+      .filter((e, i, all) => all.indexOf(e) === i && visible(e) && !inCard(e));
+    // group by row (same parent chain within 3 levels), keep rows of 2+ consecutive numbers
+    const rows = new Map();
+    for (const el of nums) {
+      let row = el.parentElement;
+      for (let i = 0; i < 3 && row && nums.filter((x) => row.contains(x)).length < 2; i++) row = row.parentElement;
+      if (!row) continue;
+      if (!rows.has(row)) rows.set(row, []);
+      rows.get(row).push({ el, n: Number(textOf(el)) });
+    }
+    const ok = [...rows.entries()]
+      .map(([row, list]) => ({ row, nums: list.filter((x, i, a) => a.findIndex((y) => y.n === x.n) === i).sort((a, b) => a.n - b.n) }))
+      .filter(({ nums: l }) => l.length >= 2 && l.every((x, i) => i === 0 || x.n === l[i - 1].n + 1));
+    if (!ok.length) return null;
+    return ok.sort((a, b) => b.row.getBoundingClientRect().top - a.row.getBoundingClientRect().top)[0];
+  }
+
+  // The highlighted page: aria-current, else the one button whose background differs from the rest.
+  function activePage(nums) {
+    const cur = nums.find(({ el }) => /page|true/.test(el.getAttribute('aria-current') || '') || el.getAttribute('aria-selected') === 'true');
+    if (cur) return cur.n;
+    const bg = (el) => getComputedStyle(el).backgroundColor;
+    const counts = {};
+    for (const { el } of nums) counts[bg(el)] = (counts[bg(el)] || 0) + 1;
+    const odd = nums.filter(({ el }) => counts[bg(el)] === 1);
+    return odd.length === 1 ? odd[0].n : null;
+  }
+
+  // "Page [ 1 ] of 6  Go  ‹ ›": the page box (the page number is in an input). Returns
+  // { input, box, cur, total, next } (next = the "›" button) or null.
+  function inputPager() {
+    for (const input of document.querySelectorAll('input')) {
+      if (!visible(input) || !/^\d{1,4}$/.test(String(input.value).trim())) continue;
+      let box = input.parentElement;
+      for (let i = 0; i < 5 && box && box !== document.body; i++, box = box.parentElement) {
+        const t = textOf(box);
+        const m = /\bof\s*(\d{1,4})\b/i.exec(t);
+        if (!m || !/\bpage\b/i.test(t) || t.length > 80) continue;
+        // "›" = the last icon button (no text) after the input; "‹" comes before it
+        const icons = [...box.querySelectorAll('button, a, [role="button"]')]
+          .filter((b) => visible(b) && !textOf(b) && (input.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
+        return { input, box, cur: Number(input.value), total: Number(m[1]), next: icons[icons.length - 1] || null };
+      }
+    }
+    return null;
+  }
+
+  // Types a page number into the page box and presses "Go" (React needs the native value setter).
+  function goToPage(p, n) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(p.input, String(n));
+    p.input.dispatchEvent(new Event('input', { bubbles: true }));
+    p.input.dispatchEvent(new Event('change', { bubbles: true }));
+    const go = [...p.box.querySelectorAll('button, [role="button"]')].find((b) => /^go$/i.test(textOf(b)));
+    if (go) go.click();
+    else p.input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+  }
+
+  const firstCardText = () => { const c = cardElements()[0]; return c ? textOf(c).slice(0, 120) : ''; };
+  async function waitNewCards(before) {
+    for (let i = 0; i < 24; i++) {
+      await sleep(500);
+      const now = firstCardText();
+      if (now && now !== before) return true;
+    }
+    return false;
+  }
+  async function backToTop() {
+    window.scrollTo(0, 0);
+    for (const s of document.querySelectorAll('div')) if (s.scrollTop > 0) s.scrollTop = 0;
+    await sleep(500);
+  }
+
+  // Goes to the next result page. `known` = the page the bot thinks it is on (used when the
+  // current page cannot be told). Returns { moved, page, total } (page = the page now shown).
+  async function nextPage(known = 1) {
+    window.scrollTo(0, document.body.scrollHeight);
+    await sleep(600);
+
+    // "Page [1] of 6  Go  ‹ ›"
+    const box = inputPager();
+    if (box) {
+      const cur = box.cur || known;
+      if (cur >= box.total) return { moved: false, reason: 'last page', page: cur, total: box.total };
+      const before = firstCardText();
+      const usable = (b) => b && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
+      if (usable(box.next)) box.next.click();
+      else goToPage(box, cur + 1);
+      let changed = await waitNewCards(before);
+      if (!changed && usable(box.next)) {
+        // the arrow did nothing: type the page number and press Go instead
+        const again = inputPager();
+        if (again) { goToPage(again, cur + 1); changed = await waitNewCards(before); }
+      }
+      if (!changed) return { moved: false, reason: 'next page did not load', page: cur, total: box.total };
+      await backToTop();
+      return { moved: true, page: inputPager()?.cur || cur + 1, total: box.total };
+    }
+
+    // "‹ 1 2 3 4 5 6 ›"
+    const p = pager();
+    if (!p) return { moved: false, reason: 'no page buttons' };
+    const cur = activePage(p.nums) ?? known;
+    const want = cur + 1;
+    let btn = p.nums.find((x) => x.n === want)?.el;
+    if (!btn) {
+      // page numbers shown only up to the current one: the "›" arrow after the last number
+      const last = p.nums[p.nums.length - 1].el;
+      if (cur < p.nums[p.nums.length - 1].n) return { moved: false, reason: 'next page not found' };
+      const after = [...p.row.querySelectorAll('button, a, [role="button"]')].filter((b) => visible(b) && !/^\d+$/.test(textOf(b)) && (last.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
+      btn = after.find((b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+      if (!btn) return { moved: false, reason: 'last page', page: cur };
+    }
+    const before = firstCardText();
+    btn.click();
+    // the click showed the same jobs (a "›" that looks enabled on the last page): treat as the end
+    if (!(await waitNewCards(before))) return { moved: false, reason: 'last page', page: cur };
+    await backToTop();
+    return { moved: true, page: activePage(pager()?.nums || []) ?? want };
+  }
+
+  window.__abHiringCafe = { scrapeList, diagnose, loadMore, nextPage, openCard, scrapeDetail, target, clickApply, confirmApplied };
 })();

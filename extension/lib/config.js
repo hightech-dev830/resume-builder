@@ -49,9 +49,10 @@ export const DEFAULT_SETTINGS = {
   },
   behavior: {
     autoSubmit: true,      // false = stop on the final review/submit step for you to check
-    skipAccounts: true,    // skip jobs whose site wants you to sign up or sign in
+    skipAccounts: false,   // skip jobs whose site wants you to sign up or sign in (off: the bot signs up / signs in)
     skipUrls: '',          // one per line (or comma-separated): skip jobs whose application URL contains any
     template: '',          // '' = the web app's default template
+    generateCover: false,  // write a cover letter for each bid (off: resume only)
     uploadCover: true,
     delaySec: 8,           // pause between bids
     stepLimit: 40,         // max pages per application (Workday-style wizards need ~15)
@@ -71,9 +72,9 @@ export const DEFAULT_PROFILE = {
   linkedin: 'https://www.linkedin.com/in/kevin-burgess-357505446/', github: 'https://github.com/hightech-dev830', website: 'https://portfolio-kb-219.vercel.app/',
   current_title: 'Senior Software Engineer', current_company: '', years_experience: '11',
   highest_degree: "Bachelor's Degree", degree_field: 'Computer Science', school: 'California State University Dominguez Hills', graduation_year: '2014',
-  work_authorized_us: 'Yes, authorized to work for any employer in the US', needs_sponsorship: 'No, now or in the future', citizenship: '',
+  work_authorized_us: 'Yes, authorized to work for any employer in the US', needs_sponsorship: 'No, now or in the future', citizenship: 'Yes',
   willing_to_relocate: 'No', remote_preference: 'Remote',
-  start_date: '2026-12-01 (or immediately if the form asks for availability)', notice_period: 'Available immediately', salary_expectation: '',
+  start_date: '2026-12-01 (or immediately if the form asks for availability)', notice_period: 'Available immediately', salary_expectation: '$10,000 / monthly',
   gender: 'Male (Man)', pronouns: 'He/Him', sexual_orientation: 'Heterosexual', race_ethnicity: 'Asian (Not Hispanic or Latino)', hispanic_latino: 'No',
   veteran_status: 'I am not a protected veteran', disability_status: 'No, I do not have a disability',
   sms_consent: 'Yes', how_heard: 'Linkedin', licenses_certifications: 'None',
@@ -83,11 +84,20 @@ export const DEFAULT_PROFILE = {
   password: '', ssn_last4: '', dob: ''
 };
 
+// filled in when left empty (an empty box in My info means "use the default")
+const DEFAULT_WHEN_EMPTY = ['salary_expectation'];
+
 export const SECRET_KEYS = ['password', 'ssn_last4', 'dob'];
 
 export async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
   const s = settings || {};
+  // 1.3.01_R: "Skip jobs that need an account" is off by default; turn it off once for saved settings
+  if (s.behavior && !s.defaults1301) {
+    s.behavior.skipAccounts = false;
+    s.defaults1301 = true;
+    await chrome.storage.local.set({ settings: s });
+  }
   // 25 was the old default page limit; multi-step sites (Workday) need more
   if (s.behavior?.stepLimit === 25) s.behavior.stepLimit = DEFAULT_SETTINGS.behavior.stepLimit;
   // before 1.2.1 there was one list URL (Jobright's)
@@ -112,7 +122,23 @@ export async function saveSettings(patch) {
 
 export async function getProfile() {
   const { profile } = await chrome.storage.local.get('profile');
-  return { ...DEFAULT_PROFILE, ...(profile || {}) };
+  const p = { ...DEFAULT_PROFILE, ...(profile || {}) };
+  for (const k of DEFAULT_WHEN_EMPTY) if (!String(p[k] || '').trim()) p[k] = DEFAULT_PROFILE[k];
+  // private defaults (street address, SSN last 4, password…) from profile.local.json, kept out of git:
+  // used for any box left empty in My info
+  const local = await localDefaults();
+  for (const [k, v] of Object.entries(local)) if (k !== '_version' && !String(p[k] || '').trim() && v) p[k] = v;
+  return p;
+}
+
+let localCache = null;
+async function localDefaults() {
+  if (!localCache) {
+    localCache = fetch(chrome.runtime.getURL('profile.local.json'))
+      .then((r) => (r.ok ? r.json() : {}))
+      .catch(() => ({})); // no file in this copy (e.g. a fresh clone)
+  }
+  return localCache;
 }
 
 export async function saveProfile(profile) {

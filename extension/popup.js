@@ -49,20 +49,20 @@ $('#singleBtn').addEventListener('click', async () => {
 });
 $('#clearLog').addEventListener('click', () => send('clearLog'));
 
-// "Apply again": carry on with a "need you" job after you fixed its page.
-// Uses the active tab when it is one of those jobs, else the newest one still open.
-let attention = {};
+// "Apply again": carry on with the "need you" job open in the active tab (that one job only),
+// after you fixed its page. While it runs, "Stop applying again" ends it.
+let retrying = null; // tab id of the running / queued "Apply again"
 async function showAgain() {
   const all = (await chrome.storage.session.get('attentionTabs')).attentionTabs || {};
-  const open = new Set((await chrome.tabs.query({})).map((t) => t.id));
-  attention = Object.fromEntries(Object.entries(all).filter(([id]) => open.has(Number(id))));
-  const n = Object.keys(attention).length;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const here = tab && attention[tab.id];
-  const pick = here || Object.values(attention).sort((a, b) => b.t - a.t)[0];
-  $('#againBtn').classList.toggle('hidden', !n);
-  $('#againInfo').textContent = pick ? `· ${pick.job?.role || 'job'}${pick.job?.company ? ` @ ${pick.job.company}` : ''}${n > 1 ? ` (+${n - 1} more)` : ''}` : '';
+  const here = tab && all[tab.id];
+  const label = (e) => (e ? `· ${e.job?.role || 'job'}${e.job?.company ? ` @ ${e.job.company}` : ''}` : '');
+  $('#stopAgainBtn').classList.toggle('hidden', retrying == null);
+  $('#stopAgainInfo').textContent = retrying != null ? label(all[retrying]) : '';
+  $('#againBtn').classList.toggle('hidden', !here || retrying != null);
+  $('#againInfo').textContent = label(here);
 }
+$('#stopAgainBtn').addEventListener('click', () => send('stopAgain'));
 $('#againBtn').addEventListener('click', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   $('#msg').textContent = '';
@@ -71,6 +71,8 @@ $('#againBtn').addEventListener('click', async () => {
     $('#msg').textContent = res?.error || 'Something went wrong';
     $('#msg').className = 'err';
   } else if (res.queued) {
+    retrying = tab.id;
+    showAgain();
     $('#msg').textContent = 'Queued: the bot applies again right after the current job.';
     $('#msg').className = 'muted';
   }
@@ -107,8 +109,12 @@ function showSite(s) {
 $('#site').addEventListener('change', async () => showSite(await saveSettings({ site: $('#site').value })));
 chrome.storage.onChanged.addListener((ch) => ch.settings && getSettings().then(showSite));
 
-chrome.storage.onChanged.addListener((ch) => ch.bot && render(ch.bot.newValue));
-chrome.storage.local.get('bot').then(({ bot }) => render(bot));
+function trackRetry(bot) {
+  const r = bot?.running && bot.retryTabId != null ? bot.retryTabId : null;
+  if (r !== retrying) { retrying = r; showAgain(); }
+}
+chrome.storage.onChanged.addListener((ch) => ch.bot && (render(ch.bot.newValue), trackRetry(ch.bot.newValue)));
+chrome.storage.local.get('bot').then(({ bot }) => (render(bot), trackRetry(bot)));
 getSettings().then((s) => {
   showSite(s);
   $('#signin').classList.toggle('hidden', !!s.token);
@@ -139,3 +145,6 @@ chrome.tabs.onActivated.addListener(checkTab);
 chrome.tabs.onUpdated.addListener((_id, info) => info.url && checkTab());
 // refresh the AI cost line every minute
 setInterval(() => getSettings().then((s) => s.token && showUsage()), 60000);
+
+// version label: "1.3.01_R" (manifest version_name)
+{ const m = chrome.runtime.getManifest(); const v = document.querySelector("#ver"); if (v) v.textContent = m.version_name || m.version; }

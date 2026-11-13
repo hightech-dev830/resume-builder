@@ -43,9 +43,11 @@ function jobContext() {
   skip.catch(() => {});
   const ctx = {
     skipped: false,
+    stopped: false, // "Stop" on an "Apply again" run: ends it now, the job stays "need you"
     guard: (p) => Promise.race([p, skip]),
-    check: () => { if (ctx.skipped) throw new SkipError('skipped by you'); },
-    cancel: () => { ctx.skipped = true; reject(new SkipError('skipped by you')); }
+    check: () => { if (ctx.skipped || ctx.stopped) throw new SkipError(ctx.stopped ? 'stopped by you' : 'skipped by you'); },
+    cancel: () => { ctx.skipped = true; reject(new SkipError('skipped by you')); },
+    stop: () => { ctx.stopped = true; reject(new SkipError('stopped by you')); }
   };
   return ctx;
 }
@@ -287,6 +289,22 @@ function directApplyUrl(url) {
   return u.toString();
 }
 
+// The posting ("Overview") page for an Ashby / Lever form address: …/<uuid>/application -> …/<uuid>.
+// '' when the URL is not such a form page.
+function postingUrlOf(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return '';
+  }
+  const form = /^(\/[^/]+\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(application|apply)\/?$/i;
+  const m = form.exec(u.pathname);
+  if (!m || !/(^|\.)(ashbyhq\.com|lever\.co)$/.test(u.hostname)) return '';
+  u.pathname = m[1];
+  return u.toString();
+}
+
 function slug(s, max = 40) {
   return String(s || '').normalize('NFKD').replace(/[^\w\s-]/g, '').trim().replace(/[\s-]+/g, '_').slice(0, max) || 'Untitled';
 }
@@ -356,6 +374,7 @@ async function start() {
 function stop() {
   if (!state.running) return;
   stopRequested = true;
+  if (retryCtx) retryCtx.stop();
   log('Stop requested; finishing the current step…');
   setPhase('stopping');
 }
@@ -398,6 +417,11 @@ async function runLoop() {
   let diagnosed = false;
   let lastCount = 0;
 
+  // paged boards (HiringCafe "1 2 3 … ›"): the page shown, and whether this pass over the pages found a job
+  let page = 1;
+  let passHadJobs = false;
+  let pagerWarned = false;
+
   const refreshList = async () => {
     log(`Refreshing the ${site.label} job list`);
     await chrome.tabs.reload(listId);
@@ -405,6 +429,8 @@ async function runLoop() {
     await sleep(3000);
     lastRefresh = Date.now();
     emptyRounds = 0;
+    page = 1;
+    passHadJobs = false;
   };
 
   while (!stopRequested && state.counts.applied < s.filters.maxBids) {
@@ -449,6 +475,30 @@ async function runLoop() {
       const before = cards.length;
       const after = await board(site, listId, 'loadMore');
       emptyRounds = after > before ? 0 : emptyRounds + 1;
+      // every job on this page is done: go to the next page; after the last one, reload the list
+      // (back to page 1) right away when this pass found jobs, else wait for the refresh time below
+      if (after <= before) {
+        const moved = await board(site, listId, 'nextPage', page).catch(() => null);
+        if (moved?.moved) {
+          page = moved.page || page + 1;
+          log(`Page done; going to page ${page}${moved.total ? ` of ${moved.total}` : ''}`);
+          emptyRounds = 0;
+          lastCount = 0;
+          continue;
+        }
+        if (moved && page > 1 && passHadJobs) {
+          log(`Last page (${page}) done; starting again from page 1`);
+          await refreshList();
+          continue;
+        }
+        if (moved && moved.reason !== 'no page buttons') {
+          emptyRounds = 3; // a paged list does not load more by scrolling
+          if (moved.reason !== 'last page') log(`Could not go to the next page (${moved.reason})`, 'warn');
+        } else if (moved && !pagerWarned) {
+          pagerWarned = true;
+          log(`No page buttons found on the ${site.label} list; scrolling for more jobs instead`, 'warn');
+        }
+      }
       if (emptyRounds >= 3) {
         // wait for the next refresh instead of stopping; new jobs keep arriving
         const at = new Date(lastRefresh + refreshMs);
@@ -462,6 +512,7 @@ async function runLoop() {
       continue;
     }
 
+    passHadJobs = true;
     await processJob(next, { listId, settings: s, site });
     if (!stopRequested) await sleep(s.behavior.delaySec * 1000);
   }
@@ -475,13 +526,18 @@ async function generateDocs(bid, job, s, g = (p) => p) {
   const jobForAi = { ...job, bid_id: bid.id };
   log('Tailoring the resume…');
   const tailored = await g(rpc('ai:tailor', jobForAi));
-  log('Writing the cover letter…');
-  const letter = await g(rpc('ai:coverLetter', { resume: tailored.resume, job: jobForAi }));
-  bid = await g(rpc('resumes:update', bid.id, { resume_json: tailored.resume, cover_letter: letter, ...tailored.meta }));
+  // the cover letter only when "Auto generate cover letter" is on
+  const withCover = !!s.behavior.generateCover;
+  let letter = '';
+  if (withCover) {
+    log('Writing the cover letter…');
+    letter = await g(rpc('ai:coverLetter', { resume: tailored.resume, job: jobForAi }));
+  }
+  bid = await g(rpc('resumes:update', bid.id, { resume_json: tailored.resume, ...(withCover ? { cover_letter: letter } : {}), ...tailored.meta }));
   bid = await g(rpc('resumes:exportPdf', bid.id));
-  bid = await g(rpc('resumes:exportCover', bid.id));
+  if (withCover) bid = await g(rpc('resumes:exportCover', bid.id));
   const docs = { bid, resume: tailored.resume, coverLetter: letter, ...(await g(readDocFiles(bid, s))) };
-  log(`Resume and cover letter ready (${tailored.keywords?.length || 0} JD keywords matched)${s.filesDir ? `, saved in ${s.filesDir}/${bid.resume_dir}` : ''}`);
+  log(`${withCover ? 'Resume and cover letter' : 'Resume'} ready (${tailored.keywords?.length || 0} JD keywords matched)${s.filesDir ? `, saved in ${s.filesDir}/${bid.resume_dir}` : ''}`);
   return docs;
 }
 
@@ -491,7 +547,7 @@ async function readDocFiles(bid, s) {
   return {
     files: {
       resume: { b64: resumePdf.__b64, name: bid.pdf_path.split('/').pop() },
-      cover: s.behavior.uploadCover && coverPdf ? { b64: coverPdf.__b64, name: bid.cover_letter_path.split('/').pop() } : null
+      cover: s.behavior.generateCover && s.behavior.uploadCover && coverPdf ? { b64: coverPdf.__b64, name: bid.cover_letter_path.split('/').pop() } : null
     }
   };
 }
@@ -519,24 +575,18 @@ chrome.tabs.onRemoved.addListener((tabId) => { forgetAttention(tabId).catch(() =
 
 const retryQueue = []; // tab ids waiting for the running bot to finish its current job
 
-// Which "need you" job to apply to again: the one in `tabId`, else the newest whose tab is still open.
-async function pickAttention(tabId) {
-  const all = await attentionJobs();
-  if (all[tabId] && (await tabExists(tabId))) return Number(tabId);
-  for (const [id, e] of Object.entries(all).sort((a, b) => b[1].t - a[1].t)) {
-    if (await tabExists(Number(id))) return Number(id);
-    delete all[id];
-  }
-  await chrome.storage.session.set({ attentionTabs: all });
-  return null;
-}
+let retryCtx = null; // the "Apply again" run in progress (its Stop button ends it)
 
+// "Apply again" works on one job only: the "need you" job open in the active tab.
 async function applyAgain(activeTabId) {
-  const tabId = await pickAttention(activeTabId);
-  if (tabId == null) throw new Error('No "need you" job is open. Its tab must still be open (the bot leaves it open for you).');
+  const all = await attentionJobs();
+  const tabId = Number(activeTabId);
+  if (!all[tabId] || !(await tabExists(tabId))) throw new Error('Open the tab of the "need you" job first; Apply again works on the job in that tab only.');
   if (retryQueue.includes(tabId)) return { queued: true };
   if (state.running) {
     retryQueue.push(tabId);
+    state.retryTabId = tabId;
+    save();
     log('"Apply again" queued; it runs after the current job');
     return { queued: true };
   }
@@ -550,16 +600,26 @@ async function applyAgain(activeTabId) {
   return { queued: false };
 }
 
+// Stop for "Apply again": ends the running one now (or drops it from the queue); the job stays "need you".
+function stopAgain() {
+  if (retryQueue.length) { retryQueue.length = 0; log('Queued "Apply again" cancelled'); }
+  if (retryCtx) { log('Stop pressed; ending "Apply again"'); retryCtx.stop(); }
+  state.retryTabId = null;
+  save();
+}
+
 // Carries on with a "need you" job on its tab, then finishes it like a normal bid.
 async function retryAttention(tabId, s) {
   const entry = (await attentionJobs())[tabId];
   if (!entry || !(await tabExists(tabId))) return;
+  state.retryTabId = tabId;
   const site = SITES[entry.site] || siteOf(s);
   const { job, card } = entry;
   const label = `${job.role || 'job'} @ ${job.company || '?'}`;
   const tabs = [tabId];
   const ctx = jobContext();
   currentJob = ctx;
+  retryCtx = ctx;
   const g = ctx.guard;
   let bid = null;
   let outcome = 'attention';
@@ -639,7 +699,11 @@ async function retryAttention(tabId, s) {
       await notify('Application needs you', `${job.role} at ${job.company}: ${reason}`, { tabId: last, sticky: true });
     }
   } catch (err) {
-    if (err instanceof SkipError || ctx.skipped) {
+    if (ctx.stopped) {
+      // the tab stays open and the job stays "need you": Apply again can pick it up later
+      outcome = 'stopped';
+      reason = 'stopped by you';
+    } else if (err instanceof SkipError || ctx.skipped) {
       outcome = 'skipped';
       reason = 'you pressed Skip';
       state.counts.skipped++;
@@ -650,9 +714,11 @@ async function retryAttention(tabId, s) {
       state.counts.failed++;
     }
     log(`${outcome === 'failed' ? '✗' : '⏭'} ${label}: ${reason}`, outcome === 'failed' ? 'error' : 'warn');
-    if (bid) await rpc('bot:log', bid.id, `${outcome === 'failed' ? 'Failed' : 'Skipped'}: ${reason}`, { bot_status: outcome }).catch(() => {});
+    if (bid) await rpc('bot:log', bid.id, outcome === 'stopped' ? 'Apply again stopped by you' : `${outcome === 'failed' ? 'Failed' : 'Skipped'}: ${reason}`, { bot_status: outcome === 'stopped' ? 'needs_attention' : outcome }).catch(() => {});
   } finally {
     if (currentJob === ctx) currentJob = null;
+    if (retryCtx === ctx) retryCtx = null;
+    state.retryTabId = null;
     if (entry.cardId) await markProcessed(entry.cardId, outcome);
     await addHistory({
       status: outcome, reason: outcome === 'applied' ? 'applied again after your fix' : reason, site: entry.site, bidId: bid?.id || entry.bidId || null,
@@ -780,18 +846,27 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
       }
       log(`Application page: ${new URL(applyTab.url).host}`);
 
-      // 3. exact job description from the company page
-      const page = await g(call(applyId, '__abAgent', 'pageText').catch(() => null));
-      // posting pages with the form on a separate tab/page (Ashby "Application", Lever "Apply"): go straight to the form
-      const formUrl = directApplyUrl(applyTab.url);
-      if (formUrl) {
-        log('  Job description read; opening the application form');
-        await chrome.tabs.update(applyId, { url: formUrl });
+      // 3. exact job description from the company page. Ashby / Lever show the posting ("Overview")
+      // and the form ("Application" / "Apply") on separate pages: when the link went straight to the
+      // form, open the Overview first, since the job description is there.
+      let postingUrl = applyTab.url;
+      const overview = postingUrlOf(applyTab.url);
+      if (overview) {
+        log('  Opening the job Overview to read the description');
+        await chrome.tabs.update(applyId, { url: overview });
         await g(settle(applyId));
+        postingUrl = overview;
       }
+      let page = await g(call(applyId, '__abAgent', 'pageText').catch(() => null));
+      if (!page || page.text.length < 300) {
+        // single-page apps (Ashby) can still be drawing the posting
+        await g(sleep(2500));
+        page = (await g(call(applyId, '__abAgent', 'pageText').catch(() => null))) || page;
+      }
+      const formUrl = directApplyUrl(postingUrl);
       const job = {
         company: detail.company, role: detail.title, location: detail.location || 'Remote (US)', salary: detail.salary || '',
-        job_link: applyTab.url,
+        job_link: postingUrl,
         jd: [detail.jd, page && page.text.length > 300 ? `\n\n--- From the company posting (${new URL(page.url).host}) ---\n${page.text}` : ''].join('').slice(0, 30000)
       };
 
@@ -821,6 +896,16 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
         setPhase('applying');
         return true;
       };
+
+      // Ashby / Lever: write the resume and cover letter on the Overview step (step 1), then open the
+      // Application form (step 2) and fill it
+      if (formUrl) {
+        log('  Job description read; writing the resume before opening the application form');
+        await ensureDocs();
+        log('  Opening the application form');
+        await chrome.tabs.update(applyId, { url: formUrl });
+        await g(settle(applyId));
+      }
 
       // 5. fill and submit the application
       setPhase('applying');
@@ -1071,7 +1156,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     const pageKey = `${snap.url}|${snap.fields.map((f) => f.id).join(',')}|${snap.buttons.map((b) => b.text).join(',')}`;
     const forceAI = pageKey === lastRulesKey || fixedByYou;
     fixedByYou = false;
-    const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI, lastClick });
+    const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.generateCover && s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI, lastClick });
     const saved = await savedAnswers();
     let rp = rulePlan(snap, ruleArgs());
     // a real application form: write the tailored resume + cover letter before filling it
@@ -1237,6 +1322,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       case 'skip': skipCurrent(); return { ok: true };
       case 'runSingle': await runSingle(msg.tabId); return { ok: true };
       case 'applyAgain': return { ok: true, ...(await applyAgain(msg.tabId)) };
+      case 'stopAgain': stopAgain(); return { ok: true };
       case 'resetDone': await chrome.storage.local.remove('done'); return { ok: true };
       case 'clearLog': state.log = []; save(); return { ok: true };
       default: return { ok: false, error: 'unknown message' };

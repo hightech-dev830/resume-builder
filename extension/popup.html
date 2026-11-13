@@ -35,6 +35,8 @@
     #againBtn { width: 100%; border-color: var(--warn); color: var(--warn); font-weight: 600; }
     #againBtn:hover:not(:disabled) { background: color-mix(in srgb, var(--warn) 10%, var(--panel)); border-color: var(--warn); }
     #againBtn small { font-weight: 400; color: var(--muted); }
+    #stopAgainBtn { width: 100%; }
+    #stopAgainBtn small { font-weight: 400; opacity: .85; }
     .site-row { display: flex; align-items: center; gap: 8px; }
     .site-row label { margin: 0; white-space: nowrap; color: var(--text); font-weight: 600; font-size: 13px; }
     .site-row select { flex: 1; }
@@ -43,7 +45,7 @@
 <body>
   <header>
     <span class="dot" id="dot"></span>
-    <h1>Auto Bid</h1>
+    <h1>Auto Bid <small id="ver" style="font-weight:400;font-size:.6em;opacity:.7"></small></h1>
     <span class="phase" id="phase">Idle</span>
   </header>
   <main>
@@ -68,7 +70,8 @@
       <button class="danger hidden" id="stopBtn">■ Stop</button>
       <button id="singleBtn" title="Apply to the Jobright job open in this tab">Apply to this job</button>
     </div>
-    <button id="againBtn" class="hidden" title="After you fix a &quot;need you&quot; job (bot check, missing answer…), the bot carries on with it on its tab and submits it">↻ Apply again <small id="againInfo"></small></button>
+    <button id="stopAgainBtn" class="danger hidden" title="End &quot;Apply again&quot; now; the job stays in &quot;need you&quot; and its tab stays open">■ Stop applying again <small id="stopAgainInfo"></small></button>
+    <button id="againBtn" class="hidden" title="After you fix this &quot;need you&quot; job (bot check, missing answer…), the bot carries on with it on this tab and submits it. Only this one job.">↻ Apply again <small id="againInfo"></small></button>
     <div id="msg"></div>
     <div id="log"></div>
   </main>
