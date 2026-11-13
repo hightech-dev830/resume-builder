@@ -208,32 +208,61 @@
       });
     }
 
-    // Yes/No questions drawn as buttons, with no input behind them (Ashby: "Are you authorized…?" [Yes] [No]):
-    // listed as a radio group on the buttons' row; "select" clicks the matching button
+    // Yes/No questions drawn as buttons, with no input behind them ("Are you legally authorized…?" [Yes] [No]):
+    // Ashby, and many custom forms where each button sits in its own box or is a div/label, not a <button>.
+    // Listed as a radio group on the smallest box holding both answers; "select" clicks the matching one.
+    const YESNO = /^(yes|no)$/i;
+    const CLICKABLE = 'button, [role="button"], [role="radio"], [role="option"], [role="switch"], label, a, [tabindex]';
+    const yesNoOpts = [];
+    for (const el of deepAll('button, [role="button"], [role="radio"], [role="option"], label, a, [tabindex], div, span')) {
+      const raw = (el.textContent || '').trim();
+      if (raw.length > 5 || !YESNO.test(raw) || !visible(el)) continue;
+      // radios / checkboxes with real inputs are read above as radio groups
+      if (el.querySelector('input[type="radio"], input[type="checkbox"]') || el.closest('label')?.querySelector('input[type="radio"], input[type="checkbox"]')) continue;
+      if (el.closest('[role="dialog"] footer, nav, header')) continue;
+      const target = el.closest(CLICKABLE) || el;
+      if (!yesNoOpts.includes(target) && !yesNoOpts.some((o) => o.contains(target) || target.contains(o))) yesNoOpts.push(target);
+    }
+    const isOn = (o) => {
+      for (const n of [o, o.firstElementChild, o.parentElement].filter(Boolean)) {
+        if (['aria-pressed', 'aria-checked', 'aria-selected', 'data-selected', 'data-checked', 'data-active'].some((a) => n.getAttribute(a) === 'true')) return true;
+        if (/^(on|checked|active|selected)$/i.test(n.getAttribute('data-state') || '')) return true;
+        const cls = typeof n.className === 'string' ? n.className : '';
+        if (/(^|[\s_-])(active|selected|checked|isSelected|is-selected|is-active)(?![a-z])/i.test(cls)) return true;
+      }
+      return o.dataset.abchosen === '1'; // what the bot clicked last time
+    };
     const btnRows = new Set();
-    for (const b of deepAll('button, [role="button"], [role="radio"]')) {
-      if (!/^(yes|no)$/i.test(textOf(b)) || !visible(b) || b.closest('[role="dialog"] footer')) continue;
-      const row = b.parentElement;
-      if (!row || btnRows.has(row)) continue;
-      const opts = [...row.querySelectorAll(':scope > button, :scope > [role="button"], :scope > [role="radio"]')].filter(visible);
-      const texts = opts.map(textOf);
-      if (opts.length < 2 || opts.length > 4 || !texts.some((t) => /^yes$/i.test(t)) || !texts.some((t) => /^no$/i.test(t))) continue;
+    for (const o of yesNoOpts) {
+      if (btnRows.size && [...btnRows].some((r) => r.contains(o))) continue;
+      // the smallest box that holds a Yes and a No (and only a few answers: not two questions)
+      let row = o.parentElement;
+      let opts = [];
+      for (let i = 0; i < 5 && row && row !== document.body; i++, row = row.parentElement) {
+        opts = yesNoOpts.filter((x) => row.contains(x));
+        if (opts.some((x) => /^yes$/i.test(textOf(x))) && opts.some((x) => /^no$/i.test(textOf(x)))) break;
+      }
+      if (!row || row === document.body || opts.length < 2 || opts.length > 4) continue;
+      if (!opts.some((x) => /^yes$/i.test(textOf(x))) || !opts.some((x) => /^no$/i.test(textOf(x)))) continue;
       btnRows.add(row);
-      // the question: a label / legend / heading in the field's box, else the text before the row
+      opts.forEach((x) => (x.dataset.abopt = '1'));
+      // the question: a label / legend / heading near the box, else the text before it
       let question = '';
+      const before = (l) => !!(l.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const okLabel = (l) => !l.contains(row) && !row.contains(l) && !l.querySelector('[data-abopt]') && textOf(l).length > 8 && textOf(l).length < 400 && !YESNO.test(textOf(l));
       for (let box = row.parentElement, i = 0; box && i < 4 && !question; box = box.parentElement, i++) {
-        const lab = [...box.querySelectorAll('label, legend, [class*="title" i], [class*="question" i], h3, h4, p')]
-          .find((l) => !l.contains(row) && !row.contains(l) && textOf(l).length > 3 && !/^(yes|no)$/i.test(textOf(l)));
+        // the text right above the buttons (the last one before them), widened to its whole label
+        // so the required "*" comes along
+        let lab = [...box.querySelectorAll('label, legend, [class*="title" i], [class*="question" i], [class*="label" i], h2, h3, h4, h5, p, span, div')]
+          .filter((l) => okLabel(l) && before(l)).pop();
+        while (lab && lab.parentElement && lab.parentElement !== box && okLabel(lab.parentElement)) lab = lab.parentElement;
         if (lab) question = textOf(lab).slice(0, 300);
       }
       if (!question) question = precedingText(row).slice(0, 300);
-      const on = (o) => o.getAttribute('aria-pressed') === 'true' || o.getAttribute('aria-checked') === 'true'
-        || /(^|[\s_-])(active|selected|checked|isSelected)/i.test(typeof o.className === 'string' ? o.className : '');
-      const id = idOf(row);
       row.dataset.abbtns = '1';
       fields.push({
-        id, kind: 'radio group', question, label: '', options: texts,
-        value: opts.filter(on).map(textOf).join(' | '),
+        id: idOf(row), kind: 'radio group', question, label: '', options: opts.map(textOf),
+        value: opts.filter(isOn).map(textOf).join(' | '),
         required: /[*✱]|\(required\)/.test(question), error: fieldError(row)
       });
     }
@@ -249,7 +278,7 @@
     for (const el of deepAll('button, input[type="submit"], input[type="button"], [role="button"], a[href], [role="link"], [role="tab"], [role="menuitem"], [role="menu"] a, [class*="dropdown-menu" i] a, [class*="dropdown-menu" i] li')) {
       if (!visible(el) || seen.has(el)) continue;
       if (el.getAttribute('aria-haspopup') === 'listbox') continue;
-      if (el.parentElement && btnRows.has(el.parentElement)) continue; // a Yes/No answer, listed as a field
+      if (el.closest('[data-abopt]')) continue; // a Yes/No answer, listed as a field
       const text = clean(el.innerText || el.value || el.getAttribute('aria-label') || el.title).slice(0, 80);
       if (!text) continue;
       const inMenu = !!el.closest(MENU_SEL);
@@ -658,9 +687,14 @@
           case 'select':
             if (el.dataset.abbtns) {
               // a Yes/No button row: click the button with that answer
-              const opts = [...el.querySelectorAll(':scope > button, :scope > [role="button"], :scope > [role="radio"]')];
-              const hit = bestMatch(opts, value, textOf);
-              if (hit) { realClick(hit); ok = true; } else note = `no option matches "${a.value}"; the options are: ${opts.map(textOf).join(' | ')}`;
+              const opts = [...el.querySelectorAll('[data-abopt]')];
+              const hit = opts.find((o) => textOf(o).toLowerCase() === clean(value).toLowerCase()) || bestMatch(opts, value, textOf);
+              if (hit) {
+                realClick(hit);
+                opts.forEach((o) => delete o.dataset.abchosen);
+                hit.dataset.abchosen = '1';
+                ok = true;
+              } else note = `no option matches "${a.value}"; the options are: ${opts.map(textOf).join(' | ')}`;
             } else if (el.tagName === 'SELECT') ok = selectNative(el, value);
             else if (el.type === 'radio' || el.type === 'checkbox') ok = selectGroup(el, value);
             else {
