@@ -73,9 +73,13 @@ const RULES = [
   { re: /countr(y|ies).*(seeking to work|want to work|work from|working from|be (based|working)|employ|eligible|if hired)|(seeking to work|work from|based in|employ(ment|ed) in|eligible).*countr(y|ies)/, not: /citizen/, choose: () => [/^united states( of america)?$/, /^usa?$/, /^united states/], text: () => 'United States' },
   // "What is your preferred programming language for your interviews?"
   { re: /(preferred|favou?rite|primary|strongest|choose a|which) (programming |coding )?language|programming language.*interview|(coding|programming) language/, not: /spoken|speak|fluen|english/, choose: (p) => langPrefs(p.interview_language), text: (p) => p.interview_language || 'Python' },
-  { re: /without (the need for |requiring |needing )?(a )?(visa )?sponsor/, choose: () => YES, text: () => 'Yes' },
-  { re: /sponsor|visa status|work visa|h-?1b|immigration (support|status)/, choose: (p) => (yesno(p.needs_sponsorship) === 'Yes' ? YES : NO), text: (p) => yesno(p.needs_sponsorship) || 'No' },
-  { re: /authori[sz]ed to work|eligible to work|legally (able|permitted|entitled|allowed) to work|right to work|work authori[sz]ation|work permit|legally authori[sz]ed/, choose: (p) => (yesno(p.work_authorized_us) === 'No' ? NO : [...YES, /authori[sz]ed/, /citizen/]), text: () => 'Yes' },
+  // You are a US citizen: always authorized to work in the US, never need sponsorship. These answers are
+  // locked (lock: true): the AI never overrides them, and a wrong answer already on the page is corrected.
+  { re: /without (the need for |requiring |needing )?(a )?(visa )?sponsor/, choose: () => YES, text: () => 'Yes', lock: true },
+  { re: /sponsor|visa status|work visa|h-?1b|immigration (support|status)/, choose: () => [...NO, /not (require|need)/, /^i do not/], text: () => 'No', lock: true },
+  { re: /authori[sz]ed to work|eligible to work|legally (able|permitted|entitled|allowed) to work|right to work|work authori[sz]ation|work permit|legally authori[sz]ed|authori[sz]ation to work/, choose: () => [...YES, /^(i am )?(a )?u\.?s\.? citizen/, /citizen/, /^(i am )?authori[sz]ed/], text: () => 'Yes', lock: true },
+  { re: /u\.?s\.? citizen|citizen of the (united states|u\.?s)|are you a citizen|citizenship status/, choose: () => [...YES, /^(i am )?(a )?u\.?s\.? citizen/, /united states citizen/, /^citizen/], text: () => 'Yes', lock: true },
+  { re: /(country of )?citizenship|nationality/, not: /dual|other than/, choose: () => [/^united states( of america)?$/, /^usa?$/, /^united states/, /u\.?s\.? citizen/, ...YES], text: () => 'United States', lock: true },
   { re: /relocat/, choose: (p) => (yesno(p.willing_to_relocate) === 'Yes' ? YES : NO), text: (p) => yesno(p.willing_to_relocate) || 'No' },
   { re: /18 years|age of 18|over 18|at least 18|legal (working )?age/, choose: () => YES, text: () => 'Yes' },
   { re: /(previously|ever|currently|formerly) (been )?(employed|worked)|former employee|worked (here|for us|for this company) before|employee of .* (before|previously)/, choose: () => NO, text: () => 'No' },
@@ -132,8 +136,21 @@ const RULES = [
     choose: (p, f) => [longestYears(f.options), ...YES].filter(Boolean),
     text: (p, f) => (/^(do|have|are) you\b/.test(norm(f.question || f.label)) ? 'Yes' : SKILL_YEARS_DEFAULT) },
   { re: /total years|years of (professional |relevant |work |industry )?experience\b(?! (with|in|using))/, text: v('years_experience') },
-  { re: /salary|compensation|pay expectation|desired pay|expected (pay|salary)|rate expectation/, text: v('salary_expectation') }
+  // pay: the amount for the period the question asks about (annual / monthly / daily / hourly), as a plain number
+  { re: /salary|compensation|pay expectation|desired pay|expected (pay|salary|rate|wage)|rate expectation|desired (rate|wage)|pay rate|hourly rate|day rate|daily rate|wage/,
+    not: /currency|frequency|type|negotiable|range (is|are)|transparen|history|current (salary|compensation|pay)/,
+    text: (p, f) => salaryFor(p, f), lock: true }
 ];
+
+const digits = (s) => String(s || '').replace(/[^\d.]/g, '').replace(/\.0+$/, '');
+function salaryFor(p, f) {
+  const t = fieldText(f);
+  if (/hour|\bhr\b|\/ ?hr/.test(t)) return digits(p.salary_hourly) || '60';
+  if (/daily|per day|day rate|\/ ?day/.test(t)) return digits(p.salary_daily) || '480';
+  if (/month/.test(t)) return digits(p.salary_monthly) || '10000';
+  if (/annual|annum|year|yearly|\bbase\b|\/ ?yr/.test(t) || f.kind === 'number') return digits(p.salary_annual) || '120000';
+  return p.salary_expectation || `${digits(p.salary_monthly) || '10000'} / monthly`;
+}
 
 const CONSENT = /agree|consent|acknowledge|certify|confirm|accept|terms|privacy|i understand|attest|authorize|read and understood/;
 
@@ -172,6 +189,7 @@ const findButtons = (buttons, re) => usableButtons(buttons).filter((b) => re.tes
 export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, coverLetter = '', forceAI = false, lastClick = '' }) {
   const actions = [];
   const leftover = [];
+  const locked = []; // ids of fields with a fixed answer (authorization, sponsorship, pay): the AI may not change them
   let wantsCoverText = false;
   const fields = snap.fields.filter((f) => f.kind !== 'password');
   const fileFields = fields.filter((f) => f.kind === 'file');
@@ -210,7 +228,7 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
         else handled = false;
       }
     } else if (f.kind === 'checkbox') {
-      if (/(european union|eu|united kingdom|uk).{0,40}resident|resident.{0,40}(european union|eu|united kingdom|uk)/.test(t)) {
+      if (/(european union|\beu\b|united kingdom|\buk\b).{0,40}resident|resident.{0,40}(european union|\beu\b|united kingdom|\buk\b)/.test(t)) {
         handled = true; // iCIMS: "if you are an EU or UK resident, check this box": not you, leave it empty
         if (f.checked) act = { op: 'uncheck' };
       } else if (CONSENT.test(t)) {
@@ -234,9 +252,12 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
         const val = f.kind === 'combobox' && rule.combo ? rule.combo(p) : rule.text?.(p, f);
         if (val) {
           handled = true;
-          if (!filled) act = { op: f.kind === 'combobox' ? 'choose' : 'fill', value: val };
+          // a locked answer (work authorization, sponsorship, pay) is corrected when the page shows another one
+          const wrong = rule.lock && filled && norm(f.value) !== norm(val) && !(f.kind === 'combobox' && norm(f.value).startsWith(norm(val)));
+          if (!filled || wrong) act = { op: f.kind === 'combobox' ? 'choose' : 'fill', value: val, question: q };
         }
       }
+      if (rule?.lock && handled) locked.push(f.id);
       // the same question answered before (by the AI) on another application
       if (!handled && !JOB_SPECIFIC.test(norm(q)) && f.kind !== 'textarea' && f.kind !== 'richtext') {
         const hit = saved[questionKey(f)];
@@ -258,7 +279,8 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
     if (act) actions.push({ id: f.id, ...act });
     // the AI gets required questions the rules could not answer, and anything the site flagged
     // a box for the code that was emailed/texted: only you have it (the AI then hands the page to you)
-    const codeBox = !isChoice(f) && TEXTY.has(f.kind) && /verification code|one[- ]time (pass)?code|security code|passcode|enter (the |your )?code|otp/.test(t);
+    const codeBox = !isChoice(f) && TEXTY.has(f.kind) && /verification code|one[- ]time (pass)?code|security code|passcode|enter (the |your )?code|\botp\b/.test(t);
+    if (locked.includes(f.id)) continue; // fixed answer: the AI does not see it
     if (f.error || (!handled && !filled && (isRequired(f) || named || codeBox)) || (named && !act) || (forceAI && !filled)) leftover.push(named && !f.error ? { ...f, required: true, error: 'the form says this required answer is missing' } : f);
   }
 
@@ -290,7 +312,7 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
   return {
     actions, next_click: next?.id || '', page_type: isForm ? 'application_form' : 'other',
     summary: `${isForm ? `form with ${fields.length} fields, ` : ''}${summaryBits.join(', ')}${next ? `, then "${next.text}"` : ''}`,
-    askAI, aiFields: forceAI ? fields : leftover, needsDocs, wantsCoverText
+    askAI, aiFields: (forceAI ? fields : leftover).filter((f) => !locked.includes(f.id)), needsDocs, wantsCoverText, locked
   };
 }
 

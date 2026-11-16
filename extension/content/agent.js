@@ -771,5 +771,31 @@
     return { url: location.href, title: document.title, h1: textOf(document.querySelector('h1')), text: textOf(main).slice(0, 20000) };
   }
 
-  window.__abAgent = { snapshot, probeOptions, act, click, acceptCookies, waitStable, captchaSolved, showCaptcha, pageText };
+  // Waits while the page shows a file upload in progress ("Uploading…", "Parsing resume…", a busy
+  // spinner, a greyed-out attach button). Resolves to { done, busy } (busy = what it still shows).
+  async function waitUploads(max = 45000) {
+    const BUSY = /\b(uploading|parsing|processing|analy[sz]ing|reading|scanning)\b[^.\n]{0,30}\b(resume|cv|file|document)|\b(resume|cv|file)\b[^.\n]{0,20}\b(uploading|parsing|processing)|^uploading/i;
+    const busyNow = () => {
+      for (const el of deepAll('[aria-busy="true"], [role="progressbar"], [class*="spinner" i], [class*="loading" i], [class*="uploading" i]')) {
+        if (visible(el) && !el.closest('nav, header')) return textOf(el).slice(0, 60) || 'loading';
+      }
+      // an attach button greyed out next to a file input (Lever "ATTACH RESUME/CV" while it uploads)
+      for (const input of deepAll('input[type="file"]')) {
+        const box = input.closest('label, div');
+        const btn = box && [...box.querySelectorAll('button, a, label, span')].find((b) => /attach|upload/i.test(textOf(b)));
+        if (btn && (btn.disabled || btn.getAttribute('aria-disabled') === 'true' || /disabled|loading|uploading/i.test(String(btn.className)))) return textOf(btn);
+      }
+      const line = (document.body.innerText || '').split('\n').map(clean).find((l) => l.length < 80 && BUSY.test(l));
+      return line || '';
+    };
+    const end = Date.now() + max;
+    let busy = busyNow();
+    while (busy && Date.now() < end) {
+      await sleep(700);
+      busy = busyNow();
+    }
+    return { done: !busy, busy };
+  }
+
+  window.__abAgent = { snapshot, probeOptions, act, click, acceptCookies, waitStable, captchaSolved, showCaptcha, pageText, waitUploads };
 })();

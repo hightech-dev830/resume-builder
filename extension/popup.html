@@ -37,6 +37,20 @@
     #againBtn small { font-weight: 400; color: var(--muted); }
     #stopAgainBtn { width: 100%; }
     #stopAgainBtn small { font-weight: 400; opacity: .85; }
+    .icon-btn { width: 24px; height: 24px; padding: 0; border-radius: 50%; font: italic 700 13px Georgia, serif; line-height: 22px; text-align: center; flex: none; }
+    .icon-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+    #jobInfo { display: grid; gap: 6px; font-size: 12px; max-height: 60vh; overflow: auto; }
+    #jobInfo .hd { display: flex; align-items: center; gap: 8px; }
+    #jobInfo .hd .t { flex: 1; font-size: 13px; }
+    #jobInfo .hd button { padding: 2px 8px; font-size: 12px; }
+    #jobInfo dl { display: grid; grid-template-columns: 92px 1fr; gap: 4px 8px; margin: 0; }
+    #jobInfo dt { color: var(--muted); }
+    #jobInfo dd { margin: 0; word-break: break-word; }
+    #jobInfo dd a { color: var(--accent-dark); }
+    #jobInfo .err { color: var(--err); }
+    #jobInfo .copy { margin-left: 6px; padding: 0 6px; font-size: 11px; }
+    #jobInfo details summary { cursor: pointer; color: var(--muted); }
+    #jobInfo pre { white-space: pre-wrap; font: 11.5px/1.45 inherit; margin: 6px 0 0; max-height: 260px; overflow: auto; background: var(--bg, transparent); }
     .site-row { display: flex; align-items: center; gap: 8px; }
     .site-row label { margin: 0; white-space: nowrap; color: var(--text); font-weight: 600; font-size: 13px; }
     .site-row select { flex: 1; }
@@ -47,12 +61,14 @@
     <span class="dot" id="dot"></span>
     <h1>Auto Bid <small id="ver" style="font-weight:400;font-size:.6em;opacity:.7"></small></h1>
     <span class="phase" id="phase">Idle</span>
+    <button id="infoBtn" class="icon-btn" title="Details of the current job (resume, links, description…)" aria-label="Job details">i</button>
   </header>
   <main>
     <div class="site-row" title="The job board the bot reads jobs from">
       <label for="site">Job site</label>
       <select id="site"></select>
     </div>
+    <div id="jobInfo" class="card hidden"></div>
     <div id="signin" class="card warn hidden">Not signed in to Resume Builder. <a id="openOptions2" href="#">Open settings</a></div>
     <div class="card hidden" id="current">
       <div class="t" id="curTitle"></div>
@@ -70,8 +86,8 @@
       <button class="danger hidden" id="stopBtn">■ Stop</button>
       <button id="singleBtn" title="Apply to the Jobright job open in this tab">Apply to this job</button>
     </div>
-    <button id="stopAgainBtn" class="danger hidden" title="End &quot;Apply again&quot; now; the job stays in &quot;need you&quot; and its tab stays open">■ Stop applying again <small id="stopAgainInfo"></small></button>
-    <button id="againBtn" class="hidden" title="After you fix this &quot;need you&quot; job (bot check, missing answer…), the bot carries on with it on this tab and submits it. Only this one job.">↻ Apply again <small id="againInfo"></small></button>
+    <button id="stopAgainBtn" class="danger hidden" title="End &quot;Continue to apply&quot; now; the job stays in &quot;need you&quot; and its tab stays open">■ Stop continuing to apply <small id="stopAgainInfo"></small></button>
+    <button id="againBtn" class="hidden" title="After you fix this &quot;need you&quot; job (bot check, missing answer…), the bot carries on with it on this tab and submits it. Only this one job.">↻ Continue to apply <small id="againInfo"></small></button>
     <div id="msg"></div>
     <div id="log"></div>
   </main>

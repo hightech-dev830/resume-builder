@@ -12,7 +12,7 @@ Applies to remote jobs from your job list on **Jobright** or **HiringCafe**, one
 
 If a step needs you (a captcha, an email verification code, or a question it can't answer), it notifies you, leaves that tab open, marks the bid `needs_attention`, and moves on. For a captcha, it first waits a few minutes for you to solve it.
 
-**Apply again:** after you fix a "need you" job on its tab (solve the bot check, add a missing answer), press **↻ Apply again** in the side panel (under Start/Stop). The bot carries on with that job on its tab, reusing its bid and tailored resume, submits it and marks it like any other bid (Save on HiringCafe, History). It uses the "need you" job in the active tab, else the newest one still open. While the bot is busy with another job, the retry is queued and runs right after it.
+**Continue to apply:** after you fix a "need you" job on its tab (solve the bot check, add a missing answer), press **↻ Continue to apply** in the side panel (under Start/Stop). The bot carries on with that job on its tab, reusing its bid and tailored resume, submits it and marks it like any other bid (Save on HiringCafe, History). It uses the "need you" job in the active tab, else the newest one still open. While the bot is busy with another job, the retry is queued and runs right after it.
 
 ## Setup
 

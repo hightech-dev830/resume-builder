@@ -75,6 +75,8 @@ export const DEFAULT_PROFILE = {
   work_authorized_us: 'Yes, authorized to work for any employer in the US', needs_sponsorship: 'No, now or in the future', citizenship: 'Yes',
   willing_to_relocate: 'No', remote_preference: 'Remote',
   start_date: '2026-12-01 (or immediately if the form asks for availability)', notice_period: 'Available immediately', salary_expectation: '$10,000 / monthly',
+  // typed as plain numbers into "annual / monthly / daily / hourly" pay questions
+  salary_annual: '120000', salary_monthly: '10000', salary_daily: '480', salary_hourly: '60',
   gender: 'Male (Man)', pronouns: 'He/Him', sexual_orientation: 'Heterosexual', race_ethnicity: 'Asian (Not Hispanic or Latino)', hispanic_latino: 'No',
   veteran_status: 'I am not a protected veteran', disability_status: 'No, I do not have a disability',
   sms_consent: 'Yes', how_heard: 'Linkedin', licenses_certifications: 'None',
@@ -85,7 +87,7 @@ export const DEFAULT_PROFILE = {
 };
 
 // filled in when left empty (an empty box in My info means "use the default")
-const DEFAULT_WHEN_EMPTY = ['salary_expectation'];
+const DEFAULT_WHEN_EMPTY = ['salary_expectation', 'salary_annual', 'salary_monthly', 'salary_daily', 'salary_hourly', 'work_authorized_us', 'needs_sponsorship', 'citizenship'];
 
 export const SECRET_KEYS = ['password', 'ssn_last4', 'dob'];
 

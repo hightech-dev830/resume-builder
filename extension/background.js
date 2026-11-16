@@ -43,7 +43,7 @@ function jobContext() {
   skip.catch(() => {});
   const ctx = {
     skipped: false,
-    stopped: false, // "Stop" on an "Apply again" run: ends it now, the job stays "need you"
+    stopped: false, // "Stop" on an "Continue to apply" run: ends it now, the job stays "need you"
     guard: (p) => Promise.race([p, skip]),
     check: () => { if (ctx.skipped || ctx.stopped) throw new SkipError(ctx.stopped ? 'stopped by you' : 'skipped by you'); },
     cancel: () => { ctx.skipped = true; reject(new SkipError('skipped by you')); },
@@ -52,7 +52,11 @@ function jobContext() {
   return ctx;
 }
 function skipCurrent() {
-  if (!state.running || !currentJob || currentJob.skipped) throw new Error('No job is being applied to right now.');
+  if (!currentJob || currentJob.skipped) {
+    // a job card left over from a stopped / restarted bot: clear it instead of failing
+    if (state.current) { state.current = null; save(); return; }
+    throw new Error('No job is being applied to right now.');
+  }
   log('Skip pressed; dropping the current job');
   currentJob.cancel();
 }
@@ -103,6 +107,31 @@ async function notify(title, message, { id, tabId, sticky = false } = {}) {
   });
 }
 
+// "Need you" notifications. Two email cases get their own notification, so you know at a glance
+// that only your mailbox is needed:
+//  - code: the site sent a code to your email; type it into the page
+//  - verify: the site sent a link to verify / activate your new account; click it
+const EMAIL_CODE = /(verification|security|one[- ]time|confirmation|access|login|sign.?in|6.digit|email(ed)?) (pass)?code|\bcode (was |has been )?(sent|emailed)|enter (the |your )?code|\botp\b|passcode/i;
+const EMAIL_VERIFY = /verify (your |the )?(new )?([\w.-]+ )?(account|e-?mail)|verification (e-?mail|link)|activat\w* (your |the )?(new )?account|confirm (your |the )?e-?mail|e-?mail has been sent/i;
+function emailNeed(reason) {
+  if (EMAIL_CODE.test(reason)) return 'code';
+  if (EMAIL_VERIFY.test(reason)) return 'verify';
+  return '';
+}
+async function notifyAttention(job, company, reason, tabId) {
+  const kind = emailNeed(reason);
+  const what = `${job || 'Job'} at ${company || '?'}`;
+  if (kind === 'code') {
+    log(`🔑 ${what}: enter the code from your email`, 'warn');
+    return notify('🔑 Email code needed', `${what}: the site emailed you a code. Type it into the page, then press Continue to apply.\n(${reason.slice(0, 120)})`, { id: `ab-code-${tabId}-${Date.now()}`, tabId, sticky: true });
+  }
+  if (kind === 'verify') {
+    log(`📧 ${what}: verify your account from the email`, 'warn');
+    return notify('📧 Verify your email', `${what}: open the email from the site and click its verify link, then press Continue to apply.\n(${reason.slice(0, 120)})`, { id: `ab-verify-${tabId}-${Date.now()}`, tabId, sticky: true });
+  }
+  return notify('Application needs you', `${what}: ${reason}`, { tabId, sticky: true });
+}
+
 chrome.notifications.onClicked.addListener(async (nid) => {
   const { notifTabs = {} } = await chrome.storage.session.get('notifTabs');
   const tabId = notifTabs[nid];
@@ -110,7 +139,7 @@ chrome.notifications.onClicked.addListener(async (nid) => {
   if (tabId == null) return;
   if (await tabExists(tabId)) {
     await focusTab(tabId);
-    await call(tabId, '__abAgent', 'showCaptcha', [], { allFrames: true }).catch(() => {});
+    if (!/^ab-(code|verify)-/.test(nid)) await call(tabId, '__abAgent', 'showCaptcha', [], { allFrames: true }).catch(() => {});
   }
 });
 
@@ -552,10 +581,10 @@ async function readDocFiles(bid, s) {
   };
 }
 
-// ---------------- "Apply again" for jobs that need you ----------------
+// ---------------- "Continue to apply" for jobs that need you ----------------
 // A "need you" job keeps its tab open; the bot remembers what it needs to carry on there
 // (session storage survives service-worker restarts). After you fix the page (bot check,
-// a missing answer…), "Apply again" continues the same bid on that tab.
+// a missing answer…), "Continue to apply" continues the same bid on that tab.
 
 async function attentionJobs() {
   const { attentionTabs = {} } = await chrome.storage.session.get('attentionTabs');
@@ -575,19 +604,19 @@ chrome.tabs.onRemoved.addListener((tabId) => { forgetAttention(tabId).catch(() =
 
 const retryQueue = []; // tab ids waiting for the running bot to finish its current job
 
-let retryCtx = null; // the "Apply again" run in progress (its Stop button ends it)
+let retryCtx = null; // the "Continue to apply" run in progress (its Stop button ends it)
 
-// "Apply again" works on one job only: the "need you" job open in the active tab.
+// "Continue to apply" works on one job only: the "need you" job open in the active tab.
 async function applyAgain(activeTabId) {
   const all = await attentionJobs();
   const tabId = Number(activeTabId);
-  if (!all[tabId] || !(await tabExists(tabId))) throw new Error('Open the tab of the "need you" job first; Apply again works on the job in that tab only.');
+  if (!all[tabId] || !(await tabExists(tabId))) throw new Error('Open the tab of the "need you" job first; Continue to apply works on the job in that tab only.');
   if (retryQueue.includes(tabId)) return { queued: true };
   if (state.running) {
     retryQueue.push(tabId);
     state.retryTabId = tabId;
     save();
-    log('"Apply again" queued; it runs after the current job');
+    log('"Continue to apply" queued; it runs after the current job');
     return { queued: true };
   }
   let s = await getSettings();
@@ -600,10 +629,10 @@ async function applyAgain(activeTabId) {
   return { queued: false };
 }
 
-// Stop for "Apply again": ends the running one now (or drops it from the queue); the job stays "need you".
+// Stop for "Continue to apply": ends the running one now (or drops it from the queue); the job stays "need you".
 function stopAgain() {
-  if (retryQueue.length) { retryQueue.length = 0; log('Queued "Apply again" cancelled'); }
-  if (retryCtx) { log('Stop pressed; ending "Apply again"'); retryCtx.stop(); }
+  if (retryQueue.length) { retryQueue.length = 0; log('Queued "Continue to apply" cancelled'); }
+  if (retryCtx) { log('Stop pressed; ending "Continue to apply"'); retryCtx.stop(); }
   state.retryTabId = null;
   save();
 }
@@ -625,7 +654,7 @@ async function retryAttention(tabId, s) {
   let outcome = 'attention';
   let reason = '';
   setPhase('applying', { title: job.role, company: job.company, url: entry.postingUrl, bidId: entry.bidId, step: 0 });
-  log(`↻ Applying again: ${label}${entry.bidId ? ` (bid #${entry.bidId})` : ''}`);
+  log(`↻ Continuing to apply: ${label}${entry.bidId ? ` (bid #${entry.bidId})` : ''}`);
   try {
     await focusTab(tabId);
     // the bid and its resume / cover letter, when they were made already
@@ -637,7 +666,7 @@ async function retryAttention(tabId, s) {
       if (!bid) {
         bid = await rpc('resumes:create', {
           company: job.company, role: job.role, job_link: job.job_link, apply_url: job.job_link, location: job.location, salary: job.salary, jd: job.jd,
-          status: 'draft', template: s.behavior.template, notes: `Auto-bid from ${site.label} (applied again).`,
+          status: 'draft', template: s.behavior.template, notes: `Auto-bid from ${site.label} (continued to apply).`,
           source: entry.site, source_url: entry.postingUrl, bot_status: 'applying'
         });
         state.current.bidId = bid.id;
@@ -649,7 +678,7 @@ async function retryAttention(tabId, s) {
       setPhase('applying');
       return true;
     };
-    if (bid) await rpc('bot:log', bid.id, 'Applying again after your fix', { bot_status: 'applying' }).catch(() => {});
+    if (bid) await rpc('bot:log', bid.id, 'Continuing to apply after your fix', { bot_status: 'applying' }).catch(() => {});
 
     const progress = { step: 0, history: [], answers: [], ...(entry.progress || {}) };
     if (progress.step) log(`  Continuing at step ${progress.step + 1} (stopped at step ${progress.step}: ${progress.fixed || 'needed you'})`);
@@ -661,7 +690,7 @@ async function retryAttention(tabId, s) {
       outcome = 'applied';
       state.counts.applied++;
       if (bid) await rpc('resumes:update', bid.id, { status: 'applied', bot_status: 'applied', applied_at: new Date().toISOString() });
-      log(`✓ Applied (again): ${label}`, 'ok');
+      log(`✓ Applied (continued): ${label}`, 'ok');
       notify('Application submitted', `${job.role} at ${job.company}${bid ? ` (bid #${bid.id})` : ''}`);
       await forgetAttention(tabId);
       // tell the job board, like a normal bid
@@ -686,9 +715,9 @@ async function retryAttention(tabId, s) {
       outcome = 'stopped';
       reason = 'stopped by you';
     } else {
-      // still needs you: keep it for another "Apply again", on the tab it ended on
+      // still needs you: keep it for another "Continue to apply", on the tab it ended on
       state.counts.attention++;
-      log(`⚠ ${label}: ${reason}. Tab left open for you; press Apply again after fixing it.`, 'warn');
+      log(`⚠ ${label}: ${reason}. Tab left open for you; press Continue to apply after fixing it.`, 'warn');
       if (bid) await rpc('bot:log', bid.id, `Needs attention: ${reason}`, { bot_status: 'needs_attention' }).catch(() => {});
       const last = tabs[tabs.length - 1];
       if (last !== tabId) await forgetAttention(tabId);
@@ -696,11 +725,11 @@ async function retryAttention(tabId, s) {
         ...entry, bidId: bid?.id || entry.bidId,
         progress: { step: progress.step, history: progress.history.slice(-20), answers: progress.answers, fixed: reason }
       });
-      await notify('Application needs you', `${job.role} at ${job.company}: ${reason}`, { tabId: last, sticky: true });
+      await notifyAttention(job.role, job.company, reason, last);
     }
   } catch (err) {
     if (ctx.stopped) {
-      // the tab stays open and the job stays "need you": Apply again can pick it up later
+      // the tab stays open and the job stays "need you": Continue to apply can pick it up later
       outcome = 'stopped';
       reason = 'stopped by you';
     } else if (err instanceof SkipError || ctx.skipped) {
@@ -714,14 +743,14 @@ async function retryAttention(tabId, s) {
       state.counts.failed++;
     }
     log(`${outcome === 'failed' ? '✗' : '⏭'} ${label}: ${reason}`, outcome === 'failed' ? 'error' : 'warn');
-    if (bid) await rpc('bot:log', bid.id, outcome === 'stopped' ? 'Apply again stopped by you' : `${outcome === 'failed' ? 'Failed' : 'Skipped'}: ${reason}`, { bot_status: outcome === 'stopped' ? 'needs_attention' : outcome }).catch(() => {});
+    if (bid) await rpc('bot:log', bid.id, outcome === 'stopped' ? 'Continue to apply stopped by you' : `${outcome === 'failed' ? 'Failed' : 'Skipped'}: ${reason}`, { bot_status: outcome === 'stopped' ? 'needs_attention' : outcome }).catch(() => {});
   } finally {
     if (currentJob === ctx) currentJob = null;
     if (retryCtx === ctx) retryCtx = null;
     state.retryTabId = null;
     if (entry.cardId) await markProcessed(entry.cardId, outcome);
     await addHistory({
-      status: outcome, reason: outcome === 'applied' ? 'applied again after your fix' : reason, site: entry.site, bidId: bid?.id || entry.bidId || null,
+      status: outcome, reason: outcome === 'applied' ? 'applied after you continued it' : reason, site: entry.site, bidId: bid?.id || entry.bidId || null,
       title: job.role, company: job.company, location: job.location, salary: job.salary, postingUrl: entry.postingUrl, applyUrl: job.job_link
     }, { replaceBid: true }).catch(() => {});
     state.current = null;
@@ -952,13 +981,13 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
         outcome = 'attention';
         state.counts.attention++;
         await rpc('bot:log', bid.id, `Needs attention: ${result.reason}`, { bot_status: 'needs_attention' });
-        log(`⚠ ${label}: ${result.reason}. Tab left open for you; press Apply again after fixing it.`, 'warn');
+        log(`⚠ ${label}: ${result.reason}. Tab left open for you; press Continue to apply after fixing it.`, 'warn');
         await rememberAttention(tabs[tabs.length - 1], {
           job, bidId: bid.id, site: s.site || 'jobright', card: { index: card.index, title: card.title, company: card.company },
           cardId: card.id || '', postingUrl: detail.url, listId: listId || null, detailId: site.detailPage ? detailId : null,
           progress: { step: progress.step, history: progress.history.slice(-20), answers: progress.answers, fixed: result.reason }
         });
-        await notify('Application needs you', `${detail.title} at ${detail.company}: ${result.reason}`, { tabId: tabs[tabs.length - 1], sticky: true });
+        await notifyAttention(detail.title, detail.company, result.reason, tabs[tabs.length - 1]);
       }
     })();
     work.catch(() => {});
@@ -1069,6 +1098,95 @@ async function waitForCaptcha(tabId, s, what, ctx) {
 // Reasons that really need you; everything else the bot decides itself.
 const HARD_STOP = /captcha|robot|human verification|verif\w* (code|link|email)|one[- ]time|otp|sms code|email code|wrong password|incorrect password|invalid password|locked|password.*(incorrect|invalid)/i;
 
+// ---------------- job-site accounts (Workday, iCIMS, Taleo…) ----------------
+// Sign-in and sign-up pages are handled here, without the AI:
+//  - sign-in page (one password box): sign in with your email and password; if the site says the
+//    email / password is wrong and no account was made on this site yet, press "Create Account"
+//  - sign-up page (password + verify password): fill email and both passwords, tick the consent
+//    box, press "Create Account"; the site then shows its sign-in page and the bot signs in
+// Sites where an account was made are remembered (chrome.storage.local `siteAccounts`).
+const WRONG_LOGIN = /wrong (e-?mail|password|username)|incorrect (e-?mail|password|username)|invalid (e-?mail|password|username|login|credentials)|(e-?mail|password|username)[^.]{0,40}(incorrect|invalid|not (correct|valid|match))|account (might|may) be locked|could not sign you in|unable to sign in|sign.?in failed|login failed|not recogni[sz]ed|(no|cannot find|can't find|couldn't find) (an |your )?account|does(n't| not) (exist|have an account)/i;
+const ACCOUNT_EXISTS = /already (exists|registered|in use|been registered|have an account|associated)|account (with|for) this e-?mail|e-?mail (address )?is (already )?(taken|in use|registered)/i;
+const NEEDS_VERIFY = /(verify|activate|confirm) your (account|e-?mail)|verification (e-?mail|link)|e-?mail has been sent/i;
+const ACCOUNT_BTN = {
+  create: /^(create (an |my |new )?account|sign ?up|register( now)?|new user|create one)\b/i,
+  signIn: /^(sign ?in|log ?in|login|already have an account)\b/i
+};
+const SOCIAL = /google|linkedin|facebook|apple|microsoft|indeed|github|with /i;
+
+async function siteAccounts() {
+  return (await chrome.storage.local.get('siteAccounts')).siteAccounts || {};
+}
+async function rememberAccount(host, patch) {
+  const all = await siteAccounts();
+  all[host] = { ...(all[host] || {}), ...patch, t: Date.now() };
+  await chrome.storage.local.set({ siteAccounts: all });
+}
+
+function accountButton(snap, which) {
+  const re = ACCOUNT_BTN[which];
+  const hits = snap.buttons.filter((b) => !b.disabled && re.test(String(b.text || '').trim()) && !SOCIAL.test(b.text));
+  // the form's own button beats a link of the same name in the page header
+  return hits.find((b) => b.kind === 'button' && !/already|new user|create one/i.test(b.text)) || hits[hits.length - 1] || null;
+}
+
+// A plan for a sign-in / sign-up page, `{ stop }` when only you can go on, or null (not such a page).
+// `auth` lives for one application: { signIns, creates, toCreate, lastTried }.
+async function accountPlan(snap, { profile, auth, url }) {
+  const pw = snap.fields.filter((f) => f.kind === 'password');
+  if (!pw.length) return null;
+  const host = (() => { try { return new URL(url).host; } catch { return ''; } })();
+  const known = (await siteAccounts())[host];
+  const said = `${snap.errors.join(' | ')} ${String(snap.text || '').slice(0, 3000)}`;
+  const email = snap.fields.find((f) => f.kind === 'email' || (/^(text|email)$/.test(f.kind) && /e-?mail|user ?name|login/i.test(`${f.label} ${f.name} ${f.placeholder}`)));
+  const fillCreds = [
+    ...(email ? [{ op: 'fill', id: email.id, value: profile.email }] : []),
+    ...pw.map((f) => ({ op: 'fill', id: f.id, value: '{{password}}' }))
+  ];
+
+  if (pw.length >= 2) {
+    // sign-up page
+    if (ACCOUNT_EXISTS.test(snap.errors.join(' ')) || (auth.lastTried === 'create' && ACCOUNT_EXISTS.test(said))) {
+      await rememberAccount(host, { created: true });
+      const btn = accountButton(snap, 'signIn');
+      if (!btn) return { stop: 'the site says an account with your email already exists; sign in, then press Continue to apply' };
+      auth.lastTried = 'toSignIn';
+      return { page_type: 'register', summary: 'account already exists; going to Sign In', actions: [], next_click: btn.id };
+    }
+    if (auth.creates >= 2) return { stop: `could not create an account on ${host}${snap.errors.length ? ` (${snap.errors.join(' | ').slice(0, 160)})` : ''}` };
+    const btn = accountButton(snap, 'create') || snap.buttons.find((b) => !b.disabled && /^(continue|submit|next)\b/i.test(b.text));
+    if (!btn) return null; // let the AI find the button
+    const consent = snap.fields.filter((f) => f.kind === 'checkbox' && !f.checked && !/newsletter|marketing|job alert|text message|sms/i.test(f.label || ''));
+    auth.creates++;
+    auth.lastTried = 'create';
+    return {
+      page_type: 'register', summary: `creating an account on ${host} with ${profile.email}`,
+      actions: [...fillCreds, ...consent.map((f) => ({ op: 'check', id: f.id }))], next_click: btn.id, created: host
+    };
+  }
+
+  // sign-in page
+  const failed = auth.lastTried === 'signIn' && (WRONG_LOGIN.test(snap.errors.join(' ')) || WRONG_LOGIN.test(said));
+  if (failed || (WRONG_LOGIN.test(snap.errors.join(' ')) && !auth.signIns)) {
+    if (!known?.created && !auth.toCreate) {
+      const btn = accountButton(snap, 'create');
+      if (btn) {
+        auth.toCreate = true;
+        auth.lastTried = 'toCreate';
+        return { page_type: 'login', summary: 'no account on this site yet (sign-in failed); going to Create Account', actions: [], next_click: btn.id };
+      }
+    }
+    if (NEEDS_VERIFY.test(said)) return { stop: `verify your new ${host} account from the email the site sent, then press Continue to apply` };
+    if (auth.signIns >= 2) return { stop: `sign-in on ${host} failed: wrong password or locked account (${snap.errors.join(' | ').slice(0, 120) || 'see the page'})` };
+  }
+  if (auth.signIns >= 3) return { stop: `sign-in on ${host} did not go through after ${auth.signIns} tries` };
+  const btn = accountButton(snap, 'signIn') || snap.buttons.find((b) => !b.disabled && /^(continue|submit|next)\b/i.test(b.text));
+  if (!btn) return null;
+  auth.signIns++;
+  auth.lastTried = 'signIn';
+  return { page_type: 'login', summary: `signing in on ${host} with ${profile.email}${NEEDS_VERIFY.test(said) ? ' (account just created)' : ''}`, actions: fillCreds, next_click: btn.id };
+}
+
 // Snapshot once the page has finished rendering: slow single-page apps (Workday) show a
 // spinner or an empty shell first. Scrolls and re-reads up to ~15 s.
 async function readyPage(tabId) {
@@ -1086,7 +1204,7 @@ async function readyPage(tabId) {
 const NEEDS_DOCS = new Set(['application_form', 'review']);
 
 // `progress` ({ step, history, answers, fixed }) is owned by the caller and kept up to date here,
-// so "Apply again" can carry on at the step where the job stopped, with what was done so far.
+// so "Continue to apply" can carry on at the step where the job stopped, with what was done so far.
 async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, site = siteOf(s), tabs, ctx = jobContext(), progress = { step: 0, history: [], answers: [] } }) {
   const g = ctx.guard;
   const profile = await getProfile();
@@ -1109,11 +1227,13 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
   let tabId = startTabId;
   let lastKey = '';
   let repeats = 0;
+  const uploadedOn = new Set(); // `${url}|${field id}` of files uploaded in this run
   let captchaWaits = 0;
   let overrides = 0; // times the bot decided by itself instead of asking you
   let idle = 0; // pages that looked empty / still loading
   let lastRulesKey = ''; // page handled by rules alone last step; if it is still there, ask the AI
   let lastClick = ''; // button clicked last step: a dropdown "Apply Now ▾" is followed by its menu's "Apply Now"
+  const auth = { signIns: 0, creates: 0, toCreate: false, lastTried: '' }; // sign-in / sign-up on the job site
 
   for (let step = firstStep; step < firstStep + s.behavior.stepLimit; step++) {
     progress.step = step;
@@ -1145,14 +1265,27 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
       return { status: 'attention', reason: `${snap.captcha} not solved`, answers };
     }
 
+    // 0. sign-in / create-account pages: handled here, without the AI
+    let plan = null;
+    if (!s.behavior.skipAccounts) {
+      const acc = await accountPlan(snap, { profile, auth, url: snap.url || tab.url });
+      if (acc?.stop) return { status: 'attention', reason: acc.stop, answers };
+      if (acc) {
+        plan = { done: false, needs_human: '', ...acc };
+        if (acc.created) rememberAccount(acc.created, { created: true }).catch(() => {});
+        log(`Step ${step} [${plan.page_type}] no AI: ${plan.summary}`);
+      }
+    }
+
     // read the real choices of custom dropdowns so the AI only picks values the form offers
-    if (snap.fields.some((f) => f.kind === 'combobox' && !f.options)) {
+    if (!plan && snap.fields.some((f) => f.kind === 'combobox' && !f.options)) {
       const probed = await g(call(tabId, '__abAgent', 'probeOptions', [], { allFrames: true }).catch(() => []));
       if (probed.some((r) => r.result)) snap = await g(snapshotTab(tabId));
     }
 
     // 1. rules first: the profile answers the usual questions and the obvious button needs no AI.
     //    If the last rules-only step did not move the page on, let the AI look at the whole form.
+    if (!plan) {
     const pageKey = `${snap.url}|${snap.fields.map((f) => f.id).join(',')}|${snap.buttons.map((b) => b.text).join(',')}`;
     const forceAI = pageKey === lastRulesKey || fixedByYou;
     fixedByYou = false;
@@ -1166,7 +1299,6 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
       rp = rulePlan(snap, ruleArgs());
     }
 
-    let plan;
     if (!rp.askAI) {
       plan = { page_type: rp.page_type, summary: rp.summary, actions: rp.actions, next_click: rp.next_click, done: false, needs_human: '' };
       lastRulesKey = pageKey;
@@ -1182,11 +1314,15 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
       }));
       setPhase('applying');
       lastRulesKey = '';
+      // fixed answers (work authorization, sponsorship, pay) come from the rules only
+      const locked = new Set(rp.locked || []);
+      ai.actions = ai.actions.filter((a) => !locked.has(a.id));
       const aiIds = new Set(ai.actions.map((a) => a.id));
       plan = { ...ai, actions: [...rp.actions.filter((a) => !aiIds.has(a.id)), ...ai.actions], next_click: ai.next_click || rp.next_click };
       rememberAnswers(answersToSave(snap, ai.actions)).catch(() => {});
       log(`Step ${step} [${plan.page_type}]: ${plan.summary}${rp.actions.length ? ` (+${rp.actions.length} filled by rules)` : ''}`);
     }
+    } // rules / AI
 
     if (plan.page_type === 'requires_linkedin') return { status: 'skipped', reason: 'it can only be applied to through LinkedIn', answers };
     // an "Enter your information" (iCIMS) / "Tell us about yourself" (ADP) step only asks who you are
@@ -1213,7 +1349,13 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     if (plan.needs_human) {
       if (plan.page_type === 'captcha' && captchaWaits++ < 2 && (await g(waitForCaptcha(tabId, s, 'captcha', ctx)))) continue;
       // only real blockers stop the bot; anything else it works out itself
-      if (HARD_STOP.test(`${plan.needs_human} ${plan.page_type}`) || overrides >= 3) return { status: 'attention', reason: plan.needs_human, answers };
+      if (HARD_STOP.test(`${plan.needs_human} ${plan.page_type}`) || overrides >= 3) {
+        // a code box on a page that talks about email: the code was emailed to you (own notification)
+        const codeBox = snap.fields.some((f) => /code|otp|passcode|\bpin\b/i.test(`${f.label} ${f.name || ''} ${f.placeholder || ''}`));
+        const reason = codeBox && /e-?mail/i.test(snap.text) && !emailNeed(plan.needs_human)
+          ? `enter the verification code sent to your email (${plan.needs_human})` : plan.needs_human;
+        return { status: 'attention', reason, answers };
+      }
       overrides++;
       log(`  Deciding without you (AI wanted help: ${plan.needs_human.slice(0, 120)})`);
       history.push(`You asked for a human ("${plan.needs_human.slice(0, 160)}") but that is not allowed here. Decide yourself: choose the most likely button to move forward (Apply, Autofill with Resume, Create Account, Sign In, Continue, Next) or fill what you can.`);
@@ -1248,6 +1390,12 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
       plan.actions = plan.actions.filter((a) => !(a.op.startsWith('upload') && autofill.has(a.id)));
     }
 
+    // a file already uploaded on this page is not uploaded again (sites that empty their file box
+    // after reading the resume) unless the page says the resume is missing
+    const resumeMissing = snap.errors.some((e) => /resume|\bcv\b|attach/i.test(e));
+    plan.actions = plan.actions.filter((a) => !(a.op.startsWith('upload') && uploadedOn.has(`${snap.url}|${a.id}`) && !resumeMissing));
+    for (const a of plan.actions) if (a.op.startsWith('upload')) uploadedOn.add(`${snap.url}|${a.id}`);
+
     // carry out the actions, frame by frame, in order
     const results = [];
     for (const a of plan.actions) {
@@ -1260,10 +1408,17 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     const failed = results.filter((r) => !r.ok);
     if (failed.length) log(`  ${failed.length} of ${results.length} actions failed: ${failed.slice(0, 3).map((f) => `${f.op} ${f.id} (${f.note})`).join('; ')}`, 'warn');
     // sites parse an uploaded resume (Workday "Autofill with Resume") before Continue works
+    // (Lever greys out "Attach resume" while it uploads and parses the file, and refills the form
+    // from it; Submit before that ends says "Please attach a resume"). Wait until the upload is done,
+    // then look at the page again instead of clicking on the plan made before the upload.
     if (results.some((r) => r.ok && r.op.startsWith('upload'))) {
       log('  Resume uploaded; waiting for the site to read it');
-      await sleep(3000);
+      await sleep(2000);
+      const up = await call(tabId, '__abAgent', 'waitUploads', [45000]).catch(() => null);
+      if (up && !up.done) log(`  The site still shows "${up.busy}" after 45 s; carrying on`, 'warn');
       await call(tabId, '__abAgent', 'waitStable', [1500, 15000]).catch(() => {});
+      history.push(`${plan.page_type} at ${snap.url.slice(0, 100)}: ${results.length} actions (resume uploaded; checking the form again before going on)`);
+      continue;
     }
 
     let clicked = '';
