@@ -35,7 +35,7 @@
     .s-applied { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
     .s-attention { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
     .s-failed { background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); }
-    .s-skipped, .s-stopped { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--muted); }
+    .s-skipped, .s-stopped, .s-generated { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--muted); }
     .src { font-size: 11px; color: var(--muted); }
     #empty { padding: 30px; text-align: center; color: var(--muted); }
     #note { font-size: 12px; margin-top: 10px; }
@@ -53,6 +53,7 @@
         <option value="failed">Failed</option>
         <option value="skipped">Skipped</option>
         <option value="stopped">Stopped</option>
+        <option value="generated">Resume only</option>
       </select>
     </label>
     <label>Site

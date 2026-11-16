@@ -1075,11 +1075,20 @@ async function acceptCookies(tabId) {
   return !!hit;
 }
 
-async function waitForCaptcha(tabId, s, what, ctx) {
+// a bot-check widget / label: never clicked or filled by the bot
+const ROBOT = /not a robot|captcha|human check|bot check|verify (that )?you are (a )?human|are you human/i;
+
+// true while the page's bot check is still unsolved
+async function captchaOpen(tabId) {
+  const res = await call(tabId, '__abAgent', 'captchaSolved', [], { allFrames: true }).catch(() => []);
+  return !(res.length && res.every((r) => r.result !== false));
+}
+
+async function waitForCaptcha(tabId, s, what, ctx, formFilled = false) {
   setPhase('waiting_human');
   await focusTab(tabId, true);
   await call(tabId, '__abAgent', 'showCaptcha', [], { allFrames: true }).catch(() => {});
-  await notify('Captcha: your turn', `Solve the ${what}. The bot continues by itself when it is done.`, { id: `ab-captcha-${tabId}`, tabId, sticky: true });
+  await notify('Captcha: your turn', `${formFilled ? 'The form is filled. ' : ''}Solve the ${what}. The bot continues by itself when it is done.`, { id: `ab-captcha-${tabId}`, tabId, sticky: true });
   log(`Waiting up to ${s.behavior.captchaWaitMin} min for you to solve the ${what}…`, 'warn');
   const end = Date.now() + s.behavior.captchaWaitMin * 60000;
   while (Date.now() < end && !stopRequested && !ctx?.skipped) {
@@ -1260,9 +1269,18 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
       return { status: 'applied', answers };
     }
     if (snap.already) return { status: 'applied', answers, note: 'already applied' };
-    if (snap.captcha && /checkbox|challenge|Turnstile|hCaptcha|verification/i.test(snap.captcha)) {
-      if (captchaWaits++ < 2 && (await g(waitForCaptcha(tabId, s, snap.captcha, ctx)))) continue;
-      return { status: 'attention', reason: `${snap.captcha} not solved`, answers };
+    // Bot check (reCAPTCHA "I'm not a robot", hCaptcha, Turnstile): the bot never touches it. On a form,
+    // everything else is filled first (resume included), then you solve the check; the bot submits after.
+    // A check you already solved still shows its widget, so it is asked whether it is solved.
+    let captchaPending = false;
+    if (snap.captcha && /checkbox|challenge|Turnstile|hCaptcha|verification/i.test(snap.captcha) && (await captchaOpen(tabId))) {
+      const formHere = !snap.success && !/image challenge|human verification page/.test(snap.captcha)
+        && snap.fields.filter((f) => !ROBOT.test(`${f.label || ''} ${f.question || ''}`)).length >= 2;
+      if (formHere) captchaPending = true;
+      else {
+        if (captchaWaits++ < 2 && (await g(waitForCaptcha(tabId, s, snap.captcha, ctx)))) continue;
+        return { status: 'attention', reason: `${snap.captcha} not solved`, answers };
+      }
     }
 
     // 0. sign-in / create-account pages: handled here, without the AI
@@ -1346,6 +1364,16 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
 
     if (plan.done || plan.page_type === 'success' || plan.page_type === 'already_applied') return { status: 'applied', answers };
     if (plan.page_type === 'job_closed') return { status: 'attention', reason: 'the posting is closed', answers };
+    // the form comes first; the bot check is handed to you after it (below)
+    if (captchaPending && /captcha|robot|human|bot check/i.test(`${plan.needs_human} ${plan.page_type}`)) {
+      plan.needs_human = '';
+      if (plan.page_type === 'captcha') plan.page_type = 'application_form';
+    }
+    // never touch the bot check itself
+    const robotIds = new Set([...snap.fields.filter((f) => ROBOT.test(`${f.label || ''} ${f.question || ''}`)).map((f) => f.id),
+      ...snap.buttons.filter((b) => ROBOT.test(b.text || '')).map((b) => b.id)]);
+    plan.actions = plan.actions.filter((a) => !robotIds.has(a.id));
+    if (robotIds.has(plan.next_click)) plan.next_click = '';
     if (plan.needs_human) {
       if (plan.page_type === 'captcha' && captchaWaits++ < 2 && (await g(waitForCaptcha(tabId, s, 'captcha', ctx)))) continue;
       // only real blockers stop the bot; anything else it works out itself
@@ -1366,7 +1394,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     }
 
     // empty or still-loading page: wait and look again
-    if (!plan.actions.length && !plan.next_click) {
+    if (!plan.actions.length && !plan.next_click && !captchaPending) {
       if (++idle > 4) return { status: 'attention', reason: 'the page never showed anything to fill or click', answers };
       log('  Nothing to do yet; waiting for the page');
       await call(tabId, '__abAgent', 'waitStable', [1500, 10000]).catch(() => {});
@@ -1421,6 +1449,14 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
       continue;
     }
 
+    // form filled: now the bot check is yours. Solved -> look at the page again and submit.
+    if (captchaPending) {
+      log(`  Form filled; waiting for you to solve the ${snap.captcha}`);
+      history.push(`${plan.page_type} at ${snap.url.slice(0, 100)}: ${results.length} actions; form filled, then the user was asked to solve the ${snap.captcha}`);
+      if (captchaWaits++ < 2 && (await g(waitForCaptcha(tabId, s, snap.captcha, ctx, true)))) continue;
+      return { status: 'attention', reason: `${snap.captcha} not solved (the form is filled: solve it, then press Continue to apply)`, answers };
+    }
+
     let clicked = '';
     lastClick = plan.next_click || '';
     if (plan.next_click) {
@@ -1448,6 +1484,105 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     history.push(`${plan.page_type} at ${snap.url.slice(0, 100)}: ${results.length} actions${failed.length ? ` (${failed.length} failed: ${failed.map((f) => f.note).join(', ').slice(0, 160)})` : ''}${clicked ? `, clicked "${clicked}"` : ''}${snap.errors.length ? `; page errors: ${snap.errors.join(' | ').slice(0, 200)}` : ''}`);
   }
   return { status: 'attention', reason: `no confirmation after ${progress.step} steps`, answers };
+}
+
+// ---------------- "Generate resume & cover letter only" ----------------
+// Writes the tailored resume + cover letter (PDFs in the bid folder) for the job in the active tab,
+// without filling or submitting anything. Works on any job page: a "need you" job (its bid is reused),
+// a job the bot handled before (same URL: its bid is reused), a Jobright job page, or any posting / form.
+let generating = null; // tab id being generated for
+const bare = (u) => String(u || '').split(/[?#]/)[0].replace(/\/+$/, '').toLowerCase();
+
+// company / role of an arbitrary posting page: "Role - Company" titles, the h1, the ATS address
+function guessJob(page, url) {
+  const title = String(page?.title || '').replace(/\s*[|·]\s*(careers?|jobs?|job board|apply).*$/i, '').trim();
+  // sites whose subdomain is the company (allstate.wd5.myworkdayjobs.com, acme.applytojob.com…)
+  const subCompany = /\.(myworkdayjobs|applytojob|icims|bamboohr|recruitee|breezy\.hr|workable|jazzhr|paylocity|ultipro|taleo|teamtailor)\./.test(String(url));
+  const parts = subCompany ? [title] : title.split(/\s+[-–—|@]\s+|\s+at\s+/).map((x) => x.trim()).filter(Boolean);
+  const role = String(page?.h1 || '').trim().slice(0, 120) || parts[0] || 'Job';
+  let company = subCompany ? '' : parts.find((x) => x.toLowerCase() !== role.toLowerCase() && !/^(job|career|apply|application)/i.test(x)) || '';
+  if (!company) {
+    try {
+      const u = new URL(url);
+      const sub = u.host.split('.')[0];
+      const first = u.pathname.split('/').filter(Boolean)[0] || '';
+      company = /(greenhouse|lever|ashbyhq|workable|smartrecruiters|jobvite|breezy|recruitee)\./.test(u.host) ? first
+        : /^(www|jobs|careers|apply|boards|job-boards)$/.test(sub) ? u.host.split('.').slice(-2, -1)[0] : sub;
+      company = company.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    } catch { /* keep '' */ }
+  }
+  return { role, company };
+}
+
+async function generateOnly(tabId) {
+  tabId = Number(tabId);
+  if (generating != null) throw new Error('Already writing a resume; wait until it is done.');
+  const tab = await tabExists(tabId);
+  if (!tab || !/^https?:/.test(tab.url)) throw new Error('Open the job page (posting or application form) first.');
+  let s = await getSettings();
+  if (!s.token) throw new Error('Sign in to the Resume Builder server first (extension settings).');
+  s = await withTemplate(s);
+  s = { ...s, behavior: { ...s.behavior, generateCover: true } }; // this button always writes the cover letter
+  generating = tabId;
+  startKeepAlive();
+  await chrome.storage.session.set({ generatingTab: tabId });
+  try {
+    // 1. which job: a "need you" job, a job from the history with this URL, a Jobright job page, or the page itself
+    const entry = (await attentionJobs())[tabId];
+    const { history = [] } = await chrome.storage.local.get('history');
+    const here = bare(tab.url);
+    const past = history.findLast((h) => h.bidId && [h.postingUrl, h.applyUrl].some((u) => u && bare(u) === here));
+    let bid = null;
+    const bidId = entry?.bidId || past?.bidId;
+    if (bidId) bid = await rpc('resumes:get', bidId).catch(() => null);
+
+    let job;
+    if (entry?.job) job = { ...entry.job };
+    else if (bid) job = { company: bid.company, role: bid.role, location: bid.location || '', salary: bid.salary || '', job_link: bid.job_link || tab.url, jd: bid.jd || '' };
+    if (!job || (job.jd || '').length < 300) {
+      await settle(tabId);
+      let detail = null;
+      if (SITES.jobright.isDetail(tab.url)) detail = await board(SITES.jobright, tabId, 'scrapeDetail', {}).catch(() => null);
+      const page = await call(tabId, '__abAgent', 'pageText').catch(() => null);
+      const guess = guessJob(page, tab.url);
+      job = {
+        company: job?.company || detail?.company || guess.company,
+        role: job?.role || detail?.title || guess.role,
+        location: job?.location || detail?.location || '', salary: job?.salary || detail?.salary || '',
+        job_link: job?.job_link || detail?.applyUrl || tab.url,
+        jd: [detail?.jd, page?.text].filter(Boolean).join('\n\n').slice(0, 30000)
+      };
+      if (job.jd.length < 200) throw new Error('Could not read a job description on this page. Open the job posting and try again.');
+    }
+    const label = `${job.role || 'job'} @ ${job.company || '?'}`;
+    log(`✎ Writing resume & cover letter only: ${label}`);
+
+    // 2. the bid (reused when there is one), then the documents
+    if (!bid) {
+      bid = await rpc('resumes:create', {
+        company: job.company, role: job.role, job_link: job.job_link, apply_url: job.job_link, location: job.location, salary: job.salary, jd: job.jd,
+        status: 'draft', template: s.behavior.template, notes: 'Resume & cover letter generated from the side panel (not applied).',
+        source: SITES.jobright.isDetail(tab.url) ? 'jobright' : 'manual', source_url: tab.url
+      });
+      log(`  Bid #${bid.id} created`);
+    }
+    const docs = await generateDocs(bid, job, s);
+    await rpc('bot:log', bid.id, 'Resume & cover letter generated from the side panel').catch(() => {});
+    if (!entry && !past) {
+      await addHistory({ status: 'generated', reason: 'resume & cover letter only (not applied)', site: 'manual', bidId: bid.id,
+        title: job.role, company: job.company, location: job.location, salary: job.salary, postingUrl: tab.url, applyUrl: job.job_link }).catch(() => {});
+    }
+    log(`✓ Resume & cover letter ready for ${label} (bid #${bid.id})`, 'ok');
+    notify('Resume & cover letter ready', `${label} (bid #${bid.id})${s.filesDir ? `\nSaved in ${s.filesDir}/${docs.bid.resume_dir}` : ''}`);
+    return { bidId: bid.id, dir: s.filesDir && docs.bid.resume_dir ? `${s.filesDir}/${docs.bid.resume_dir}` : '' };
+  } catch (err) {
+    log(`✗ Resume & cover letter: ${err.message}`, 'error');
+    throw err;
+  } finally {
+    generating = null;
+    if (!state.running) stopKeepAlive();
+    await chrome.storage.session.remove('generatingTab');
+  }
 }
 
 // Runs the full bid on a Jobright job page the user has open.
@@ -1478,6 +1613,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       case 'runSingle': await runSingle(msg.tabId); return { ok: true };
       case 'applyAgain': return { ok: true, ...(await applyAgain(msg.tabId)) };
       case 'stopAgain': stopAgain(); return { ok: true };
+      case 'generateOnly': return { ok: true, ...(await generateOnly(msg.tabId)) };
       case 'resetDone': await chrome.storage.local.remove('done'); return { ok: true };
       case 'clearLog': state.log = []; save(); return { ok: true };
       default: return { ok: false, error: 'unknown message' };

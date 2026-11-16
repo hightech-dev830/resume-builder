@@ -5,10 +5,10 @@ import { rpc, SITES } from './lib/config.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
-const LABEL = { applied: 'Applied', attention: 'Need you', failed: 'Failed', skipped: 'Skipped', stopped: 'Stopped' };
+const LABEL = { applied: 'Applied', attention: 'Need you', failed: 'Failed', skipped: 'Skipped', stopped: 'Stopped', generated: 'Resume only' };
 // Resume Builder's bot_status -> this page's status
 const FROM_SERVER = { applied: 'applied', needs_attention: 'attention', failed: 'failed', skipped: 'skipped', applying: 'attention' };
-const siteLabel = (k) => SITES[k]?.label || k || '';
+const siteLabel = (k) => SITES[k]?.label || (k === 'manual' ? 'Side panel' : k) || '';
 const safeUrl = (u) => (/^https?:\/\//i.test(u || '') ? u : '');
 
 let all = [];

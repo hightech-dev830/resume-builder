@@ -64,6 +64,8 @@ const yesno = (s) => (/^(yes|true)\b/i.test(String(s)) ? 'Yes' : /^(no|false)\b/
 // Each rule: match on the field's label/question; `choose` = option preferences, `text` = value to type.
 // Order matters: specific questions first (sponsorship before work authorization before address "state").
 const RULES = [
+  // the bot check ("Human Check", "I'm not a robot"): left for you, never filled or sent to the AI
+  { re: /not a robot|captcha|human check|bot check|verify (that )?you are (a )?human/, skip: true },
   // --- identity check (ADP "Get your verification code": the phone number or the email) ---
   { re: /verification code|receive (a |the |your )?code|send (the |a )?code to|where (should|would) (we|you like (us )?to) send/, choose: (p) => [new RegExp(`^${norm(p.email).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`), /@/, /e-?mail/] },
   // iCIMS "If you are a European Union (EU) or United Kingdom (UK) resident, please check this box": you are not
@@ -78,6 +80,8 @@ const RULES = [
   { re: /without (the need for |requiring |needing )?(a )?(visa )?sponsor/, choose: () => YES, text: () => 'Yes', lock: true },
   { re: /sponsor|visa status|work visa|h-?1b|immigration (support|status)/, choose: () => [...NO, /not (require|need)/, /^i do not/], text: () => 'No', lock: true },
   { re: /authori[sz]ed to work|eligible to work|legally (able|permitted|entitled|allowed) to work|right to work|work authori[sz]ation|work permit|legally authori[sz]ed|authori[sz]ation to work/, choose: () => [...YES, /^(i am )?(a )?u\.?s\.? citizen/, /citizen/, /^(i am )?authori[sz]ed/], text: () => 'Yes', lock: true },
+  { re: /(live|living|reside|residing|located|based|currently) (in|within) the (united states|u\.?s\.?a?\b)|(are you|do you) (currently )?(live|living|reside|residing|located|based) in the (us|usa|united states)|resident of the (united states|u\.?s)/,
+    choose: () => [...YES, /united states/], text: () => 'Yes', lock: true },
   { re: /u\.?s\.? citizen|citizen of the (united states|u\.?s)|are you a citizen|citizenship status/, choose: () => [...YES, /^(i am )?(a )?u\.?s\.? citizen/, /united states citizen/, /^citizen/], text: () => 'Yes', lock: true },
   { re: /(country of )?citizenship|nationality/, not: /dual|other than/, choose: () => [/^united states( of america)?$/, /^usa?$/, /^united states/, /u\.?s\.? citizen/, ...YES], text: () => 'United States', lock: true },
   { re: /relocat/, choose: (p) => (yesno(p.willing_to_relocate) === 'Yes' ? YES : NO), text: (p) => yesno(p.willing_to_relocate) || 'No' },

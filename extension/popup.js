@@ -65,7 +65,25 @@ async function showAgain() {
   $('#stopAgainInfo').textContent = retrying != null ? label(all[retrying]) : '';
   $('#againBtn').classList.toggle('hidden', !here || retrying != null);
   $('#againInfo').textContent = label(here);
+  // "Generate resume & cover letter only": any web page except the job board lists
+  const { generatingTab } = await chrome.storage.session.get('generatingTab');
+  const url = tab?.url || '';
+  const isList = Object.values(SITES).some((x) => x.isList?.(url));
+  $('#genBtn').classList.toggle('hidden', !/^https?:/.test(url) || isList);
+  $('#genBtn').disabled = generatingTab != null;
+  $('#genBtn').textContent = generatingTab != null ? '✎ Writing resume & cover letter…' : '✎ Generate resume & cover letter only';
 }
+$('#genBtn').addEventListener('click', async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  $('#msg').textContent = '';
+  $('#genBtn').disabled = true;
+  $('#genBtn').textContent = '✎ Writing resume & cover letter…';
+  const res = await chrome.runtime.sendMessage({ type: 'generateOnly', tabId: tab?.id }).catch((err) => ({ ok: false, error: err.message }));
+  $('#msg').textContent = res?.ok ? `Resume & cover letter ready (bid #${res.bidId})${res.dir ? `: ${res.dir}` : ''}` : res?.error || 'Something went wrong';
+  $('#msg').className = res?.ok ? 'ok' : 'err';
+  showAgain();
+});
+chrome.tabs.onUpdated.addListener((_id, info) => info.url && showAgain());
 $('#stopAgainBtn').addEventListener('click', () => send('stopAgain'));
 $('#againBtn').addEventListener('click', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

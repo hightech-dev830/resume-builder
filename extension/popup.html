@@ -36,6 +36,8 @@
     #againBtn:hover:not(:disabled) { background: color-mix(in srgb, var(--warn) 10%, var(--panel)); border-color: var(--warn); }
     #againBtn small { font-weight: 400; color: var(--muted); }
     #stopAgainBtn { width: 100%; }
+    #genBtn { width: 100%; border-color: var(--accent); color: var(--accent-dark); font-weight: 600; }
+    #genBtn:disabled { opacity: .7; }
     #stopAgainBtn small { font-weight: 400; opacity: .85; }
     .icon-btn { width: 24px; height: 24px; padding: 0; border-radius: 50%; font: italic 700 13px Georgia, serif; line-height: 22px; text-align: center; flex: none; }
     .icon-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -87,6 +89,7 @@
       <button id="singleBtn" title="Apply to the Jobright job open in this tab">Apply to this job</button>
     </div>
     <button id="stopAgainBtn" class="danger hidden" title="End &quot;Continue to apply&quot; now; the job stays in &quot;need you&quot; and its tab stays open">■ Stop continuing to apply <small id="stopAgainInfo"></small></button>
+    <button id="genBtn" class="hidden" title="Write the tailored resume and cover letter (PDFs in the bid folder) for the job in this tab. Nothing is filled in or submitted.">✎ Generate resume &amp; cover letter only</button>
     <button id="againBtn" class="hidden" title="After you fix this &quot;need you&quot; job (bot check, missing answer…), the bot carries on with it on this tab and submits it. Only this one job.">↻ Continue to apply <small id="againInfo"></small></button>
     <div id="msg"></div>
     <div id="log"></div>
