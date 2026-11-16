@@ -334,6 +334,55 @@ function postingUrlOf(url) {
   return u.toString();
 }
 
+// Job boards sometimes link a company posting by a path its site does not serve:
+// careers.clarkassociatesinc.biz/careerdetail/104516 is a 404, /careerdetail/?id=104516 is the job.
+// …/<page>/<number>[?query] -> …/<page>/?id=<number> (the board's tracking query, e.g. jr_id, is dropped);
+// '' when the URL has no such shape.
+function idQueryUrl(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return '';
+  }
+  const m = /^(.*\/[^/]+)\/(\d+)\/?$/.exec(u.pathname);
+  if (!m || u.searchParams.has('id')) return '';
+  return `${u.origin}${m[1]}/?id=${m[2]}`;
+}
+// Sites known to need that fix, so it happens without waiting to see the 404 first.
+const ID_QUERY_SITES = /(^|\.)clarkassociatesinc\.biz$/i;
+function fixedJobUrl(url) {
+  try {
+    if (ID_QUERY_SITES.test(new URL(url).hostname)) return idQueryUrl(url);
+  } catch {
+    return '';
+  }
+  const av = avatureFormUrl(url);
+  return av && av !== url ? av : '';
+}
+
+// Avature career sites (careers.mantech.com): the board links …/careers?jobId=N, which only shows the
+// job list. The application is …/careers/ApplicationMethods?jobId=N, and its "Go back" link opens the
+// posting (job description). '' when the URL is not such a list / form address.
+const AVATURE_SITES = /(^|\.)(mantech\.com|avature\.net)$/i;
+function avatureParts(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const id = u.searchParams.get('jobId');
+  const m = /^(.*\/careers)(\/ApplicationMethods)?\/?$/i.exec(u.pathname);
+  if (!AVATURE_SITES.test(u.hostname) || !id || !m) return null;
+  return { base: `${u.origin}${m[1]}`, id };
+}
+function avatureFormUrl(url) {
+  const p = avatureParts(url);
+  return p ? `${p.base}/ApplicationMethods?jobId=${encodeURIComponent(p.id)}` : '';
+}
+const NOT_FOUND = /\b404\b|page not found|could not be found|can(no|')t be found|no (document|page|job|position) (matches|found)|(page|job|position|posting) (does not|doesn'?t) exist/i;
+
 function slug(s, max = 40) {
   return String(s || '').normalize('NFKD').replace(/[^\w\s-]/g, '').trim().replace(/[\s-]+/g, '_').slice(0, max) || 'Untitled';
 }
@@ -855,7 +904,19 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
       }
       await focusTab(applyId);
       await g(settle(applyId));
-      const applyTab = await tabExists(applyId);
+      let applyTab = await tabExists(applyId);
+      // a broken job link from the board (the company site shows "page not found"): open the address that works
+      let fixUrl = applyTab?.url ? fixedJobUrl(applyTab.url) : '';
+      if (!fixUrl && applyTab?.url) {
+        const p = await g(call(applyId, '__abAgent', 'pageText').catch(() => null));
+        if (p && p.text.length < 3000 && NOT_FOUND.test(p.text)) fixUrl = idQueryUrl(applyTab.url);
+      }
+      if (fixUrl && fixUrl !== applyTab.url) {
+        log(`  The job link is broken on the company site; opening ${fixUrl}`);
+        await chrome.tabs.update(applyId, { url: fixUrl });
+        await g(settle(applyId));
+        applyTab = (await tabExists(applyId)) || applyTab;
+      }
       rec.applyUrl = applyTab?.url || '';
       // LinkedIn applications (Easy Apply / sign in with LinkedIn) are skipped
       if (LINKEDIN.test(applyTab.url)) {
@@ -886,13 +947,41 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
         await g(settle(applyId));
         postingUrl = overview;
       }
+      // Avature (MANTECH): the link was the application page; its "Go back" link opens the posting
+      const avForm = avatureFormUrl(applyTab.url);
+      if (avForm) {
+        log('  Opening the job posting ("Go back") to read the description');
+        const back = await chrome.scripting.executeScript({
+          target: { tabId: applyId },
+          func: () => {
+            const el = [...document.querySelectorAll('a, button')].find((e) => /^\W*go back\W*$/i.test((e.textContent || '').trim()));
+            if (!el) return '';
+            if (el.href && /^https?:/i.test(el.href) && !/#$/.test(el.href)) return el.href;
+            el.click();
+            return 'clicked';
+          }
+        }).then((r) => r?.[0]?.result || '').catch(() => '');
+        if (back && back !== 'clicked') await chrome.tabs.update(applyId, { url: back });
+        if (back) {
+          await g(sleep(1000));
+          await g(settle(applyId));
+        }
+        const t = await tabExists(applyId);
+        const p = avatureParts(avForm);
+        // no "Go back", or it led to the form again / the job list: open the usual posting address
+        if (!t || avatureParts(t.url) || t.url === avForm) {
+          await chrome.tabs.update(applyId, { url: `${p.base}/JobDetail?jobId=${encodeURIComponent(p.id)}` });
+          await g(settle(applyId));
+        }
+        postingUrl = (await tabExists(applyId))?.url || postingUrl;
+      }
       let page = await g(call(applyId, '__abAgent', 'pageText').catch(() => null));
       if (!page || page.text.length < 300) {
         // single-page apps (Ashby) can still be drawing the posting
         await g(sleep(2500));
         page = (await g(call(applyId, '__abAgent', 'pageText').catch(() => null))) || page;
       }
-      const formUrl = directApplyUrl(postingUrl);
+      const formUrl = avForm || directApplyUrl(postingUrl);
       const job = {
         company: detail.company, role: detail.title, location: detail.location || 'Remote (US)', salary: detail.salary || '',
         job_link: postingUrl,
@@ -926,8 +1015,8 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
         return true;
       };
 
-      // Ashby / Lever: write the resume and cover letter on the Overview step (step 1), then open the
-      // Application form (step 2) and fill it
+      // Ashby / Lever / Avature: write the resume and cover letter on the posting (step 1), then open the
+      // application form (step 2) and fill it
       if (formUrl) {
         log('  Job description read; writing the resume before opening the application form');
         await ensureDocs();
