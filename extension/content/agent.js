@@ -201,6 +201,9 @@
         const container = el.closest('[class*="select" i], [class*="dropdown" i]');
         const single = container?.querySelector('[class*="singleValue" i], [class*="single-value" i], [class*="selected" i]');
         f.value = clean(shown || (single ? textOf(single) : '')).slice(0, 120);
+        // Workday prompt ("× LinkedIn" pill above an empty search box): the pill is the answer
+        const pills = workdayPills(el);
+        if (pills.length) f.value = pills.join(' | ').slice(0, 120);
       } else {
         f.kind = type || 'text';
         f.value = type === 'password' ? (el.value ? '(filled)' : '') : clean(el.value).slice(0, 200);
@@ -651,7 +654,89 @@
     return picked;
   }
 
+  // ---- Workday prompts ("How Did You Hear About Us?") ----
+  // A search box over a menu whose entries can be folders ("Social Media >", "Job Boards >"): clicking a
+  // folder only opens its list, and the answer is set once a leaf ("LinkedIn Jobs") is clicked; it then
+  // shows as a "× LinkedIn Jobs" pill.
+  const WD_PROMPT = '[data-uxi-widget-type="selectinput"], [data-automation-id*="multiselect" i], [data-automation-id="searchBox"]';
+  const workdayBox = (el) => el.closest('[data-automation-id^="formField"]') || el.closest(WD_PROMPT)?.parentElement || null;
+  function workdayPills(el) {
+    if (!el.closest(WD_PROMPT)) return [];
+    const box = workdayBox(el);
+    if (!box) return [];
+    return [...box.querySelectorAll('[data-automation-id="selectedItem"], [data-automation-id="selectedItemList"] [role="listitem"], [data-automation-id="selectedItemList"] li')]
+      .filter(visible).map((p) => clean(textOf(p)).replace(/^[×x✕]\s*/, '')).filter(Boolean);
+  }
+  const wdOptions = () => deepAll('[data-automation-id="promptOption"], [data-automation-id="promptLeafNode"], [role="option"]')
+    .filter((o) => visible(o) && textOf(o) && textOf(o).length < 200 && !NOT_AN_OPTION.test(textOf(o)));
+  // when nothing matches the wanted answer, any sensible entry will do ("the most important is to click one")
+  const WD_FALLBACK = [/linkedin/i, /indeed/i, /jobright/i, /google/i, /job ?board/i, /website|online|internet|career site/i, /social/i];
+  function wdPick(opts, value) {
+    const hit = bestMatch(opts, value, textOf);
+    if (hit) return hit;
+    for (const re of WD_FALLBACK) {
+      const o = opts.find((x) => re.test(textOf(x)) && !isOtherOption(textOf(x)));
+      if (o) return o;
+    }
+    return opts.find((x) => !isOtherOption(textOf(x)) && !/referr|employee|agency|job fair|event/i.test(textOf(x)))
+      || opts.find((x) => !isOtherOption(textOf(x))) || opts[0] || null;
+  }
+  async function chooseWorkday(el, value) {
+    const input = el.tagName === 'INPUT' ? el : el.querySelector('input') || el;
+    const before = workdayPills(el).length;
+    const done = () => workdayPills(el).length > before;
+    const finish = async (txt) => {
+      closeDropdown(el, input);
+      await sleep(150);
+      return txt;
+    };
+    realClick(el);
+    await sleep(400);
+    // 1. search: Workday lists matching leaves after Enter
+    if (input.tagName === 'INPUT' && value) {
+      input.focus();
+      setNativeValue(input, value);
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: value, inputType: 'insertText' }));
+      for (const type of ['keydown', 'keypress', 'keyup']) input.dispatchEvent(new KeyboardEvent(type, { bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13 }));
+      await sleep(900);
+      const hit = bestMatch(wdOptions(), value, textOf);
+      if (hit) {
+        realClick(hit);
+        await sleep(600);
+        if (done()) return finish(textOf(hit));
+      }
+      // 2. clear the search and walk the menu instead
+      setNativeValue(input, '');
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: '', inputType: 'deleteContentBackward' }));
+      await sleep(700);
+    }
+    if (!wdOptions().length) {
+      realClick(el);
+      await sleep(600);
+    }
+    // folder -> its list -> … -> a leaf (at most 4 levels)
+    let last = '';
+    for (let depth = 0; depth < 4; depth++) {
+      const opts = wdOptions();
+      if (!opts.length) break;
+      const pick = wdPick(opts, value);
+      if (!pick) break;
+      last = textOf(pick);
+      // a leaf row has a radio / checkbox; clicking it (or its input) sets the answer
+      const radio = pick.querySelector('input[type="radio"], input[type="checkbox"]');
+      realClick(radio || pick);
+      await sleep(700);
+      if (done()) return finish(last);
+    }
+    await finish('');
+    return done() ? last : '';
+  }
+
   async function chooseOption(el, value, strict) {
+    if (el.closest(WD_PROMPT)) {
+      const got = await chooseWorkday(el, value);
+      if (got) return got;
+    }
     const input = el.tagName === 'INPUT' ? el : el.querySelector('input') || el;
     realClick(el);
     await sleep(250);

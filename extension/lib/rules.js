@@ -5,7 +5,10 @@
 export const norm = (s) => String(s || '').toLowerCase().replace(/[_*✱:]/g, ' ').replace(/\s+/g, ' ').trim();
 
 // "how did you hear about us" style answers, best first; "Other" / "Referral" are never picked
-const HOW_HEARD = [/^jobright/, /jobright/, /^indeed/, /indeed/, /job ?board/, /linkedin/, /glassdoor/, /ziprecruiter/, /online|internet|web ?search|google/, /company (web)?site|career(s)? (page|site)/, /social media/];
+// …then any entry at all ("the most important is to click one"): a Workday folder such as "Social Media"
+// is opened and one of its entries picked by the page script
+const HOW_HEARD = [/^jobright/, /jobright/, /^indeed/, /indeed/, /job ?board/, /linkedin/, /glassdoor/, /ziprecruiter/, /online|internet|web ?search|google/, /company (web)?site|career(s)? (page|site)/, /social media/,
+  /website|web site|career/, /^(?!other\b|referr|employee|staffing|agency|job fair|event|select|choose|please)./];
 // the job board the bot is on comes first ("HiringCafe" also matches "Hiring Cafe" / "hiring.cafe")
 const howHeard = (p) => {
   const board = norm(p.how_heard).replace(/\.(ai|com|cafe)$/, '').replace(/[^a-z0-9]+/g, '');

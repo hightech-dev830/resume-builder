@@ -211,6 +211,40 @@ async function inject(tabId, file, allFrames = false) {
   }
 }
 
+// ---- page dialogs (alert / confirm / prompt) ----
+// While the bot runs, every page loads content/dialogs.js first, which answers those boxes with OK
+// so they never freeze the tab. One already open is closed through chrome.debugger.
+const DIALOG_GUARD = 'ab-dialogs';
+async function dialogGuard(on) {
+  await chrome.scripting.unregisterContentScripts({ ids: [DIALOG_GUARD] }).catch(() => {});
+  if (!on) return;
+  await chrome.scripting.registerContentScripts([{
+    id: DIALOG_GUARD, js: ['content/dialogs.js'], matches: ['<all_urls>'], allFrames: true,
+    runAt: 'document_start', world: 'MAIN', persistAcrossSessions: false
+  }]).catch((err) => console.warn('[auto-bid] dialog guard:', err.message));
+}
+// guard a page that was already open; false when the tab does not answer (a dialog is blocking it)
+async function guardTab(tabId, ms = 5000) {
+  const run = chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['content/dialogs.js'], world: 'MAIN' })
+    .then(() => true, () => true);
+  return Promise.race([run, sleep(ms).then(() => false)]);
+}
+async function closeOpenDialog(tabId) {
+  const work = withDebugger(tabId, async (send) => {
+    await send('Page.enable').catch(() => {});
+    return send('Page.handleJavaScriptDialog', { accept: true }).then(() => true, () => false);
+  }).catch(() => false);
+  return Promise.race([work, sleep(8000).then(() => false)]);
+}
+// before each step: make sure no dialog blocks the page
+async function clearDialogs(tabId) {
+  if (await guardTab(tabId)) return;
+  if (await closeOpenDialog(tabId)) {
+    log('  Clicked OK on a page dialog');
+    await guardTab(tabId);
+  }
+}
+
 // Runs window[ns][method](...args) in the page; returns the top-frame result or all frames' results.
 async function call(tabId, ns, method, args = [], { allFrames = false, frameId } = {}) {
   const target = frameId != null ? { tabId, frameIds: [frameId] } : { tabId, allFrames };
@@ -450,6 +484,7 @@ async function start({ noPause: np = false } = {}) {
   state = { ...blank(), running: true, noPause, startedAt: Date.now(), counts: { applied: 0, attention: 0, failed: 0, skipped: 0 }, log: state.log.slice(-50) };
   stopRequested = false;
   startKeepAlive();
+  await dialogGuard(true);
   log(noPause ? 'Bot started (no pauses: jobs that need you are skipped)' : 'Bot started');
   setPhase('starting');
   runLoop().catch((err) => {
@@ -468,6 +503,7 @@ function stop() {
 
 function finish() {
   state.running = false;
+  dialogGuard(false);
   state.noPause = false;
   noPause = false;
   stopKeepAlive();
@@ -685,6 +721,8 @@ async function applyAgain(activeTabId) {
   state = { ...blank(), running: true, startedAt: Date.now(), log: state.log.slice(-50) };
   stopRequested = false;
   startKeepAlive();
+  await dialogGuard(true);
+  await guardTab(tabId);
   retryAttention(tabId, s).finally(finish);
   return { queued: false };
 }
@@ -1265,8 +1303,16 @@ function accountButton(snap, which) {
 // `auth` lives for one application: { signIns, creates, toCreate, lastTried }.
 async function accountPlan(snap, { profile, auth, url }) {
   const pw = snap.fields.filter((f) => f.kind === 'password');
-  if (!pw.length) return null;
   const host = (() => { try { return new URL(url).host; } catch { return ''; } })();
+  // Workday "Sign In" chooser: [Sign in with Google] [Sign in with LinkedIn] OR [Sign in with email]
+  if (!pw.length) {
+    const byEmail = snap.buttons.find((b) => !b.disabled && /^(sign ?in|log ?in|continue|apply|sign ?up|create (an )?account) (with|using|by) (your |my )?e-?mail\b|^use (my |your )?e-?mail\b/i.test(String(b.text || '').trim()));
+    if (byEmail && snap.fields.filter((f) => f.kind !== 'checkbox').length <= 1 && auth.byEmail < 3) {
+      auth.byEmail++;
+      return { page_type: 'login', summary: `"${byEmail.text}" (not Google / LinkedIn)`, actions: [], next_click: byEmail.id };
+    }
+    return null;
+  }
   const known = (await siteAccounts())[host];
   const said = `${snap.errors.join(' | ')} ${String(snap.text || '').slice(0, 3000)}`;
   const email = snap.fields.find((f) => f.kind === 'email' || (/^(text|email)$/.test(f.kind) && /e-?mail|user ?name|login/i.test(`${f.label} ${f.name} ${f.placeholder}`)));
@@ -1277,6 +1323,7 @@ async function accountPlan(snap, { profile, auth, url }) {
 
   if (pw.length >= 2) {
     // sign-up page
+    if (auth.lastTried === 'create' && NEEDS_VERIFY.test(said)) return { stop: `verify your new ${host} account from the email the site sent, then press Continue to apply` };
     if (ACCOUNT_EXISTS.test(snap.errors.join(' ')) || (auth.lastTried === 'create' && ACCOUNT_EXISTS.test(said))) {
       await rememberAccount(host, { created: true });
       const btn = accountButton(snap, 'signIn');
@@ -1296,7 +1343,16 @@ async function accountPlan(snap, { profile, auth, url }) {
     };
   }
 
-  // sign-in page
+  // sign-in page. No account made on this site yet: create one first (Workday and most others need
+  // one per company site); "account already exists" on the sign-up page sends the bot back here.
+  if (!known?.created && !auth.toCreate && !auth.signIns && !NEEDS_VERIFY.test(said)) {
+    const btn = accountButton(snap, 'create');
+    if (btn) {
+      auth.toCreate = true;
+      auth.lastTried = 'toCreate';
+      return { page_type: 'login', summary: `no account on ${host} yet; going to Create Account`, actions: [], next_click: btn.id };
+    }
+  }
   const failed = auth.lastTried === 'signIn' && (WRONG_LOGIN.test(snap.errors.join(' ')) || WRONG_LOGIN.test(said));
   if (failed || (WRONG_LOGIN.test(snap.errors.join(' ')) && !auth.signIns)) {
     if (!known?.created && !auth.toCreate) {
@@ -1397,7 +1453,7 @@ async function runSteps(startTabId, { job, docs, ensureDocs, settings: s, site =
   let lastClick = ''; // button clicked last step: a dropdown "Apply Now ▾" is followed by its menu's "Apply Now"
   let clickedOn = ''; // URL of the page whose Next / Submit was clicked last step
   let lastClickText = '';
-  const auth = { signIns: 0, creates: 0, toCreate: false, lastTried: '' }; // sign-in / sign-up on the job site
+  const auth = { signIns: 0, creates: 0, toCreate: false, lastTried: '', byEmail: 0 }; // sign-in / sign-up on the job site
 
   for (let step = firstStep; step < firstStep + s.behavior.stepLimit; step++) {
     progress.step = step;
@@ -1411,6 +1467,7 @@ async function runSteps(startTabId, { job, docs, ensureDocs, settings: s, site =
     const blocked = skippedSite(tab.url, s);
     if (blocked) return { status: 'skipped', reason: `the site is on your skip list (${blocked})`, answers };
 
+    await g(clearDialogs(tabId)); // a page alert ("You have Uploaded Resume Successfully. [OK]") blocks everything
     await g(settle(tabId));
     if (await g(acceptCookies(tabId))) await g(settle(tabId));
 
@@ -1447,11 +1504,17 @@ async function runSteps(startTabId, { job, docs, ensureDocs, settings: s, site =
       const formHere = !snap.success && !/image challenge|human verification page/.test(snap.captcha)
         && snap.fields.filter((f) => !ROBOT.test(`${f.label || ''} ${f.question || ''}`)).length >= 2;
       // no-pause run: a bot check is never solved, so the form is not filled for nothing
-      if (noPause && ctx !== retryCtx) return { status: 'skipped', reason: `the page has a ${snap.captcha} (no-pause run)`, answers };
+      // a check that popped up after Submit (invisible reCAPTCHA "Select all images with bicycles"):
+      // the form is done; once the check is solved the site sends the application by itself
+      const afterSubmit = /submit|send|finish|apply|complete/i.test(lastClickText) && /image challenge|hCaptcha/.test(snap.captcha);
+      const what = afterSubmit ? `${snap.captcha} after "${lastClickText}"` : snap.captcha;
+      if (noPause && ctx !== retryCtx) return { status: 'skipped', reason: `the site asked for a ${what} (no-pause run)`, answers };
       if (formHere) captchaPending = true;
       else {
-        if (captchaWaits++ < 2 && (await g(holdTimer(ctx, waitForCaptcha(tabId, s, snap.captcha, ctx))))) continue;
-        return { status: 'attention', reason: `${snap.captcha} not solved`, answers };
+        if (captchaWaits++ < 2 && (await g(holdTimer(ctx, waitForCaptcha(tabId, s, what, ctx))))) continue;
+        return { status: 'attention', reason: afterSubmit
+          ? `the site asked for a ${what} and it was not solved: solve it (the application then goes through), then press Continue to apply`
+          : `${snap.captcha} not solved`, answers };
       }
     }
 
@@ -1787,6 +1850,7 @@ async function runSingle(tabId) {
   state = { ...blank(), running: true, startedAt: Date.now(), log: state.log.slice(-50) };
   stopRequested = false;
   startKeepAlive();
+  await dialogGuard(true);
   const id = (/([0-9a-f]{24})/.exec(tab.url) || [])[1] || '';
   // "Apply to this job" works on Jobright job pages, whichever board the bot runs on
   processJob({ id, url: tab.url.split('?')[0], title: tab.title }, { settings: { ...s, site: 'jobright', filters: { ...s.filters, remoteOnly: false } }, site: SITES.jobright, detailTabId: tabId })
