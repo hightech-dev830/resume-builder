@@ -14,8 +14,9 @@ function render(bot) {
   lastBot = b;
   if (infoOpen) refreshInfoSoon(b);
   $('#dot').className = 'dot' + (b.running ? (b.phase === 'waiting_human' ? ' human' : ' on') : '');
-  $('#phase').textContent = PHASES[b.phase] || b.phase;
+  $('#phase').textContent = `${PHASES[b.phase] || b.phase}${b.running && b.noPause ? ' · no pauses' : ''}`;
   $('#startBtn').classList.toggle('hidden', b.running);
+  $('#fastBtn').classList.toggle('hidden', b.running);
   $('#stopBtn').classList.toggle('hidden', !b.running);
   $('#singleBtn').disabled = b.running;
   $('#site').disabled = b.running; // the running bot keeps the board it started on
@@ -45,6 +46,7 @@ async function send(type, extra = {}) {
 }
 
 $('#startBtn').addEventListener('click', () => send('start'));
+$('#fastBtn').addEventListener('click', () => send('start', { noPause: true }));
 $('#stopBtn').addEventListener('click', () => send('stop'));
 $('#skipBtn').addEventListener('click', () => send('skip'));
 $('#singleBtn').addEventListener('click', async () => {
@@ -177,6 +179,18 @@ let infoOpen = false;
 let infoKey = '';
 let serverDir = null; // folder where bid files are saved on this PC ('' = Supabase Storage)
 
+// a URL to compare jobs by (same as background.js): no hash or tracking query, the job's own query kept
+function bare(u) {
+  try {
+    const x = new URL(u);
+    for (const k of [...x.searchParams.keys()]) if (/^(jr_id|utm_.*|gh_src|ref|source|src|lever-source.*)$/i.test(k)) x.searchParams.delete(k);
+    x.searchParams.sort();
+    return `${x.origin}${x.pathname.replace(/\/+$/, '')}${x.search}`.toLowerCase();
+  } catch {
+    return String(u || '').split('#')[0].replace(/\/+$/, '').toLowerCase();
+  }
+}
+
 async function currentJob() {
   const b = lastBot || {};
   if (b.running && b.current) return { from: 'Working on now', title: b.current.title, company: b.current.company, url: b.current.url, bidId: b.current.bidId, step: b.current.step };
@@ -184,7 +198,15 @@ async function currentJob() {
   const att = tab && ((await chrome.storage.session.get('attentionTabs')).attentionTabs || {})[tab.id];
   if (att) return { from: 'Needs you (this tab)', title: att.job?.role, company: att.job?.company, url: att.postingUrl, applyUrl: att.job?.job_link, bidId: att.bidId, step: att.progress?.step };
   const { history = [] } = await chrome.storage.local.get('history');
-  const h = history[history.length - 1];
+  // the job this tab is on (from the history), else the job last generated / continued, else the last job
+  const here = tab?.url && /^https?:/.test(tab.url) ? bare(tab.url) : '';
+  const mine = here && history.findLast((x) => [x.postingUrl, x.applyUrl].some((u) => u && bare(u) === here));
+  const { focusJob } = await chrome.storage.session.get('focusJob');
+  const last = history[history.length - 1];
+  if (focusJob && focusJob.tabId === tab?.id && (!mine || bare(focusJob.url) === here || mine.bidId === focusJob.bidId)) return focusJob;
+  if (mine) return { from: `This tab (${mine.status})`, title: mine.title, company: mine.company, url: mine.postingUrl, applyUrl: mine.applyUrl, bidId: mine.bidId, reason: mine.reason };
+  if (focusJob && (!last || focusJob.t >= last.t)) return focusJob;
+  const h = last;
   if (h) return { from: `Last job (${h.status})`, title: h.title, company: h.company, url: h.postingUrl, applyUrl: h.applyUrl, bidId: h.bidId, reason: h.reason };
   return null;
 }
@@ -278,3 +300,16 @@ $('#jobInfo').addEventListener('click', async (e) => {
   }
 });
 chrome.tabs.onActivated.addListener(() => infoOpen && !lastBot?.running && showInfo());
+// a job ended (history), a resume was generated / a job continued (focusJob), a "need you" job changed,
+// or this tab went to another page: show that job's details
+function infoChanged() {
+  if (!infoOpen || lastBot?.running) return;
+  clearTimeout(infoTimer);
+  infoTimer = setTimeout(showInfo, 400);
+}
+chrome.storage.onChanged.addListener((ch, area) => {
+  if ((area === 'local' && ch.history) || (area === 'session' && (ch.focusJob || ch.attentionTabs))) infoChanged();
+  // the bot stopped: its job card is gone, so the details move to the job it ended on
+  if (area === 'local' && ch.bot && ch.bot.oldValue?.running && !ch.bot.newValue?.running) infoChanged();
+});
+chrome.tabs.onUpdated.addListener((id, info) => info.url && infoChanged());

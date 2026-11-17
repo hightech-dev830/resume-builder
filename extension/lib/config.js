@@ -57,6 +57,7 @@ export const DEFAULT_SETTINGS = {
     delaySec: 8,           // pause between bids
     stepLimit: 40,         // max pages per application (Workday-style wizards need ~15)
     captchaWaitMin: 3,     // how long to wait for you to solve a captcha
+    stuckMin: 3,           // skip a job whose application page has not changed for this long (0 = never)
     closeTabs: true        // close the job tabs after a successful bid
   }
 };

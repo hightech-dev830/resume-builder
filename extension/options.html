@@ -109,6 +109,7 @@
           <label>Pause between bids (seconds)<input type="number" id="b-delaySec" min="0"></label>
           <label>Max pages per application<input type="number" id="b-stepLimit" min="3"></label>
           <label>Wait for you to solve a captcha (minutes)<input type="number" id="b-captchaWaitMin" min="0"></label>
+          <label title="When the application page has not changed for this long (the bot is stuck on it), the job is skipped and the bot goes back to the job board. Waiting for you on a bot check and writing the resume do not count. 0 = never.">Time on a stuck job before skipping it (minutes)<input type="number" id="b-stuckMin" min="0" step="0.5"></label>
           <label class="check"><input type="checkbox" id="b-autoSubmit"> Submit automatically (off = stop at the final step for review)</label>
           <label class="check"><input type="checkbox" id="b-skipAccounts"> Skip jobs that need an account (sign up / sign in)</label>
           <label class="wide">Skip job sites whose URL contains (one per line)<textarea id="b-skipUrls" rows="4" placeholder="myworkdayjobs.com&#10;icims.com&#10;careers.example.com/apply"></textarea></label>

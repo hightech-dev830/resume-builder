@@ -21,7 +21,7 @@ export const isAutofillUpload = (f) => f.kind === 'file' && /auto-?fill|autocomp
 const fieldText = (f) =>norm([f.question, f.label, f.name, f.placeholder].filter(Boolean).join(' | '));
 const isChoice = (f) => (f.options?.length || 0) > 0 && f.kind !== 'file';
 const isRequired = (f) => !!f.required || /[*✱]|\(required\)/i.test(`${f.label || ''} ${f.question || ''}`);
-const TEXTY = new Set(['text', 'email', 'tel', 'url', 'number', '', 'combobox']);
+const TEXTY = new Set(['text', 'email', 'tel', 'url', 'number', '', 'combobox', 'date']);
 
 export function isFilled(f) {
   if (f.kind === 'checkbox') return !!f.checked;
@@ -84,6 +84,9 @@ const RULES = [
     choose: () => [...YES, /united states/], text: () => 'Yes', lock: true },
   { re: /u\.?s\.? citizen|citizen of the (united states|u\.?s)|are you a citizen|citizenship status/, choose: () => [...YES, /^(i am )?(a )?u\.?s\.? citizen/, /united states citizen/, /^citizen/], text: () => 'Yes', lock: true },
   { re: /(country of )?citizenship|nationality/, not: /dual|other than/, choose: () => [/^united states( of america)?$/, /^usa?$/, /^united states/, /u\.?s\.? citizen/, ...YES], text: () => 'United States', lock: true },
+  // "What is the earliest date you can start employment?": a date (the profile's start date, else two weeks from today)
+  { re: /earliest (possible )?(date|start)|start date|date (you|that you) (can|could|are able to) (start|begin)|available (to|for) (start|begin)|availability date|when (can|could) you (start|begin)|start(ing)? employment/,
+    not: /end date|graduat|birth|employment (history|dates)|from|to date/, text: (p) => startDate(p) },
   { re: /relocat/, choose: (p) => (yesno(p.willing_to_relocate) === 'Yes' ? YES : NO), text: (p) => yesno(p.willing_to_relocate) || 'No' },
   { re: /18 years|age of 18|over 18|at least 18|legal (working )?age/, choose: () => YES, text: () => 'Yes' },
   { re: /(previously|ever|currently|formerly) (been )?(employed|worked)|former employee|worked (here|for us|for this company) before|employee of .* (before|previously)/, choose: () => NO, text: () => 'No' },
@@ -145,6 +148,15 @@ const RULES = [
     not: /currency|frequency|type|negotiable|range (is|are)|transparen|history|current (salary|compensation|pay)/,
     text: (p, f) => salaryFor(p, f), lock: true }
 ];
+
+// MM/DD/YYYY: the profile's start date when it is a future date, else two weeks from today
+function startDate(p, now = new Date()) {
+  const m = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(p.start_date || ''));
+  let d = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+  if (!d || d < now) d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 14);
+  const two = (n) => String(n).padStart(2, '0');
+  return `${two(d.getMonth() + 1)}/${two(d.getDate())}/${d.getFullYear()}`;
+}
 
 const digits = (s) => String(s || '').replace(/[^\d.]/g, '').replace(/\.0+$/, '');
 function salaryFor(p, f) {
@@ -208,6 +220,9 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
   // error lines that name none of the questions (or only the "needs corrections" heading)
   const unexplainedErrors = () => errLines.filter((e) => !/^(your )?form (needs|has) (corrections|errors)$|^please (fix|correct)/.test(e)
     && !fields.some((f) => { const k = qKey(f.question || f.label); return k.length >= 8 && e.includes(k); }));
+  // an error that names no question ("Yes / no answers to questions can't be blank"): every empty
+  // answer on the page is a suspect, required mark or not
+  const vague = unexplainedErrors().length > 0;
   const realResume = fileFields.find((f) => !isAutofillUpload(f) && /resume|\bcv\b|curriculum/.test(fieldText(f)))
     || (fileFields.some(isAutofillUpload) ? fileFields.find((f) => !isAutofillUpload(f) && !/cover|transcript|portfolio|additional|other|photo|image/.test(fieldText(f))) : null);
 
@@ -258,7 +273,11 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
           handled = true;
           // a locked answer (work authorization, sponsorship, pay) is corrected when the page shows another one
           const wrong = rule.lock && filled && norm(f.value) !== norm(val) && !(f.kind === 'combobox' && norm(f.value).startsWith(norm(val)));
-          if (!filled || wrong) act = { op: f.kind === 'combobox' ? 'choose' : 'fill', value: val, question: q };
+          // "KEVIN" typed in from the resume (Workday "Autofill with Resume"): Workday flags names with
+          // more than 2 capital letters, so the profile's own capitals ("Kevin") are typed instead
+          const shouting = filled && f.kind !== 'combobox' && f.value !== val && norm(f.value) === norm(val)
+            && /[a-z]/.test(val) && f.value === String(f.value).toUpperCase();
+          if (!filled || wrong || shouting) act = { op: f.kind === 'combobox' ? 'choose' : 'fill', value: val, question: q };
         }
       }
       if (rule?.lock && handled) locked.push(f.id);
@@ -285,7 +304,8 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
     // a box for the code that was emailed/texted: only you have it (the AI then hands the page to you)
     const codeBox = !isChoice(f) && TEXTY.has(f.kind) && /verification code|one[- ]time (pass)?code|security code|passcode|enter (the |your )?code|\botp\b/.test(t);
     if (locked.includes(f.id)) continue; // fixed answer: the AI does not see it
-    if (f.error || (!handled && !filled && (isRequired(f) || named || codeBox)) || (named && !act) || (forceAI && !filled)) leftover.push(named && !f.error ? { ...f, required: true, error: 'the form says this required answer is missing' } : f);
+    const vagueSuspect = vague && !handled && !filled && f.kind !== 'file' && f.kind !== 'checkbox';
+    if ((f.error && !act) || (!handled && !filled && (isRequired(f) || named || codeBox)) || (named && !act) || (forceAI && !filled && !act) || vagueSuspect) leftover.push(named && !f.error ? { ...f, required: true, error: 'the form says this required answer is missing' } : f);
   }
 
   const needsDocs = actions.some((a) => a.op.startsWith('upload')) || wantsCoverText;
@@ -316,7 +336,9 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
   return {
     actions, next_click: next?.id || '', page_type: isForm ? 'application_form' : 'other',
     summary: `${isForm ? `form with ${fields.length} fields, ` : ''}${summaryBits.join(', ')}${next ? `, then "${next.text}"` : ''}`,
-    askAI, aiFields: (forceAI ? fields : leftover).filter((f) => !locked.includes(f.id)), needsDocs, wantsCoverText, locked
+    // only the questions that are still open or that the site flagged: what is filled stays as it is
+    // (a step that did not move on is fixed, not filled in all over again)
+    askAI, aiFields: leftover.filter((f) => !locked.includes(f.id)), needsDocs, wantsCoverText, locked
   };
 }
 

@@ -47,6 +47,9 @@ function jobContext() {
     guard: (p) => Promise.race([p, skip]),
     check: () => { if (ctx.skipped || ctx.stopped) throw new SkipError(ctx.stopped ? 'stopped by you' : 'skipped by you'); },
     cancel: () => { ctx.skipped = true; reject(new SkipError('skipped by you')); },
+    // no progress for too long: dropped like a Skip, with its own reason
+    timedOut: '',
+    timeout: (why) => { ctx.skipped = true; ctx.timedOut = why; reject(new SkipError(why)); },
     stop: () => { ctx.stopped = true; reject(new SkipError('stopped by you')); }
   };
   return ctx;
@@ -434,14 +437,20 @@ async function markProcessed(id, status) {
 
 // ---------------- main loop ----------------
 
-async function start() {
+// "Start bot (no pauses)": for volume. Wherever the bot would stop and wait for you (bot check,
+// email code / verification, a question it must hand to you, auto-submit off…) it skips the job at
+// once, closes its tabs and goes on to the next one; nothing is left in "need you".
+let noPause = false;
+
+async function start({ noPause: np = false } = {}) {
   if (state.running) return;
   const s = await getSettings();
   if (!s.token) throw new Error('Sign in to the Resume Builder server first (extension settings).');
-  state = { ...blank(), running: true, startedAt: Date.now(), counts: { applied: 0, attention: 0, failed: 0, skipped: 0 }, log: state.log.slice(-50) };
+  noPause = !!np;
+  state = { ...blank(), running: true, noPause, startedAt: Date.now(), counts: { applied: 0, attention: 0, failed: 0, skipped: 0 }, log: state.log.slice(-50) };
   stopRequested = false;
   startKeepAlive();
-  log('Bot started');
+  log(noPause ? 'Bot started (no pauses: jobs that need you are skipped)' : 'Bot started');
   setPhase('starting');
   runLoop().catch((err) => {
     log('Bot stopped: ' + err.message, 'error');
@@ -459,6 +468,8 @@ function stop() {
 
 function finish() {
   state.running = false;
+  state.noPause = false;
+  noPause = false;
   stopKeepAlive();
   setPhase('idle', null);
   const c = state.counts;
@@ -781,6 +792,11 @@ async function retryAttention(tabId, s) {
       // the tab stays open and the job stays "need you": Continue to apply can pick it up later
       outcome = 'stopped';
       reason = 'stopped by you';
+    } else if (ctx.timedOut) {
+      // "Continue to apply" you started yourself: not dropped, it stays "need you" on its tab
+      outcome = 'attention';
+      reason = ctx.timedOut;
+      state.counts.attention++;
     } else if (err instanceof SkipError || ctx.skipped) {
       outcome = 'skipped';
       reason = 'you pressed Skip';
@@ -802,6 +818,11 @@ async function retryAttention(tabId, s) {
       status: outcome, reason: outcome === 'applied' ? 'applied after you continued it' : reason, site: entry.site, bidId: bid?.id || entry.bidId || null,
       title: job.role, company: job.company, location: job.location, salary: job.salary, postingUrl: entry.postingUrl, applyUrl: job.job_link
     }, { replaceBid: true }).catch(() => {});
+    // the side panel's job details stay on this job after it ends
+    await chrome.storage.session.set({ focusJob: {
+      t: Date.now(), tabId, from: `Continued to apply (${outcome})`, title: job.role, company: job.company,
+      url: entry.postingUrl, applyUrl: job.job_link, bidId: bid?.id || entry.bidId || null, reason
+    } }).catch(() => {});
     state.current = null;
     save();
   }
@@ -1066,6 +1087,13 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
         outcome = 'stopped';
         rec.reason = 'stopped by you';
         await rpc('bot:log', bid.id, 'Stopped by user', { bot_status: 'needs_attention' });
+      } else if (noPause) {
+        // no-pause run: what would wait for you is skipped (its tabs close), and the bot moves on
+        outcome = 'skipped';
+        state.counts.skipped++;
+        rec.reason = `no-pause run: ${result.reason}`;
+        log(`⏭ Skipped ${label} (no-pause run): ${result.reason}`, 'warn');
+        await rpc('bot:log', bid.id, `Skipped (no-pause run): ${result.reason}`, { bot_status: 'skipped' }).catch(() => {});
       } else {
         outcome = 'attention';
         state.counts.attention++;
@@ -1087,9 +1115,9 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
     } else if (err instanceof SkipError || ctx.skipped) {
       outcome = 'skipped';
       state.counts.skipped++;
-      rec.reason = 'you pressed Skip';
-      log(`⏭ Skipped ${label}: you pressed Skip`, 'warn');
-      if (bid) await rpc('bot:log', bid.id, 'Skipped by you', { bot_status: 'skipped' }).catch(() => {});
+      rec.reason = ctx.timedOut || 'you pressed Skip';
+      log(`⏭ Skipped ${label}: ${rec.reason}`, 'warn');
+      if (bid) await rpc('bot:log', bid.id, ctx.timedOut ? `Skipped: ${ctx.timedOut}` : 'Skipped by you', { bot_status: 'skipped' }).catch(() => {});
     } else {
       outcome = 'failed';
       state.counts.failed++;
@@ -1174,6 +1202,11 @@ async function captchaOpen(tabId) {
 }
 
 async function waitForCaptcha(tabId, s, what, ctx, formFilled = false) {
+  // no-pause run (and not a "Continue to apply" you started): no waiting, the job is skipped
+  if (noPause && ctx !== retryCtx) {
+    log(`  ${what} on the page; no-pause run, so not waiting`, 'warn');
+    return false;
+  }
   setPhase('waiting_human');
   await focusTab(tabId, true);
   await call(tabId, '__abAgent', 'showCaptcha', [], { allFrames: true }).catch(() => {});
@@ -1303,7 +1336,38 @@ const NEEDS_DOCS = new Set(['application_form', 'review']);
 
 // `progress` ({ step, history, answers, fixed }) is owned by the caller and kept up to date here,
 // so "Continue to apply" can carry on at the step where the job stopped, with what was done so far.
-async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, site = siteOf(s), tabs, ctx = jobContext(), progress = { step: 0, history: [], answers: [] } }) {
+// "Time on a stuck job" (Settings, default 3 min): when the application page has not changed for that
+// long (same page, same fields and buttons), the job is skipped and the bot goes back to the job board.
+// Waiting for you (bot check) and writing the resume do not count.
+async function runApplication(startTabId, opts) {
+  const ctx = opts.ctx || jobContext();
+  const min = Number(opts.settings.behavior.stuckMin);
+  const wd = { since: Date.now(), paused: 0, sig: '' };
+  ctx.wd = wd;
+  const timer = min > 0 ? setInterval(() => {
+    if (wd.paused) wd.since = Date.now();
+    else if (Date.now() - wd.since > min * 60000) {
+      clearInterval(timer);
+      log(`⏱ The application page did not change for ${min} min; moving on`, 'warn');
+      ctx.timeout(`no progress for ${min} min (the page stayed the same)`);
+    }
+  }, 5000) : null;
+  try {
+    return await runSteps(startTabId, { ...opts, ctx });
+  } finally {
+    clearInterval(timer);
+    ctx.wd = null;
+  }
+}
+// pauses the stuck-job timer while the bot waits for you or writes the resume
+function holdTimer(ctx, p) {
+  if (ctx.wd) ctx.wd.paused++;
+  return Promise.resolve(p).finally(() => {
+    if (ctx.wd) { ctx.wd.paused--; ctx.wd.since = Date.now(); }
+  });
+}
+
+async function runSteps(startTabId, { job, docs, ensureDocs, settings: s, site = siteOf(s), tabs, ctx, progress = { step: 0, history: [], answers: [] } }) {
   const g = ctx.guard;
   const profile = await getProfile();
   // "How did you hear about us": the board the bot is on, unless you set something else yourself
@@ -1331,6 +1395,8 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
   let idle = 0; // pages that looked empty / still loading
   let lastRulesKey = ''; // page handled by rules alone last step; if it is still there, ask the AI
   let lastClick = ''; // button clicked last step: a dropdown "Apply Now ▾" is followed by its menu's "Apply Now"
+  let clickedOn = ''; // URL of the page whose Next / Submit was clicked last step
+  let lastClickText = '';
   const auth = { signIns: 0, creates: 0, toCreate: false, lastTried: '' }; // sign-in / sign-up on the job site
 
   for (let step = firstStep; step < firstStep + s.behavior.stepLimit; step++) {
@@ -1349,6 +1415,21 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     if (await g(acceptCookies(tabId))) await g(settle(tabId));
 
     let snap = await g(readyPage(tabId));
+    // clicked Next / Submit last step but still on the same page: the site said why (the error summary,
+    // red / orange fields). Only those answers are fixed; the rest of the page stays as it is.
+    if (clickedOn && clickedOn === `${snap.url}|${snap.steps || ''}` && (snap.errors.length || snap.fields.some((f) => f.error))) {
+      const flagged = [...snap.errors, ...snap.fields.filter((f) => f.error).map((f) => `${(f.question || f.label || '').slice(0, 80)}: ${f.error}`)];
+      const said = [...new Set(flagged)].join(' | ').slice(0, 400);
+      log(`  The page did not move on; fixing only what it flagged: ${said.slice(0, 200)}`, 'warn');
+      history.push(`After clicking "${lastClickText}" the page did not move on. The site flagged: ${said}. Fix ONLY those answers (and any empty required one); everything else is filled already and must be left as it is. Then click the same button again.`);
+    }
+    clickedOn = '';
+    // the stuck-job timer starts over whenever the page is a different one (another URL, wizard step,
+    // or set of fields / buttons); filling the same page again and again is not progress
+    if (ctx.wd) {
+      const sig = `${snap.url}|${snap.steps || ''}|${snap.fields.map((f) => f.id).join(',')}|${snap.buttons.map((b) => b.text).join(',')}`;
+      if (sig !== ctx.wd.sig) { ctx.wd.sig = sig; ctx.wd.since = Date.now(); }
+    }
     // a password box means the site wants an account: skip before spending an AI call
     if (s.behavior.skipAccounts && snap.fields.some((f) => f.kind === 'password')) {
       return { status: 'skipped', reason: 'it requires an account (sign up / sign in)', answers };
@@ -1365,9 +1446,11 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     if (snap.captcha && /checkbox|challenge|Turnstile|hCaptcha|verification/i.test(snap.captcha) && (await captchaOpen(tabId))) {
       const formHere = !snap.success && !/image challenge|human verification page/.test(snap.captcha)
         && snap.fields.filter((f) => !ROBOT.test(`${f.label || ''} ${f.question || ''}`)).length >= 2;
+      // no-pause run: a bot check is never solved, so the form is not filled for nothing
+      if (noPause && ctx !== retryCtx) return { status: 'skipped', reason: `the page has a ${snap.captcha} (no-pause run)`, answers };
       if (formHere) captchaPending = true;
       else {
-        if (captchaWaits++ < 2 && (await g(waitForCaptcha(tabId, s, snap.captcha, ctx)))) continue;
+        if (captchaWaits++ < 2 && (await g(holdTimer(ctx, waitForCaptcha(tabId, s, snap.captcha, ctx))))) continue;
         return { status: 'attention', reason: `${snap.captcha} not solved`, answers };
       }
     }
@@ -1402,7 +1485,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     // a real application form: write the tailored resume + cover letter before filling it
     if (!docs.files && rp.page_type === 'application_form' && (rp.needsDocs || snap.fields.length >= 3)) {
       log('  Application form found; preparing the resume and cover letter');
-      await g(ensureDocs());
+      await g(holdTimer(ctx, ensureDocs()));
       rp = rulePlan(snap, ruleArgs());
     }
 
@@ -1423,7 +1506,10 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
       lastRulesKey = '';
       // fixed answers (work authorization, sponsorship, pay) come from the rules only
       const locked = new Set(rp.locked || []);
-      ai.actions = ai.actions.filter((a) => !locked.has(a.id));
+      // the AI only changes the fields it was shown (open or flagged ones); filled answers are not retyped
+      const shown = new Set(rp.aiFields.map((f) => f.id));
+      const fieldIds = new Set(snap.fields.map((f) => f.id));
+      ai.actions = ai.actions.filter((a) => !locked.has(a.id) && (!fieldIds.has(a.id) || shown.has(a.id)));
       const aiIds = new Set(ai.actions.map((a) => a.id));
       plan = { ...ai, actions: [...rp.actions.filter((a) => !aiIds.has(a.id)), ...ai.actions], next_click: ai.next_click || rp.next_click };
       rememberAnswers(answersToSave(snap, ai.actions)).catch(() => {});
@@ -1446,7 +1532,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     // first real form: write the tailored resume + cover letter now, then plan this page again with them
     if (!docs.files && (NEEDS_DOCS.has(plan.page_type) || plan.actions.some((a) => a.op.startsWith('upload')))) {
       log('  Application form found; preparing the resume and cover letter');
-      await g(ensureDocs());
+      await g(holdTimer(ctx, ensureDocs()));
       step--;
       continue;
     }
@@ -1464,7 +1550,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     plan.actions = plan.actions.filter((a) => !robotIds.has(a.id));
     if (robotIds.has(plan.next_click)) plan.next_click = '';
     if (plan.needs_human) {
-      if (plan.page_type === 'captcha' && captchaWaits++ < 2 && (await g(waitForCaptcha(tabId, s, 'captcha', ctx)))) continue;
+      if (plan.page_type === 'captcha' && captchaWaits++ < 2 && (await g(holdTimer(ctx, waitForCaptcha(tabId, s, 'captcha', ctx))))) continue;
       // only real blockers stop the bot; anything else it works out itself
       if (HARD_STOP.test(`${plan.needs_human} ${plan.page_type}`) || overrides >= 3) {
         // a code box on a page that talks about email: the code was emailed to you (own notification)
@@ -1542,7 +1628,7 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     if (captchaPending) {
       log(`  Form filled; waiting for you to solve the ${snap.captcha}`);
       history.push(`${plan.page_type} at ${snap.url.slice(0, 100)}: ${results.length} actions; form filled, then the user was asked to solve the ${snap.captcha}`);
-      if (captchaWaits++ < 2 && (await g(waitForCaptcha(tabId, s, snap.captcha, ctx, true)))) continue;
+      if (captchaWaits++ < 2 && (await g(holdTimer(ctx, waitForCaptcha(tabId, s, snap.captcha, ctx, true))))) continue;
       return { status: 'attention', reason: `${snap.captcha} not solved (the form is filled: solve it, then press Continue to apply)`, answers };
     }
 
@@ -1551,6 +1637,8 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
     if (plan.next_click) {
       const btn = snap.buttons.find((b) => b.id === plan.next_click);
       clicked = btn?.text || plan.next_click;
+      clickedOn = `${snap.url}|${snap.steps || ''}`; // Workday keeps one URL for all its steps
+      lastClickText = clicked;
       const isSubmit = plan.page_type === 'review' || /submit|send application|finish/i.test(clicked);
       if (isSubmit && !s.behavior.autoSubmit) return { status: 'attention', reason: 'ready to submit (auto-submit is off): review and press Submit', answers };
       await g(sleep(500 + Math.random() * 700));
@@ -1580,7 +1668,18 @@ async function runApplication(startTabId, { job, docs, ensureDocs, settings: s, 
 // without filling or submitting anything. Works on any job page: a "need you" job (its bid is reused),
 // a job the bot handled before (same URL: its bid is reused), a Jobright job page, or any posting / form.
 let generating = null; // tab id being generated for
-const bare = (u) => String(u || '').split(/[?#]/)[0].replace(/\/+$/, '').toLowerCase();
+// a URL to compare jobs by: no hash, no tracking query (jr_id, utm_…), but the job's own query kept
+// (greenhouse embed ?token=…, ?jobId=…, ?id=… tell the jobs apart)
+function bare(u) {
+  try {
+    const x = new URL(u);
+    for (const k of [...x.searchParams.keys()]) if (/^(jr_id|utm_.*|gh_src|ref|source|src|lever-source.*)$/i.test(k)) x.searchParams.delete(k);
+    x.searchParams.sort();
+    return `${x.origin}${x.pathname.replace(/\/+$/, '')}${x.search}`.toLowerCase();
+  } catch {
+    return String(u || '').split('#')[0].replace(/\/+$/, '').toLowerCase();
+  }
+}
 
 // company / role of an arbitrary posting page: "Role - Company" titles, the h1, the ATS address
 function guessJob(page, url) {
@@ -1655,12 +1754,15 @@ async function generateOnly(tabId) {
       });
       log(`  Bid #${bid.id} created`);
     }
+    await chrome.storage.session.set({ focusJob: { t: Date.now(), tabId, from: 'Writing resume & cover letter…', title: job.role, company: job.company, url: tab.url, applyUrl: job.job_link, bidId: bid.id } });
     const docs = await generateDocs(bid, job, s);
     await rpc('bot:log', bid.id, 'Resume & cover letter generated from the side panel').catch(() => {});
     if (!entry && !past) {
       await addHistory({ status: 'generated', reason: 'resume & cover letter only (not applied)', site: 'manual', bidId: bid.id,
         title: job.role, company: job.company, location: job.location, salary: job.salary, postingUrl: tab.url, applyUrl: job.job_link }).catch(() => {});
     }
+    // the side panel's job details switch to this job
+    await chrome.storage.session.set({ focusJob: { t: Date.now(), tabId, from: 'Resume & cover letter generated', title: job.role, company: job.company, url: tab.url, applyUrl: job.job_link, bidId: bid.id } });
     log(`✓ Resume & cover letter ready for ${label} (bid #${bid.id})`, 'ok');
     notify('Resume & cover letter ready', `${label} (bid #${bid.id})${s.filesDir ? `\nSaved in ${s.filesDir}/${docs.bid.resume_dir}` : ''}`);
     return { bidId: bid.id, dir: s.filesDir && docs.bid.resume_dir ? `${s.filesDir}/${docs.bid.resume_dir}` : '' };
@@ -1696,7 +1798,7 @@ async function runSingle(tabId) {
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   (async () => {
     switch (msg.type) {
-      case 'start': await start(); return { ok: true };
+      case 'start': await start({ noPause: !!msg.noPause }); return { ok: true };
       case 'stop': stop(); return { ok: true };
       case 'skip': skipCurrent(); return { ok: true };
       case 'runSingle': await runSingle(msg.tabId); return { ok: true };

@@ -132,6 +132,7 @@
   function snapshot() {
     const fields = [];
     const groups = new Map();
+    const dateBoxes = new Set();
 
     for (const el of deepAll('input, textarea, select, [contenteditable="true"], [role="combobox"]:not(input), button[aria-haspopup="listbox"]')) {
       const type = (el.getAttribute('type') || el.type || '').toLowerCase();
@@ -139,6 +140,26 @@
       const isFile = type === 'file';
       if (!isFile && !visible(el) && !(type === 'radio' || type === 'checkbox')) continue;
       if (el.disabled) continue;
+
+      // Workday date: separate Month / Day / Year boxes, listed (and filled) as one "date" field
+      if (el.matches('input[data-automation-id^="dateSection"]')) {
+        const wrap = workdayDateWrap(el);
+        if (dateBoxes.has(wrap)) continue;
+        dateBoxes.add(wrap);
+        const secs = dateSections(wrap);
+        const box = el.closest('[data-automation-id^="formField"], fieldset') || wrap;
+        const lab = box.querySelector('legend, label, [data-automation-id="formLabel"]');
+        const question = clean((lab && textOf(lab)) || precedingText(wrap)).slice(0, 250);
+        const f = {
+          id: idOf(secs[0]), kind: 'date', label: question, question, placeholder: secs.map((s) => s.placeholder || '').join('/'),
+          value: secs.every((s) => /\d/.test(s.value)) ? secs.map((s) => s.value).join('/') : '',
+          required: /[*✱]/.test(question) || secs.some((s) => s.required || s.getAttribute('aria-required') === 'true')
+        };
+        const err = fieldError(secs[0]) || fieldError(box);
+        if (err) f.error = err;
+        fields.push(f);
+        continue;
+      }
 
       if (type === 'radio' || type === 'checkbox') {
         const name = el.name || '';
@@ -427,6 +448,46 @@
     for (const t of types) el.dispatchEvent(new Event(t, { bubbles: true, composed: true }));
   }
 
+  // Workday date boxes ("dateSectionMonth-input", "…Day…", "…Year…"): the box holding all of them
+  function workdayDateWrap(el) {
+    let w = el.parentElement;
+    while (w && w.querySelectorAll('input[data-automation-id^="dateSection"]').length < 2 && !w.matches('[data-automation-id^="formField"], fieldset')) w = w.parentElement;
+    return w || el.parentElement;
+  }
+  const dateSections = (wrap) => [...wrap.querySelectorAll('input[data-automation-id^="dateSection"]')];
+  // "2026-12-01", "12/01/2026", "December 1, 2026" -> { y, m, d }
+  function dateParts(v) {
+    const s = String(v).trim();
+    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+    if (m) return { y: m[1], m: m[2], d: m[3] };
+    m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/.exec(s);
+    if (m) return { y: m[3], m: m[1], d: m[2] };
+    const d = new Date(s);
+    return isNaN(d) ? null : { y: String(d.getFullYear()), m: String(d.getMonth() + 1), d: String(d.getDate()) };
+  }
+  // typed box by box like a person (Workday's date widget ignores a value set from script)
+  function fillWorkdayDate(el, value) {
+    const p = dateParts(value);
+    if (!p) return false;
+    const secs = dateSections(workdayDateWrap(el));
+    for (const s of secs) {
+      const id = s.getAttribute('data-automation-id') || '';
+      const v = /month/i.test(id) ? p.m.padStart(2, '0') : /day/i.test(id) ? p.d.padStart(2, '0') : p.y;
+      s.scrollIntoView?.({ block: 'center' });
+      s.focus();
+      s.click?.();
+      document.execCommand('selectAll', false, null);
+      if (!document.execCommand('insertText', false, v)) {
+        setNativeValue(s, v);
+        s.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: v, inputType: 'insertText' }));
+      }
+      fire(s, 'change');
+    }
+    secs[secs.length - 1]?.blur();
+    fire(secs[secs.length - 1], 'blur', 'focusout');
+    return secs.every((s) => /\d/.test(s.value));
+  }
+
   function toDateInput(v) {
     const s = String(v).trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
@@ -682,7 +743,7 @@
       try {
         switch (a.op) {
           case 'fill':
-            ok = fillText(el, value);
+            ok = el.matches('input[data-automation-id^="dateSection"]') ? fillWorkdayDate(el, value) : fillText(el, value);
             break;
           case 'select':
             if (el.dataset.abbtns) {
