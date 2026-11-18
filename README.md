@@ -7,6 +7,10 @@ The same app as the desktop version, running in the browser:
 - **PDFs:** headless Chromium (`@sparticuz/chromium` on Vercel), from the same templates as the desktop app. Windows fonts are swapped for metric-compatible Google Fonts (Calibri → Carlito, Times New Roman → Tinos, Georgia → Gelasio and so on), so line and page breaks stay close to the desktop output.
 - **AI:** Claude or OpenAI, with the editable prompts and proxy settings, all stored in Supabase.
 
+## Chrome extension v2 (half-automatic)
+
+[`extension-v2/`](extension-v2/README.md) is a standalone, server-free assistant. It has profiles for several candidates and a job feed. It writes ATS-tailored resumes through your ChatGPT or DeepSeek chat, checks them for consistency, exports PDF and Word, and fills the open application page when you press a button. You still press Next and Submit yourself. It can sync profiles and applications to this Supabase project: run [`supabase/migrations/004_extension_v2.sql`](supabase/migrations/004_extension_v2.sql) once. Its templates come from `desktop/src/templates.js` through `npm run sync`.
+
 ## Chrome auto-bid extension
 
 [`extension/`](extension/README.md) applies to Jobright jobs automatically and uses this server for AI, PDFs and saving bids. Run [`supabase/migrations/002_auto_bid.sql`](supabase/migrations/002_auto_bid.sql) once for its columns.

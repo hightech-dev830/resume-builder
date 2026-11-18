@@ -27,6 +27,13 @@ copy('src/templates.js', 'lib/shared/templates.js');
 copy('src/baseResume.js', 'lib/shared/baseResume.js');
 copy('src/prices.js', 'lib/shared/prices.js');
 
+// Chrome extension v2: the same templates as an ES module (the side panel renders and prints them)
+copy('src/templates.js', 'extension-v2/lib/templates.js', (s) => {
+  const out = s.replace(/module\.exports = \{([^}]*)\};?\s*$/, 'export {$1};\n');
+  if (out === s) throw new Error('Could not convert templates.js to an ES module');
+  return out;
+});
+
 // UI
 copy('renderer/app.js', 'public/app.js');
 copy('renderer/combobox.js', 'public/combobox.js');

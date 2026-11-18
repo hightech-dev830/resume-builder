@@ -1,0 +1,111 @@
+{
+  "name": "Sample - Jordan Avery",
+  "personal": {
+    "first_name": "Jordan",
+    "last_name": "Avery",
+    "full_name": "Jordan Avery",
+    "preferred_name": "Jordan",
+    "email": "jordan.avery@example.com",
+    "phone": "(555) 010-2030",
+    "phone_country_code": "+1",
+    "address_line1": "",
+    "city": "Denver",
+    "state": "CO",
+    "state_full": "Colorado",
+    "zip": "80202",
+    "country": "United States",
+    "current_location": "Denver, CO, United States",
+    "linkedin": "https://www.linkedin.com/in/jordan-avery-example/",
+    "github": "https://github.com/jordan-avery-example",
+    "website": "",
+    "current_title": "Senior Software Engineer",
+    "current_company": "Northwind Health",
+    "highest_degree": "Bachelor's Degree",
+    "degree_field": "Computer Science",
+    "school": "University of Colorado Boulder",
+    "graduation_year": "2014",
+    "work_authorized_us": "Yes, authorized to work for any employer in the US",
+    "needs_sponsorship": "No, now or in the future",
+    "willing_to_relocate": "No",
+    "remote_preference": "Remote",
+    "start_date": "2 weeks from offer",
+    "notice_period": "2 weeks",
+    "salary_expectation": "165000",
+    "how_heard": "LinkedIn",
+    "gender": "Decline to self-identify",
+    "race_ethnicity": "Decline to self-identify",
+    "veteran_status": "I am not a protected veteran",
+    "disability_status": "No, I do not have a disability",
+    "sms_consent": "Yes",
+    "other_info": "Willing to complete a take-home exercise: Yes. Open to occasional travel: Yes."
+  },
+  "resume": {
+    "basics": {
+      "name": "Jordan Avery",
+      "label": "Senior Software Engineer",
+      "email": "jordan.avery@example.com",
+      "phone": "(555) 010-2030",
+      "location": { "city": "Denver", "region": "CO", "countryCode": "US" },
+      "profiles": [{ "network": "LinkedIn", "url": "https://www.linkedin.com/in/jordan-avery-example/" }],
+      "summary": "Backend engineer with ten years in healthcare and e-commerce platforms. Builds Python and Go services on PostgreSQL and AWS.",
+      "highlights": []
+    },
+    "work": [
+      {
+        "name": "Northwind Health",
+        "position": "Senior Software Engineer",
+        "location": "Remote",
+        "startDate": "2021-06",
+        "endDate": "",
+        "industry": "Healthcare SaaS: patient scheduling and clinical records",
+        "stack": ["Python", "FastAPI", "Go", "PostgreSQL", "Redis", "Elasticsearch", "Kafka", "AWS", "Kubernetes", "Terraform", "GitHub Actions", "React"],
+        "description": "Scheduling and records platform used by 400 clinics.",
+        "highlights": [
+          "Built the appointment search service on Elasticsearch behind a FastAPI gateway.",
+          "Moved batch HL7 imports to Kafka consumers in Go.",
+          "Ran the migration of 30 services from EC2 to Kubernetes (EKS) with Terraform."
+        ]
+      },
+      {
+        "name": "Bluefin Commerce",
+        "position": "Software Engineer",
+        "location": "Denver, CO",
+        "startDate": "2017-03",
+        "endDate": "2021-05",
+        "industry": "E-commerce marketplace",
+        "stack": ["Python", "Django", "Celery", "PostgreSQL", "MySQL", "Redis", "RabbitMQ", "AWS", "Docker", "Jenkins", "Solr"],
+        "description": "Marketplace for independent retailers.",
+        "highlights": [
+          "Owned the product catalog API in Django and its Solr search index.",
+          "Cut checkout latency by caching pricing rules in Redis.",
+          "Wrote Celery pipelines that reconcile seller payouts nightly."
+        ]
+      },
+      {
+        "name": "Summit Analytics",
+        "position": "Junior Software Engineer",
+        "location": "Boulder, CO",
+        "startDate": "2014-07",
+        "endDate": "2017-02",
+        "industry": "Marketing analytics consultancy",
+        "stack": ["Java", "Spring", "MySQL", "JavaScript", "jQuery", "Linux"],
+        "description": "Reporting tools for retail clients.",
+        "highlights": [
+          "Built Spring reporting endpoints over MySQL.",
+          "Maintained jQuery dashboards for client reports."
+        ]
+      }
+    ],
+    "skills": [
+      { "name": "Languages", "keywords": ["Python", "Go", "Java", "SQL", "JavaScript"] },
+      { "name": "Backend", "keywords": ["FastAPI", "Django", "Celery", "Spring", "REST APIs"] },
+      { "name": "Data", "keywords": ["PostgreSQL", "MySQL", "Redis", "Elasticsearch", "Kafka"] },
+      { "name": "Cloud", "keywords": ["AWS", "Kubernetes", "Docker", "Terraform", "GitHub Actions"] }
+    ],
+    "education": [
+      { "institution": "University of Colorado Boulder", "studyType": "Bachelor's Degree", "area": "Computer Science", "startDate": "2010-08", "endDate": "2014-05" }
+    ],
+    "languages": [{ "language": "English", "fluency": "Native" }]
+  },
+  "prefs": { "template": "professional", "stackMode": "adjacent", "instructions": "" }
+}
