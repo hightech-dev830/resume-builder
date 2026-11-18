@@ -26,6 +26,16 @@ const isChoice = (f) => (f.options?.length || 0) > 0 && f.kind !== 'file';
 const isRequired = (f) => !!f.required || /[*✱]|\(required\)/i.test(`${f.label || ''} ${f.question || ''}`);
 const TEXTY = new Set(['text', 'email', 'tel', 'url', 'number', '', 'combobox', 'date']);
 
+// "C:\...\758_Self_Financial_Resume.pdf" vs "758_Self_Financial_Resume (1).pdf" shown by the site
+export function sameFile(a, b) {
+  const key = (s) => String(s || '').split(/[\\/]/).pop().toLowerCase().replace(/\s*\(\d+\)(?=\.\w+$)/, '').replace(/\.\w+$/, '').replace(/[^a-z0-9]+/g, '');
+  const [x, y] = [key(a), key(b)];
+  if (!x || !y) return false;
+  // a site that shortens long names ("758_Self_Fin….pdf") still shows the start of it
+  const cut = /…|\.\.\./.test(String(a));
+  return x === y || (cut && x.length >= 8 && y.startsWith(x));
+}
+
 export function isFilled(f) {
   if (f.kind === 'checkbox') return !!f.checked;
   if (f.kind === 'file') return !!f.value;
@@ -205,8 +215,9 @@ const findButtons = (buttons, re) => usableButtons(buttons).filter((b) => re.tes
 /**
  * @returns {{ actions, next_click, page_type, summary, askAI, aiFields, needsDocs, handled }}
  */
-export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, coverLetter = '', forceAI = false, lastClick = '' }) {
+export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, coverLetter = '', forceAI = false, lastClick = '', fileNames = {} }) {
   const actions = [];
+  let staleFile = false;
   const leftover = [];
   const locked = []; // ids of fields with a fixed answer (authorization, sponsorship, pay): the AI may not change them
   let wantsCoverText = false;
@@ -241,7 +252,14 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
 
     if (f.kind === 'file') {
       handled = true;
-      if (!filled) {
+      // the site put another file here (Greenhouse autofill adds your base resume): swap in the tailored one
+      const isCover = /cover/.test(t);
+      const isResume = !isCover && (f === realResume || /resume|\bcv\b|curriculum/.test(t));
+      const want = isCover ? fileNames.cover : isResume ? fileNames.resume : '';
+      if (filled && f.removeId && (isResume || (isCover && uploadCover))) {
+        if (!want) staleFile = true; // the tailored files are not written yet
+        else if (!sameFile(f.value, want)) act = { op: isCover ? 'upload_cover' : 'upload_resume', remove: f.removeId };
+      } else if (!filled) {
         // "Autofill from resume" (Ashby and others) re-types the form from the file, over what was filled;
         // skip it when the form has its own resume field (Workday-style pages with only an autofill upload keep it)
         if (realResume && realResume !== f && isAutofillUpload(f)) act = null;
@@ -311,7 +329,7 @@ export function rulePlan(snap, { profile: p, saved = {}, uploadCover = true, cov
     if ((f.error && !act) || (!handled && !filled && (isRequired(f) || named || codeBox)) || (named && !act) || (forceAI && !filled && !act) || vagueSuspect) leftover.push(named && !f.error ? { ...f, required: true, error: 'the form says this required answer is missing' } : f);
   }
 
-  const needsDocs = actions.some((a) => a.op.startsWith('upload')) || wantsCoverText;
+  const needsDocs = actions.some((a) => a.op.startsWith('upload')) || wantsCoverText || staleFile;
   const formish = fields.filter((f) => f.kind !== 'file').length;
   const summaryBits = [`${actions.length} filled by rules`, actions.some((a) => a.saved) && `${actions.filter((a) => a.saved).length} from saved answers`].filter(Boolean);
 

@@ -547,11 +547,29 @@ async function runLoop() {
   let passHadJobs = false;
   let pagerWarned = false;
 
+  // Jobright: the list must be sorted "Most Recent" (it often comes up "Recommended") and, with
+  // "Remote jobs only" on, filtered to Remote; checked when the bot starts and after each refresh
+  const prepareList = async () => {
+    if (site.ns !== '__abJobright') return;
+    const r = await board(site, listId, 'prepareList', { remote: !!s.filters.remoteOnly }).catch((err) => ({ error: err.message }));
+    if (!r || r.error) return log(`Could not check the Jobright list settings${r?.error ? ` (${r.error})` : ''}`, 'warn');
+    const { sort, work } = r;
+    if (sort.ok) log(sort.changed ? `  Jobright list: sort changed from "${sort.was}" to "${sort.now}"` : `  Jobright list: sorted by "${sort.now}" ✓`);
+    else log(`  Jobright list: set the sort to "Most Recent" yourself (${sort.note}; now "${sort.now || '?'}")`, 'warn');
+    if (work) {
+      if (work.ok) log(work.changed ? `  Jobright list: work model changed from "${work.was}" to "${work.now}"` : '  Jobright list: Remote only ✓');
+      else log(`  Jobright list: set the work model to "Remote" only yourself (${work.note || `now "${work.now}"`}); non-remote jobs are skipped anyway`, 'warn');
+    }
+    if (sort.changed || work?.changed) await sleep(2500); // the list reloads
+  };
+  await prepareList();
+
   const refreshList = async () => {
     log(`Refreshing the ${site.label} job list`);
     await chrome.tabs.reload(listId);
     await waitComplete(listId);
     await sleep(3000);
+    await prepareList();
     lastRefresh = Date.now();
     emptyRounds = 0;
     page = 1;
@@ -1082,6 +1100,11 @@ async function processJob(card, { listId, settings: s, site = siteOf(s), detailT
         log('  Opening the application form');
         await chrome.tabs.update(applyId, { url: formUrl });
         await g(settle(applyId));
+      } else if (/\.myworkdayjobs\.com$|\.myworkdaysite\.com$/i.test(new URL(postingUrl).host)) {
+        // Workday: step 1 is the resume + cover letter, written from the posting; then Apply,
+        // "Autofill with Resume" (it is uploaded there), "Sign in with email", Create Account, sign in
+        log('  Workday posting: writing the resume and cover letter before pressing Apply');
+        await ensureDocs();
       }
 
       // 5. fill and submit the application
@@ -1201,7 +1224,7 @@ async function snapshotTab(tabId) {
       merged.url = r.url;
       merged.title = r.title;
     }
-    merged.fields.push(...r.fields.map((f) => ({ ...f, id: pre + f.id })));
+    merged.fields.push(...r.fields.map((f) => ({ ...f, id: pre + f.id, ...(f.removeId ? { removeId: pre + f.removeId } : {}) })));
     merged.buttons.push(...r.buttons.map((b) => ({ ...b, id: pre + b.id })));
     merged.errors.push(...r.errors);
     merged.text += (r.top ? '' : `\n[frame ${new URL(r.url).host}]\n`) + r.text;
@@ -1542,7 +1565,10 @@ async function runSteps(startTabId, { job, docs, ensureDocs, settings: s, site =
     const pageKey = `${snap.url}|${snap.fields.map((f) => f.id).join(',')}|${snap.buttons.map((b) => b.text).join(',')}`;
     const forceAI = pageKey === lastRulesKey || fixedByYou;
     fixedByYou = false;
-    const ruleArgs = () => ({ profile, saved, uploadCover: s.behavior.generateCover && s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI, lastClick });
+    const ruleArgs = () => ({
+      profile, saved, uploadCover: s.behavior.generateCover && s.behavior.uploadCover, coverLetter: docs.coverLetter, forceAI, lastClick,
+      fileNames: { resume: docs.files?.resume?.name || '', cover: docs.files?.cover?.name || '' }
+    });
     const saved = await savedAnswers();
     let rp = rulePlan(snap, ruleArgs());
     // a real application form: write the tailored resume + cover letter before filling it
@@ -1667,7 +1693,7 @@ async function runSteps(startTabId, { job, docs, ensureDocs, settings: s, site =
     for (const a of plan.actions) {
       const { frameId, local } = splitId(a.id);
       ctx.check();
-      const r = await call(tabId, '__abAgent', 'act', [[{ ...a, id: local }], docs.files, secrets], { frameId }).catch((err) => [{ ok: false, note: err.message }]);
+      const r = await call(tabId, '__abAgent', 'act', [[{ ...a, id: local, ...(a.remove ? { remove: splitId(a.remove).local } : {}) }], docs.files, secrets], { frameId }).catch((err) => [{ ok: false, note: err.message }]);
       results.push({ ...a, ...(r?.[0] || {}) });
       if (a.question && a.value) answers.push({ question: a.question, answer: a.value });
     }

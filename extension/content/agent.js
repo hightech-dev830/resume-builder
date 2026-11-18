@@ -129,10 +129,43 @@
       || !!el.closest('[data-automation-id*="multiselect" i], [data-uxi-widget-type="selectinput"], [data-automation-id="searchBox"]');
   }
 
+  // Upload boxes that already show a file (Greenhouse "Autofill my application" puts your saved base
+  // resume there: "Resume/CV  Kevin_..._Resume.pdf ×"). The box is the smallest one around the input
+  // or the × button that names Resume / CV / Cover letter; the file is the name next to the × button.
+  const FILE_NAME = /[^\s/\\]+\.(pdf|docx?|rtf|txt|odt|pages)\b/i;
+  const UPLOAD_LABEL = /resume|\bcv\b|curriculum|cover letter/i;
+  function uploadBlock(el) {
+    let p = el?.parentElement;
+    for (let i = 0; i < 7 && p && p !== document.body; i++, p = p.parentElement) {
+      const t = textOf(p);
+      if (t.length > 700) break;
+      if (UPLOAD_LABEL.test(t)) return p;
+    }
+    return null;
+  }
+  function isRemoveBtn(b) {
+    if (!visible(b)) return false;
+    const t = clean(`${b.getAttribute('aria-label') || ''} ${b.getAttribute('title') || ''} ${textOf(b)}`);
+    return /^(remove|delete|clear)\b|\b(remove|delete) (file|attachment|resume|cv)\b|^[×✕✖xX]$/.test(t) || (!t && !!b.querySelector('svg'));
+  }
+  function attachedFile(block) {
+    if (!block) return null;
+    for (const b of block.querySelectorAll('button, [role="button"], a')) {
+      if (!isRemoveBtn(b)) continue;
+      for (let p = b.parentElement, i = 0; p && i < 3; p = p.parentElement, i++) {
+        const m = textOf(p).match(FILE_NAME);
+        if (m) return { name: m[0], remove: b };
+        if (p === block) break;
+      }
+    }
+    return null;
+  }
+
   function snapshot() {
     const fields = [];
     const groups = new Map();
     const dateBoxes = new Set();
+    const uploadBoxes = new Set();
 
     for (const el of deepAll('input, textarea, select, [contenteditable="true"], [role="combobox"]:not(input), button[aria-haspopup="listbox"]')) {
       const type = (el.getAttribute('type') || el.type || '').toLowerCase();
@@ -182,6 +215,17 @@
         f.hidden = !visible(el);
         f.value = el.files?.length ? [...el.files].map((x) => x.name).join(', ') : '';
         if (!f.label) f.label = textOf(el.closest('div, section, fieldset'))?.slice(0, 160);
+        // the site shows a file here that the input does not hold (put there by the site's autofill)
+        const box = uploadBlock(el);
+        if (box) {
+          uploadBoxes.add(box);
+          const shown = attachedFile(box);
+          if (shown && !f.value) {
+            f.value = shown.name;
+            f.removeId = idOf(shown.remove);
+          }
+          if (!UPLOAD_LABEL.test(f.label || '')) f.label = `${textOf(box).slice(0, 80)} ${f.label || ''}`.trim();
+        }
       } else if (el.tagName === 'SELECT') {
         f.kind = 'select';
         f.options = [...el.options].map((o) => clean(o.text)).filter(Boolean);
@@ -211,6 +255,18 @@
       const err = fieldError(el);
       if (err) f.error = err;
       fields.push(f);
+    }
+
+    // a Resume / Cover letter box that shows a file and has no file input any more: listed as a file
+    // field (its id is the × button) so the file can be swapped for the tailored one
+    for (const b of deepAll('button, [role="button"], a')) {
+      if (!isRemoveBtn(b)) continue;
+      const box = uploadBlock(b);
+      if (!box || [...uploadBoxes].some((u) => u.contains(box) || box.contains(u))) continue;
+      const shown = attachedFile(box);
+      if (!shown || shown.remove !== b) continue;
+      uploadBoxes.add(box);
+      fields.push({ id: idOf(b), kind: 'file', label: textOf(box).replace(shown.name, '').slice(0, 120), value: shown.name, removeId: idOf(b), required: /[*✱]/.test(textOf(box)) });
     }
 
     for (const [key, inputs] of groups) {
@@ -810,6 +866,23 @@
     return true;
   }
 
+  // A box that already shows another file (your base resume): press its × button, wait for the upload
+  // input to come back, and upload the tailored file there.
+  async function replaceFile(el, removeBtn, file, cover) {
+    const box = uploadBlock(removeBtn || el);
+    if (removeBtn?.isConnected) realClick(removeBtn);
+    const want = cover ? /cover letter/i : /resume|\bcv\b|curriculum/i;
+    for (let i = 0; i < 15; i++) {
+      await sleep(200);
+      let input = el?.isConnected && el.matches('input[type="file"]') ? el : null;
+      if (!input && box?.isConnected) input = box.querySelector('input[type="file"]');
+      if (!input) input = deepAll('input[type="file"]').find((x) => want.test(textOf(uploadBlock(x))));
+      // the old file is gone (or, on the last try, the input is there anyway): upload the new one
+      if (input && (!attachedFile(uploadBlock(input)) || i === 14)) return upload(input, file);
+    }
+    return false;
+  }
+
   function withSecrets(value, secrets) {
     return String(value ?? '').replace(/\{\{(\w+)\}\}/g, (m, k) => (secrets && secrets[k] != null ? secrets[k] : m));
   }
@@ -870,6 +943,7 @@
           case 'upload_cover': {
             const f = a.op === 'upload_resume' ? files?.resume : files?.cover;
             if (!f) note = 'file not available';
+            else if (a.remove) ok = await replaceFile(el, byId(a.remove), f, a.op === 'upload_cover');
             else ok = await upload(el, f);
             break;
           }
@@ -914,7 +988,14 @@
   // Longest readable block of text (used to read the full job description).
   function pageText() {
     const main = document.querySelector('main, [role="main"], article, #content, .content, #app') || document.body;
-    return { url: location.href, title: document.title, h1: textOf(document.querySelector('h1')), text: textOf(main).slice(0, 20000) };
+    // the job title: Workday's posting header, else the first heading that is not the site banner
+    // ("CAREERS AT NVIDIA", "Join our team")
+    const BANNER = /^(careers?|jobs?|join (us|our team)|work (with|at) us|search( for)? jobs)\b|\b(careers?|jobs) (at|with)\b/i;
+    const heads = [
+      document.querySelector('[data-automation-id="jobPostingHeader"]'),
+      ...document.querySelectorAll('h1, h2')
+    ].filter(Boolean).map((e) => textOf(e).trim()).filter((t) => t && t.length < 150 && !BANNER.test(t));
+    return { url: location.href, title: document.title, h1: heads[0] || '', text: textOf(main).slice(0, 20000) };
   }
 
   // Waits while the page shows a file upload in progress ("Uploading…", "Parsing resume…", a busy

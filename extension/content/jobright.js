@@ -202,5 +202,114 @@
     return false;
   }
 
-  window.__abJobright = { scrapeList, loadMore, openCard, scrapeDetail, clickApply, confirmApplied };
+  // ---------- list settings: sort by "Most Recent", work model "Remote" only ----------
+
+  // a real mouse press (the site's dropdowns open on mousedown, not on click)
+  function press(el) {
+    const r = el.getBoundingClientRect();
+    const o = { bubbles: true, cancelable: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+    el.dispatchEvent(new PointerEvent('pointerdown', o));
+    el.dispatchEvent(new MouseEvent('mousedown', o));
+    el.dispatchEvent(new PointerEvent('pointerup', o));
+    el.dispatchEvent(new MouseEvent('mouseup', o));
+    el.dispatchEvent(new MouseEvent('click', o));
+  }
+  let cardsNow = [];
+  const inCard = (el) => !!el.closest('[data-abcard]') || cardsNow.some((c) => c.contains(el));
+  // the "Recommended / Liked / Applied / External" tabs at the top are not the sort box
+  const inTabs = (el) => {
+    for (let p = el.parentElement, i = 0; p && i < 4; p = p.parentElement, i++) if (/\bliked\b/i.test(textOf(p)) && /\bapplied\b/i.test(textOf(p))) return true;
+    return !!el.closest('a, [role="tab"], [role="tablist"], nav');
+  };
+  // the smallest visible element showing exactly this text, outside the job boxes
+  const exact = (re, scope = document) => (cardsNow = cardElements(), [...scope.querySelectorAll('div, span, button, li, label, p, [role="option"], [role="menuitem"], [role="combobox"]')]
+    .filter((el) => visible(el) && re.test(textOf(el)) && !inCard(el))
+    .filter((el, _, all) => !all.some((o) => o !== el && el.contains(o))));
+
+  const SORT_NAMES = /^(recommended|most recent|newest|top match(ed|es)?|best match(es)?|most relevant|relevance)$/i;
+  function sortBox() {
+    const hits = exact(SORT_NAMES).filter((el) => !inTabs(el) && el.getBoundingClientRect().top < 450);
+    const el = hits[0];
+    if (!el) return null;
+    // press the select itself, not just its label
+    return el.closest('[role="combobox"], [class*="select" i], [class*="dropdown" i], button') || el;
+  }
+
+  async function ensureSort() {
+    let box = sortBox();
+    if (!box) return { ok: false, now: '', note: 'sort box not found' };
+    const before = textOf(box);
+    if (/most recent|newest/i.test(before)) return { ok: true, now: before, changed: false };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      press(box);
+      let opt = null;
+      for (let i = 0; i < 10 && !opt; i++) {
+        await sleep(250);
+        opt = exact(/^(most recent|newest)$/i).find((o) => !box.contains(o));
+      }
+      if (!opt) continue;
+      press(opt.closest('[role="option"], [role="menuitem"], li, [class*="item" i]') || opt);
+      await sleep(1500);
+      box = sortBox() || box;
+      if (/most recent|newest/i.test(textOf(box))) return { ok: true, now: textOf(box), was: before, changed: true };
+    }
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return { ok: false, now: textOf(sortBox() || box), was: before, note: 'could not pick "Most Recent"' };
+  }
+
+  // the work-model filter button in the filter bar: "Remote", "Remote (+1)", "Onsite", "Hybrid (+2)", "Work Model"
+  const WORK = /^(remote|onsite|on-site|hybrid|work model|work type|workplace)(\s*\(\+\d+\))?\s*▾?$/i;
+  function workBox() {
+    const el = exact(WORK).find((e) => !inTabs(e) && e.getBoundingClientRect().top < 450);
+    return el ? el.closest('button, [role="button"], [role="combobox"], [class*="select" i], [class*="filter" i]') || el : null;
+  }
+  const isOn = (el) => {
+    const input = el.querySelector('input[type="checkbox"], input[type="radio"]') || el.closest('label')?.querySelector('input');
+    if (input) return input.checked;
+    for (const n of [el, el.parentElement, el.firstElementChild].filter(Boolean)) {
+      if (['aria-checked', 'aria-selected', 'data-checked', 'data-selected'].some((a) => n.getAttribute(a) === 'true')) return true;
+      if (/(^|[\s_-])(checked|selected|active)(?![a-z])/i.test(typeof n.className === 'string' ? n.className : '')) return true;
+    }
+    return false;
+  };
+
+  async function ensureRemote() {
+    let box = workBox();
+    if (!box) return { ok: false, now: '', note: 'work-model filter not found' };
+    const before = textOf(box);
+    if (/^remote\s*▾?$/i.test(before)) return { ok: true, now: before, changed: false };
+    press(box);
+    await sleep(700);
+    const opts = exact(/^(remote|onsite|on-site|hybrid)$/i).filter((o) => !box.contains(o));
+    if (!opts.length) {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { ok: false, now: before, note: 'work-model choices not found' };
+    }
+    for (const o of opts) {
+      const want = /^remote$/i.test(textOf(o));
+      const row = o.closest('label, li, [role="option"], [role="menuitemcheckbox"], [class*="item" i], [class*="option" i]') || o;
+      if (isOn(row) !== want) {
+        press(row);
+        await sleep(300);
+      }
+    }
+    // a confirm button in the menu, else close it
+    const ok = exact(/^(apply|confirm|done|save|ok|show (\d+ )?(results|jobs)|update)$/i)[0];
+    if (ok) press(ok);
+    else {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      press(document.body);
+    }
+    await sleep(1500);
+    box = workBox() || box;
+    return { ok: /^remote\s*▾?$/i.test(textOf(box)), now: textOf(box), was: before, changed: true };
+  }
+
+  async function prepareList({ remote = true } = {}) {
+    const sort = await ensureSort();
+    const work = remote ? await ensureRemote() : null;
+    return { sort, work };
+  }
+
+  window.__abJobright = { scrapeList, loadMore, openCard, scrapeDetail, clickApply, confirmApplied, prepareList };
 })();
