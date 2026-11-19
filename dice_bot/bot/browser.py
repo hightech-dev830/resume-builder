@@ -23,14 +23,19 @@ class Browser:
         self._pw = self._pw or sync_playwright().start()
         BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
         try:
+            # "chromium" = Playwright's own browser (python -m playwright install chromium), for servers without Chrome
+            channel = None if self.channel in ("chromium", "", None) else self.channel
             self.ctx = self._pw.chromium.launch_persistent_context(
-                str(BROWSER_PROFILE), channel=self.channel, headless=False, no_viewport=True,
+                str(BROWSER_PROFILE), channel=channel, headless=False, no_viewport=True,
                 args=["--start-maximized", "--disable-blink-features=AutomationControlled"],
                 ignore_default_args=["--enable-automation"], accept_downloads=True,
             )
         except Exception as e:
             if "Executable doesn't exist" in str(e) or "not found" in str(e).lower():
-                raise RuntimeError(f"Google Chrome was not found (channel '{self.channel}'). Install Chrome or set the browser to msedge in Settings.")
+                raise RuntimeError(f"The browser '{self.channel}' was not found. Install Google Chrome, or run "
+                                   "'python -m playwright install chromium' and choose Chromium as the browser in Settings.")
+            if "display" in str(e).lower() or "xserver" in str(e).lower():
+                raise RuntimeError("No screen to open the browser on. On a Linux server, run the bot inside a desktop session (see README: Running on a server).")
             if "user data directory is already in use" in str(e).lower() or "ProcessSingleton" in str(e):
                 raise RuntimeError("The bot's browser is already open in another window. Close it and try again.")
             raise

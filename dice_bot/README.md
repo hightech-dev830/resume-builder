@@ -52,6 +52,28 @@ Press **Start**. For each card on `dice.com/recommended-jobs` (page 1, 2, …), 
 | `bot/browser.py`, `bot/worker.py` | the bot's Chrome window and the background thread |
 | `tools/make_icon.mjs` | draws `assets/icon.png` / `icon.ico` |
 
+## Running on a server (EC2)
+
+The bot shows a window and a real browser where you sign in to Dice, so the server needs a desktop:
+
+- **Windows Server:** connect with Remote Desktop and follow *Setup* as on a PC.
+- **Linux (Ubuntu):** install a desktop and connect with Remote Desktop:
+  ```
+  sudo apt update && sudo apt install -y xfce4 xrdp python3-tk python3-venv
+  echo xfce4-session > ~/.xsession && sudo systemctl enable --now xrdp
+  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs
+  ```
+  - Open port 3389 in the EC2 security group, for your IP only, and set a password for your user (`sudo passwd ubuntu`).
+  - Connect with Remote Desktop, open a terminal in that desktop, then run:
+  ```
+  cd resume-builder/dice_bot && python3 -m venv .venv && . .venv/bin/activate
+  pip install -r requirements.txt && python -m playwright install --with-deps chromium
+  python doctor.py && python app.py
+  ```
+  - In the app, choose **Settings → Browser → Chromium (Playwright)**.
+
+Copy the **whole** `resume-builder` folder to the server, not only `dice_bot`, because the resume engine lives in `extension-v2`. Also copy `.env`, for Supabase. **`python doctor.py`** lists anything that is still missing.
+
 ## When something goes wrong
 
 - Failures save a screenshot and the page HTML in `data/debug/`. Dice changes its pages from time to time, and these files show which lookup in `bot/dice.py` needs updating.

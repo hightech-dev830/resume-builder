@@ -274,7 +274,7 @@ class App(tk.Tk):
         g = group("Supabase and browser")
         row(g, 0, "supabase_url", "Supabase URL", hint="from the repo's .env by default")
         row(g, 1, "supabase_key", "Supabase secret key", "secret")
-        row(g, 2, "chrome_channel", "Browser", "combo", labels={"chrome": "Google Chrome", "msedge": "Microsoft Edge"})
+        row(g, 2, "chrome_channel", "Browser", "combo", labels={"chrome": "Google Chrome", "msedge": "Microsoft Edge", "chromium": "Chromium (Playwright)"})
 
         ttk.Button(inner, text="Save settings", style="Accent.TButton", command=self._collect_settings).pack(anchor="w", padx=4, pady=10)
         self._show_profile()
@@ -425,4 +425,18 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    try:
+        App().mainloop()
+    except Exception:
+        # pythonw has no console: write the error down and show it, instead of closing silently
+        import traceback
+        err = traceback.format_exc()
+        config.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        (config.LOG_DIR / "crash.log").write_text(err, encoding="utf-8")
+        try:
+            r = tk.Tk()
+            r.withdraw()
+            messagebox.showerror(config.APP_NAME, f"Dice Auto Bid could not start:\n\n{err[-1500:]}\n\nSaved in data\\logs\\crash.log")
+        except Exception:
+            pass
+        raise
