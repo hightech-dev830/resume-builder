@@ -258,30 +258,68 @@ def apply_button(page):
     return None
 
 
-def open_wizard(page, ctx, timeout: float = 20):
-    """Clicks Apply on a job page. Returns the page showing the Dice wizard, or raises External / ApplyError."""
+def wizard_url(job_id: str) -> str:
+    # Dice's Easy Apply wizard lives at /job-applications/<job id>/wizard (the same id as /job-detail/<id>)
+    return f"https://www.dice.com/job-applications/{job_id}/wizard"
+
+
+def _wizard_tab(ctx, job_id: str):
+    for p in ctx.pages:
+        try:
+            if "/job-applications/" in p.url and (not job_id or job_id in p.url):
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _is_wizard(page) -> bool:
+    try:
+        return "/job-applications/" in page.url and page.get_by_text(re.compile(r"(you'?re applying for|resume)", re.I)).count() > 0
+    except Exception:
+        return False
+
+
+def open_wizard(page, ctx, job_id: str = "", timeout: float = 15):
+    """Clicks Apply on a job page and returns the tab with the Dice wizard (same tab or a new one).
+    If the click opens nothing Dice-like, opens the wizard's address directly. Raises External / ApplyError."""
     btn = apply_button(page)
     if not btn:
         raise ApplyError("no Apply button on the job page")
-    before = set(ctx.pages)
-    btn.scroll_into_view_if_needed()
-    btn.click()
+    before = {id(p) for p in ctx.pages}
+    try:
+        btn.scroll_into_view_if_needed(timeout=5000)
+        btn.click(timeout=8000)
+    except Exception:
+        pass  # covered or hidden button: the direct address below still works
     end = time.time() + timeout
     while time.time() < end:
+        w = _wizard_tab(ctx, job_id)
+        if w:
+            w.wait_for_load_state("domcontentloaded")
+            w.bring_to_front()
+            return w
         for p in ctx.pages:
-            if p in before and p is not page:
+            if id(p) in before:
                 continue
             try:
                 u = p.url
             except Exception:
                 continue
-            if "/job-applications/" in u or "/apply" in u and "dice.com" in u:
-                p.wait_for_load_state("domcontentloaded")
-                return p
-            if p not in before and p.url not in ("about:blank", "") and "dice.com" not in u:
+            if u and u != "about:blank" and "dice.com" not in u:
                 raise External(u, p)
         time.sleep(0.4)
-    raise ApplyError("the Dice application wizard did not open")
+    if not job_id:
+        raise ApplyError("the Dice application wizard did not open")
+    # the click did nothing we could see: go to the wizard's address
+    page.goto(wizard_url(job_id), wait_until="domcontentloaded", timeout=60000)
+    for _ in range(30):
+        if _is_wizard(page):
+            return page
+        if "/job-applications/" not in page.url and "dice.com" in page.url and time.time() > end + 5:
+            break
+        time.sleep(0.5)
+    raise ApplyError(f"the Dice application wizard did not open (ended on {page.url})")
 
 
 class ApplyError(RuntimeError):
@@ -297,7 +335,15 @@ class External(RuntimeError):
 _CARD_JS = r"""
 ([label, mark]) => {
   const rx = new RegExp('^\\s*' + label + '\\s*\\*?\\s*$', 'i');
-  const head = [...document.querySelectorAll('body *')].find((el) => {
+  // every element, also inside web components (open shadow roots)
+  const all = [];
+  (function walk(root) {
+    for (const el of root.querySelectorAll('*')) {
+      all.push(el);
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  })(document);
+  const head = all.find((el) => {
     const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim();
     return (rx.test(own) || (el.children.length === 0 && rx.test(el.textContent))) && el.offsetParent !== null;
   });
@@ -307,7 +353,7 @@ _CARD_JS = r"""
     box = box.parentElement;
     if (box.querySelector('button, [role="button"], input[type="file"]') || /upload/i.test(box.innerText)) break;
   }
-  document.querySelectorAll(`[data-dab="${mark}"]`).forEach((e) => e.removeAttribute('data-dab'));
+  all.filter((e) => e.getAttribute && e.getAttribute('data-dab') === mark).forEach((e) => e.removeAttribute('data-dab'));
   box.setAttribute('data-dab', mark);
   const t = box.innerText || '';
   const file = (t.match(/[^\s\\/]+\.(docx?|pdf|txt|rtf)\b/i) || [])[0] || '';
@@ -316,45 +362,126 @@ _CARD_JS = r"""
 """
 
 
+_MENU_JS = r"""
+(mark) => {
+  // the "…" opener inside the section: a button, or any small clickable icon (Dice draws it as an SVG),
+  // marked rightmost first so the bot can try them in turn
+  let card = null;
+  (function walk(root) {
+    for (const el of root.querySelectorAll('*')) {
+      if (el.getAttribute('data-dab') === mark) card = el;
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  })(document);
+  if (!card) return 0;
+  const cands = [...card.querySelectorAll('button, [role="button"], [aria-haspopup], [tabindex], a, span, div, svg')].filter((el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 6 || r.height < 6 || r.width > 90 || r.height > 90) return false;
+    const t = (el.innerText || el.textContent || '').trim();
+    const cls = typeof el.className === 'string' ? el.className : (el.className && el.className.baseVal) || '';
+    const lab = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.getAttribute('data-testid') || ''} ${cls}`;
+    if (/^(\.\.\.|…|•••|⋯|⋮|···)$/.test(t)) return true;
+    if (/\b(more|options?|menu|actions?|kebab|ellipsis|dots|overflow)\b/i.test(lab)) return true;
+    return !t && (el.tagName === 'svg' || el.querySelector('svg')) && (el.matches('button, [role="button"], [tabindex], [aria-haspopup]') || el.tagName === 'svg');
+  });
+  // outermost clickable first among overlapping ones, rightmost first overall
+  const uniq = cands.filter((el) => !cands.some((o) => o !== el && o.contains(el) && o.matches('button, [role="button"], [tabindex], [aria-haspopup]')));
+  uniq.sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right);
+  document.querySelectorAll('[data-dab-menu]').forEach((e) => e.removeAttribute('data-dab-menu'));
+  uniq.forEach((el, i) => el.setAttribute('data-dab-menu', String(i)));
+  return uniq.length;
+}
+"""
+
+REPLACE_RX = re.compile(r"^\s*(replace|replace (resume|file|cover letter)|upload (a )?new( resume| file)?|change)\s*$", re.I)
+
+
+def _shows(page, name: str, timeout: float) -> bool:
+    try:
+        page.get_by_text(name).first.wait_for(timeout=timeout * 1000)
+        return True
+    except Exception:
+        return False
+
+
+def _set_via_chooser(page, click, path) -> bool:
+    try:
+        with page.expect_file_chooser(timeout=6000) as fc:
+            click()
+        fc.value.set_files(path)
+        return True
+    except Exception:
+        return False
+
+
 def _upload_into(page, label: str, mark: str, path: str, log) -> None:
+    """Puts our file into the wizard's Resume / Cover letter section, whatever is preloaded there.
+    Tries, in order: the section's own file input; the "…" menu -> Replace; the upload area; any file input."""
     from pathlib import Path
     name = Path(path).name
     info = page.evaluate(_CARD_JS, [label, mark])
     if info is None:
         raise ApplyError(f"no '{label}' section in the wizard")
     card = page.locator(f'[data-dab="{mark}"]')
-    if info["file"] and info["file"] == name:
+    if info["file"] == name:
         log(f"  {label}: {name} is already there")
         return
-    done = False
+    old = info["file"]
+    how = ""
+
+    # 1. a file input inside the section (often hidden behind the Replace / Upload buttons)
     try:
-        if info["file"]:
-            # an earlier file is preloaded: "…" menu -> Replace
-            menu = card.locator('button, [role="button"]').last
-            menu.click()
-            with page.expect_file_chooser(timeout=8000) as fc:
-                page.get_by_text(re.compile(r"^\s*Replace\s*$", re.I)).first.click()
-            fc.value.set_files(path)
-            log(f"  {label}: replaced {info['file']} with {name}")
-        else:
-            with page.expect_file_chooser(timeout=8000) as fc:
-                card.get_by_text(re.compile(r"upload", re.I)).first.click()
-            fc.value.set_files(path)
-            log(f"  {label}: uploaded {name}")
-        done = True
-    except Exception as e:
-        log(f"  {label}: file dialog route failed ({str(e)[:80]}); setting the file input directly", "warn")
-    if not done:
         inp = card.locator('input[type="file"]')
-        if not inp.count():
-            raise ApplyError(f"could not upload the {label.lower()}")
-        inp.first.set_input_files(path)
-    # wait for the new file name to show (anywhere: the page may redraw the section after an upload)
-    try:
-        page.get_by_text(name).first.wait_for(timeout=25000)
+        if inp.count():
+            inp.first.set_input_files(path)
+            if _shows(page, name, 8):
+                how = "file input"
     except Exception:
-        if name not in (page.evaluate(_CARD_JS, [label, mark]) or {}).get("text", ""):
-            raise ApplyError(f"the {label.lower()} upload did not show {name}")
+        pass
+
+    # 2. a preloaded file: open the "…" menu, then Replace
+    if not how and old:
+        n = page.evaluate(_MENU_JS, mark)
+        for i in range(min(n, 8)):
+            try:
+                page.locator(f'[data-dab-menu="{i}"]').first.click(timeout=3000)
+            except Exception:
+                continue
+            page.wait_for_timeout(600)
+            rep = page.get_by_text(REPLACE_RX)
+            if not rep.count() or not rep.first.is_visible():
+                page.keyboard.press("Escape")
+                continue
+            if _set_via_chooser(page, lambda: rep.first.click(), path) and _shows(page, name, 20):
+                how = "… menu → Replace"
+                break
+            # Replace may only reveal a file input
+            inp = page.locator('input[type="file"]')
+            if inp.count():
+                inp.last.set_input_files(path)
+                if _shows(page, name, 15):
+                    how = "… menu → Replace (input)"
+                    break
+        if not how:
+            log(f"  {label}: tried {n} possible '…' buttons, none opened a Replace option", "warn")
+
+    # 3. an empty section: the upload area
+    if not how:
+        area = card.get_by_text(re.compile(r"upload|browse|choose (a )?file|drag", re.I))
+        if area.count() and _set_via_chooser(page, lambda: area.first.click(), path) and _shows(page, name, 20):
+            how = "upload area"
+
+    # 4. last resort: the page's file inputs, the resume first and the cover letter second
+    if not how:
+        inputs = page.locator('input[type="file"]')
+        k = 0 if label.lower().startswith("resume") else inputs.count() - 1
+        if inputs.count():
+            inputs.nth(max(k, 0)).set_input_files(path)
+            if _shows(page, name, 15):
+                how = "page file input"
+    if not how:
+        raise ApplyError(f"could not put {name} into the {label.lower()} section (see the debug screenshot)")
+    log(f"  {label}: {'replaced ' + old + ' with ' if old else 'uploaded '}{name} ({how})")
 
 
 def click_named(page, name_rx, timeout=8000):

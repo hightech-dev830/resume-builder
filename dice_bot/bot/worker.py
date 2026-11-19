@@ -61,8 +61,14 @@ class Worker(threading.Thread):
                 self.events.put(("idle",))
 
     def _browser(self, settings) -> Browser:
+        channel = settings.get("chrome_channel") or "attach"
+        port = int(settings.get("cdp_port") or 9222)
+        # a different browser chosen in Settings: let go of the old one first
+        if self.browser and (self.browser.channel != channel or self.browser.port != port):
+            self.browser.close()
+            self.browser = None
         if not self.browser:
-            self.browser = Browser(settings.get("chrome_channel") or "chrome")
+            self.browser = Browser(channel, port)
         return self.browser.start()
 
     # ---------- commands ----------
@@ -70,7 +76,11 @@ class Worker(threading.Thread):
         b = self._browser(settings)
         p = b.page("https://www.dice.com/recommended-jobs")
         p.bring_to_front()
-        self.ui.log("Browser open. Sign in to Dice there (and to chat.deepseek.com if you use DeepSeek chat). The sign-ins are kept for next time.", "ok")
+        if b.attached:
+            self.ui.log(f"Connected to your Chrome window (debug port {b.port}). Sign in to Dice there (and DeepSeek / other sites you need) once; "
+                        "keep that window open and use it normally. Closing the bot leaves it open.", "ok")
+        else:
+            self.ui.log("Browser open. Sign in to Dice there (and to chat.deepseek.com if you use DeepSeek chat). The sign-ins are kept for next time.", "ok")
 
     def _start(self, settings):
         self.stop.clear()

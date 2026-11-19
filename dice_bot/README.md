@@ -13,7 +13,11 @@ A Python bot with a small window. It applies to **remote** jobs from your Dice *
    - **Posted within (days):** 1 = today (24 h), 2 = today and yesterday, and so on.
    - **Daily limit**, **Limit per Start**, **Pause between jobs:** these keep your Dice account safe.
    - **Supabase:** read from the repo's `.env`, so it is normally already filled in.
-4. **Run → Open browser.** This opens the bot's own Chrome window. Sign in to **Dice** there, and to **chat.deepseek.com** if you use DeepSeek chat. The sign-ins are kept in `data/browser-profile`.
+4. **Run → Open browser.**
+   - With **Settings → Browser → My Chrome window (attach)**, the default, this opens a normal Chrome window with a debug port (you can also start it with **`start_chrome.bat`**).
+   - Sign in there once to **Dice**, **chat.deepseek.com**, and anything else you need. Keep that window open and use it like your usual Chrome; the bot works in its own tabs, and closing the bot leaves the window open.
+   - The window has its own profile (`data/chrome-profile`). Chrome (since version 136) does not allow a debug port on your main profile, so your everyday Chrome profile itself cannot be used.
+   - The port only listens on this PC (127.0.0.1).
 
 ## How a run goes
 

@@ -67,11 +67,20 @@ def head_meta(key, loc):
     return f"<p>{loc} • Posted today • Updated 1 hour ago</p><div><span>Full Time</span><span>{tag}</span></div>"
 
 
+def apply_js(key):
+    url = f"/job-applications/{IDS[key]}/wizard"
+    if key == "good":
+        return f"window.open('{url}', '_blank')"   # real Dice: the wizard opens in a new tab
+    if key == "nobullet":
+        return "void 0"                              # a click that does nothing visible: the bot must go to the address itself
+    return f"location.href='{url}'"
+
+
 def job_page(key: str) -> str:
     _, co, t, loc, when = next(c for c in CARDS if c[0] == key)
     jd = JD + ("\nThis role is hybrid: 3 days per week in our Boston office." if key == "hybrid" else "")
     return f"""<html><body><main><div class="hdr"><a href="/company-profile/x">{co}</a><button>save</button>
-    <button onclick="location.href='/job-applications/{IDS[key]}/wizard'">Apply</button>
+    <button onclick="{apply_js(key)}">Apply</button>
     <h1>{t}</h1>{head_meta(key, loc)}</div>
     <section><h2>Job Details</h2><p>{jd.replace(chr(10), '<br>')}</p></section><aside><h2>Similar Jobs</h2></aside></main></body></html>"""
 
@@ -79,7 +88,7 @@ def job_page(key: str) -> str:
 def wizard_page(key: str) -> str:
     _, co, t, *_ = next(c for c in CARDS if c[0] == key)
     return """<html><body><p>You're Applying for</p><h3>%s</h3><p>@ %s in Remote</p><div id="app"></div>
-<input type="file" id="rf" hidden><input type="file" id="cf" hidden>
+<input type="file" id="rf" hidden style="display:none"><input type="file" id="cf" hidden>
 <script>
 const KEY = %s; let resume = KEY === 'good' || KEY === 'extra' ? 'Zachary_Mosley_AI_Software_Engineer_Resume.docx' : '';
 let cover = '', step = 1, answer = '';
@@ -88,7 +97,7 @@ rf.onchange = () => { resume = rf.files[0].name; render(); };
 cf.onchange = () => { cover = cf.files[0].name; render(); };
 function render() {
   if (step === 1) app.innerHTML = `<p>Step 1 of 2</p><h2>Resume &amp; Cover Letter</h2>
-    <div class="box"><div>Resume *</div>${resume ? `<div><span>${resume}</span><button id="menu" aria-label="Resume options">…</button>
+    <div class="box"><div>Resume *</div>${resume ? `<div><span>${resume}</span><div id="menu" class="icon-wrap" style="display:inline-block;width:24px;height:24px;cursor:pointer"><svg width="20" height="6" viewBox="0 0 20 6"><circle cx="3" cy="3" r="2"/><circle cx="10" cy="3" r="2"/><circle cx="17" cy="3" r="2"/></svg></div>
       <div id="mn" hidden><div id="rep">Replace</div><div>Delete</div></div></div><div>Uploaded to profile on 11/17/2026</div>`
       : `<div class="drop" id="rdrop">Upload your resume</div>`}</div>
     <div class="box"><div><span>Cover letter</span><i>Optional</i></div>${cover ? `<span>${cover}</span>` : '<div class="drop" id="cdrop">Upload your cover letter</div>'}
@@ -100,7 +109,8 @@ function render() {
   else app.innerHTML = '<h2>Application submitted!</h2><p>Your application was sent to the employer.</p>';
   const $ = (id) => document.getElementById(id);
   if ($('menu')) $('menu').onclick = () => { $('mn').hidden = false; };
-  if ($('rep')) $('rep').onclick = () => rf.click();
+  if ($('rep')) $('rep').onclick = () => { const i = document.createElement('input'); i.type = 'file'; i.hidden = true;
+    i.onchange = () => { resume = i.files[0].name; render(); }; document.body.appendChild(i); i.click(); };
   if ($('rdrop')) $('rdrop').onclick = () => rf.click();
   if ($('cdrop')) $('cdrop').onclick = () => cf.click();
   if ($('next')) $('next').onclick = () => { if (step === 1 && !resume) return; step = step === 1 && KEY === 'extra' ? 2 : 3; render(); };
@@ -225,12 +235,14 @@ def main() -> int:
         fails += 0 if ok else 1
 
     print("\nChecks")
-    check(results.get("good", {}).get("status") == "applied", f"preloaded resume replaced and submitted: {results.get('good', {}).get('why')}")
+    check(results.get("good", {}).get("status") == "applied", f"wizard in a NEW TAB, SVG '…' menu -> Replace, submitted: {results.get('good', {}).get('why')}")
+    reps = [t for _, t in ui.lines if "replaced Zachary" in t]
+    check(bool(reps) and all("menu" in t for t in reps), f"preloaded resume swapped through the '…' menu: {reps[:1]}")
     check(results.get("fresh", {}).get("status") == "applied", f"empty resume slot uploaded and submitted: {results.get('fresh', {}).get('why')}")
     check(results.get("hybrid", {}).get("status") == "skipped" and "not remote" in results["hybrid"]["why"], f"hybrid JD skipped on the job page: {results.get('hybrid', {}).get('why')}")
     check(results.get("onsite", {}).get("status") == "skipped" and "on-site" in results["onsite"]["why"], f"Austin (tagged On-site) skipped on the job page: {results.get('onsite', {}).get('why')}")
     check("old" not in results and "hybridtitle" not in results, "5-days-old card and '(Hybrid)' title skipped on the list")
-    check(results.get("nobullet", {}).get("status") == "applied", f"card with location/date in separate elements (no '•'): {results.get('nobullet', {}).get('why')}")
+    check(results.get("nobullet", {}).get("status") == "applied", f"card without '•' + Apply button that does nothing -> wizard opened by address: {results.get('nobullet', {}).get('why')}")
     check(results.get("nodate", {}).get("status") == "applied", f"card without a date, job page 'Updated 10 hours ago': {results.get('nodate', {}).get('why')}")
     check(not any("no location" in t for _, t in ui.lines), "no 'no location' skips")
     skips = [t for lvl, t in ui.lines if "skip " in t]

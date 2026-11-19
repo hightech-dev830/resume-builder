@@ -198,7 +198,7 @@ class Run:
             self.ui.job(row)
             self.work.bring_to_front()
             try:
-                wiz = dice.open_wizard(self.work, self.browser.ctx)
+                wiz = dice.open_wizard(self.work, self.browser.ctx, card["id"])
             except dice.External as e:
                 try:
                     e.page.close()

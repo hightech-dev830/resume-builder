@@ -274,7 +274,9 @@ class App(tk.Tk):
         g = group("Supabase and browser")
         row(g, 0, "supabase_url", "Supabase URL", hint="from the repo's .env by default")
         row(g, 1, "supabase_key", "Supabase secret key", "secret")
-        row(g, 2, "chrome_channel", "Browser", "combo", labels={"chrome": "Google Chrome", "msedge": "Microsoft Edge", "chromium": "Chromium (Playwright)"})
+        row(g, 2, "chrome_channel", "Browser", "combo", labels={"attach": "My Chrome window (attach, recommended)", "chrome": "Google Chrome (bot's own window)",
+                                                                  "msedge": "Microsoft Edge (bot's own window)", "chromium": "Chromium (downloaded by the bot)"})
+        row(g, 3, "cdp_port", "Chrome debug port", "spin", "attach mode: the port of the Chrome window (start_chrome.bat uses 9222)", lo=1024, hi=65000)
 
         ttk.Button(inner, text="Save settings", style="Accent.TButton", command=self._collect_settings).pack(anchor="w", padx=4, pady=10)
         self._show_profile()

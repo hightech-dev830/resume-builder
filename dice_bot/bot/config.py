@@ -45,7 +45,8 @@ DEFAULTS: dict = {
     "keep_chat_tab": True,
     "supabase_url": "",
     "supabase_key": "",
-    "chrome_channel": "chrome",          # chrome | msedge
+    "chrome_channel": "attach",          # attach (your Chrome window with a debug port) | chrome | msedge | chromium
+    "cdp_port": 9222,                    # attach mode: Chrome's debug port (only reachable from this PC)
 }
 
 
