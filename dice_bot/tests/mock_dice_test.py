@@ -26,15 +26,27 @@ IDS = {
     "old": "11111111-aaaa-4bbb-8ccc-000000000004",       # posted 5 days ago -> skipped on the card
     "extra": "11111111-aaaa-4bbb-8ccc-000000000005",     # wizard asks an extra question the rules cannot answer -> needs you
     "fresh": "11111111-aaaa-4bbb-8ccc-000000000006",     # no preloaded resume (upload area) -> applied
+    "nobullet": "11111111-aaaa-4bbb-8ccc-000000000007",  # like real Dice: location and date in separate elements, the dot drawn with CSS -> applied
+    "hybridtitle": "11111111-aaaa-4bbb-8ccc-000000000008",  # "(Hybrid)" in the title -> skipped on the card
+    "nodate": "11111111-aaaa-4bbb-8ccc-000000000009",    # no date on the card; job page "Posted 60+ days ago • Updated 10 hours ago" -> applied
 }
 CARDS = [("good", "Edgewater Federal Solutions, Inc.", "Full-Stack Platform Engineer", "Remote", "Today"),
          ("hybrid", "Motional", "Senior Full Stack Engineer, Data Mining", "Remote or Boston, Massachusetts", "Today"),
          ("onsite", "Acme", "Backend Engineer", "Austin, TX", "Today"),
          ("old", "Aledade Inc.", "Senior Software Engineer I- Fullstack", "Remote", "5 days ago"),
          ("extra", "Culmen International LLC", "Sr. Full-Stack Engineer", "Remote", "Today"),
-         ("fresh", "Atlassian Inc.", "Senior Fullstack Software Engineer, DX", "Remote", "Yesterday")]
+         ("fresh", "Atlassian Inc.", "Senior Fullstack Software Engineer, DX", "Remote", "Yesterday"),
+         ("nobullet", "UnitedHealth Group", "Senior Software Engineer - Remote", "Remote", "Today"),
+         ("hybridtitle", "CrowdStrike, Inc.", "Sr. Software Engineer - Sensor, macOS (Hybrid)", "Remote", "Today"),
+         ("nodate", "Toast", "Senior Software Engineer, Release Engineering", "Remote", "")]
 JD = ("About the role\nWe build developer platforms.\nWhat we're looking for\n- 7+ years of backend development in Python or Go\n"
       "- React, PostgreSQL, Kafka, AWS, Kubernetes\n- Elasticsearch search\n" + "We are a fully remote team across the US. " * 12)
+
+
+def meta(k, loc, when):
+    if k in ("nobullet", "hybridtitle", "nodate"):  # real Dice: separate elements, the dot is CSS (not in the text)
+        return f'<div class="meta"><span>{loc}</span><span class="dot"></span>{f"<span>{when}</span>" if when else ""}</div>'
+    return f"<div>{loc} • {when}</div>"
 
 
 def list_page(page_no: int) -> str:
@@ -42,8 +54,17 @@ def list_page(page_no: int) -> str:
         return "<html><body><h2>No more recommendations</h2></body></html>"
     cards = "".join(f"""<div class="card"><div class="top"><a href="/company/x">{co}</a><button>save</button>
       <a class="btn" href="/job-detail/{IDS[k]}">Apply Now</a></div><a href="/job-detail/{IDS[k]}"><h5>{t}</h5></a>
-      <div>{loc} • {when}</div><div><span>Full-time</span><span>USD 150,000.00 - 190,000.00 per year</span></div></div>""" for k, co, t, loc, when in CARDS)
+      {meta(k, loc, when)}<div><span>Full-time</span><span>USD 150,000.00 - 190,000.00 per year</span></div></div>""" for k, co, t, loc, when in CARDS)
     return f"<html><body><h2>164 jobs recommended for you</h2>{cards}</body></html>"
+
+
+def head_meta(key, loc):
+    tag = "On-site" if key == "onsite" else "Remote"
+    if key == "nodate":
+        return f"<p>{loc} in San Francisco, CA, US • Posted 60+ days ago • Updated 10 hours ago</p><div><span>Full Time</span><span>{tag}</span></div>"
+    if key == "nobullet":
+        return f'<p><span>{loc}</span><span class="dot"></span><span>Posted today</span></p><div><span>Full Time</span><span>{tag}</span></div>'
+    return f"<p>{loc} • Posted today • Updated 1 hour ago</p><div><span>Full Time</span><span>{tag}</span></div>"
 
 
 def job_page(key: str) -> str:
@@ -51,7 +72,7 @@ def job_page(key: str) -> str:
     jd = JD + ("\nThis role is hybrid: 3 days per week in our Boston office." if key == "hybrid" else "")
     return f"""<html><body><main><div class="hdr"><a href="/company-profile/x">{co}</a><button>save</button>
     <button onclick="location.href='/job-applications/{IDS[key]}/wizard'">Apply</button>
-    <h1>{t}</h1><p>{loc} • Posted today • Updated 1 hour ago</p><div><span>Full Time</span><span>Remote</span></div></div>
+    <h1>{t}</h1>{head_meta(key, loc)}</div>
     <section><h2>Job Details</h2><p>{jd.replace(chr(10), '<br>')}</p></section><aside><h2>Similar Jobs</h2></aside></main></body></html>"""
 
 
@@ -207,12 +228,16 @@ def main() -> int:
     check(results.get("good", {}).get("status") == "applied", f"preloaded resume replaced and submitted: {results.get('good', {}).get('why')}")
     check(results.get("fresh", {}).get("status") == "applied", f"empty resume slot uploaded and submitted: {results.get('fresh', {}).get('why')}")
     check(results.get("hybrid", {}).get("status") == "skipped" and "not remote" in results["hybrid"]["why"], f"hybrid JD skipped on the job page: {results.get('hybrid', {}).get('why')}")
-    check("onsite" not in results and "old" not in results, "Austin and 5-days-old cards skipped before opening")
+    check(results.get("onsite", {}).get("status") == "skipped" and "on-site" in results["onsite"]["why"], f"Austin (tagged On-site) skipped on the job page: {results.get('onsite', {}).get('why')}")
+    check("old" not in results and "hybridtitle" not in results, "5-days-old card and '(Hybrid)' title skipped on the list")
+    check(results.get("nobullet", {}).get("status") == "applied", f"card with location/date in separate elements (no '•'): {results.get('nobullet', {}).get('why')}")
+    check(results.get("nodate", {}).get("status") == "applied", f"card without a date, job page 'Updated 10 hours ago': {results.get('nodate', {}).get('why')}")
+    check(not any("no location" in t for _, t in ui.lines), "no 'no location' skips")
     skips = [t for lvl, t in ui.lines if "skip " in t]
     check(skips and all("save" not in t and "Apply Now" not in t for t in skips), f"company names on cards read cleanly: {skips[:1]}")
     check(results.get("extra", {}).get("status") == "attention", f"unanswerable extra question left for you: {results.get('extra', {}).get('why')}")
     check(any(IDS["extra"] in u for u in open_tabs), "the 'needs you' wizard tab is still open")
-    check(len(FakeSupabase.rows) == 2, f"only successful bids saved to Supabase ({len(FakeSupabase.rows)})")
+    check(len(FakeSupabase.rows) == 4, f"only successful bids saved to Supabase ({len(FakeSupabase.rows)})")
     if FakeSupabase.rows:
         r = FakeSupabase.rows[0]
         folder = Path(r["resume_dir"])

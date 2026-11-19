@@ -40,17 +40,24 @@ _LIST_JS = r"""
     const text = r.card.innerText || '';
     const lines = text.split('\n').map((s) => s.trim()).filter(Boolean);
     const title = r.titles.sort((a, b) => b.length - a.length)[0] || '';
-    const meta = lines.find((l) => l.includes('•')) || '';
-    const parts = meta.split('•').map((s) => s.trim());
-    // tags and the company name sit next to buttons on one line: read each from its own element, not from the lines
+    // tags, the company, the location and the date sit side by side (Dice draws the "•" with CSS, so it is
+    // often not in the text): read each from its own element, not from the lines
     const leaves = [...r.card.querySelectorAll('*')].filter((e) => !e.children.length).map((e) => (e.textContent || '').trim()).filter((t) => t && t.length < 80);
+    const AGE = /^(posted |updated )?(today|yesterday|just posted|just now|new|\d+\+?\s*(minutes?|mins?|hours?|hrs?|days?|weeks?|months?)\s*ago)$/i;
+    const meta = lines.find((l) => l.includes('•')) || '';
+    const parts = meta.split('•').map((s) => s.trim()).filter(Boolean);
+    const posted = parts.find((p) => AGE.test(p)) || leaves.find((l) => AGE.test(l)) || '';
     const companyLink = r.card.querySelector('a[href*="company" i], [data-cy*="company" i], [data-testid*="company" i]');
     const ti = leaves.indexOf(title);
     const company = (companyLink && (companyLink.textContent || '').trim())
       || leaves.slice(0, ti > 0 ? ti : 1).filter((l) => !BTN.test(l) && l.length > 1 && !l.includes('•'))[0] || '';
+    const location = (parts.length && !AGE.test(parts[0]) ? parts[0] : '')
+      || leaves.find((l) => l !== title && l !== company && !AGE.test(l) && /\b(remote|hybrid|on-?site)\b|,\s*[A-Z][A-Za-z]+|,\s*[A-Z]{2}\b/.test(l)) || '';
+    // workplace words anywhere on the card except the company name ("Remote", "Hybrid", "On-site")
+    const cardText = leaves.filter((l) => l !== company).join(' | ');
     return {
-      id: r.id, url: `https://www.dice.com/job-detail/${r.id}`, title, company,
-      location: parts[0] || '', posted: parts.slice(1).join(' ') || '',
+      id: r.id, url: `https://www.dice.com/job-detail/${r.id}`, title, company, location, posted,
+      remoteWord: /\bremote\b/i.test(cardText), hybridWord: /\bhybrid\b(?![\s-]*(cloud|multi-?cloud|apps?|applications?|mobile|infrastructure|architectures?|search|retrieval|systems?|environments?|data|deployments?|storage))/i.test(cardText), onsiteWord: /\b(on-?site|in[- ]office)\b/i.test(cardText),
       salary: leaves.find((l) => /^(USD|\$)/.test(l)) || '',
       type: leaves.find((l) => /^(full[- ]?time|part[- ]?time|contract|third party|c2c|w2)/i.test(l)) || '',
       applied: lines.some((l) => /^applied$/i.test(l)) || /\bApplied\b/.test(text) && !/Apply Now/i.test(text)
@@ -110,8 +117,11 @@ _JOB_JS = r"""
     if (head.querySelector('button, a[role="button"]') && txt(head).length > txt(h1).length + 20) break;
   }
   const lines = txt(head).split('\n').map((s) => s.trim()).filter(Boolean);
-  const meta = lines.find((l) => l.includes('•') && /(remote|posted|updated|on-?site|hybrid|,)/i.test(l)) || '';
-  const parts = meta.split('•').map((s) => s.trim());
+  const headLeaves = [...head.querySelectorAll('*')].filter((e) => !e.children.length).map((e) => (e.textContent || '').trim()).filter(Boolean);
+  // "Remote in San Francisco, CA, US • Posted 60+ days ago • Updated 10 hours ago": split on "•" when it is there, else use the pieces
+  const bits = [...lines, ...headLeaves].flatMap((l) => l.split('•')).map((s) => s.trim()).filter(Boolean);
+  const dates = [...new Set(bits.filter((b) => /^(posted|updated|reposted)\b/i.test(b) && b.length < 60))];
+  const parts = [bits.find((b) => b !== txt(h1) && b.length < 90 && /^remote\b|\b(remote|hybrid|on-?site)\b.*\b(in|or)\b|,\s*[A-Z]{2}\b|,\s*US\b/i.test(b) && !/^(posted|updated)/i.test(b)) || ''];
   // tags ("Full Time" "On-site" "USD …") are side by side: one per element
   const tags = [...head.querySelectorAll('*')].filter((e) => !e.children.length).map((e) => (e.textContent || '').trim())
     .filter((l) => l.length < 45 && /^(full[- ]?time|part[- ]?time|contract|on-?site|remote|hybrid|third party|usd|\$)/i.test(l));
@@ -147,7 +157,7 @@ _JOB_JS = r"""
   return {
     url: location.href, title: txt(h1) || ld?.title || '',
     company: txt(companyEl) || ld?.hiringOrganization?.name || lines[0] || '',
-    location: parts[0] || '', posted: parts.slice(1).join(' • '), tags,
+    location: parts[0] || '', posted: dates.join(' • '), dates, tags, header: lines.join('\n').slice(0, 1500),
     salary: tags.find((t) => /^(usd|\$)/i.test(t)) || '',
     remoteLd: /TELECOMMUTE/i.test(String(ld?.jobLocationType || '')),
     jd: jd.slice(0, 20000),
@@ -158,8 +168,11 @@ _JOB_JS = r"""
 """
 
 # phrases in the title or JD that make a "Remote" listing not really remote
+#   "hybrid" as a way of working, not "hybrid cloud" / "hybrid apps" / "hybrid search"
+HYBRID_WORK = re.compile(r"\bhybrid\b(?![\s-]*(cloud|multi-?cloud|apps?|applications?|mobile|infrastructure|architectures?|search|retrieval|"
+                         r"vehicles?|cars?|systems?|environments?|integrations?|solutions?|data|deployments?|networks?|it\b|storage|workloads?))", re.I)
 NOT_REMOTE = [
-    (re.compile(r"\bhybrid\b", re.I), "hybrid"),
+    (HYBRID_WORK, "hybrid"),
     (re.compile(r"\b(\d|one|two|three|four)\s*\+?\s*(days?|x)\s*(a|per|/|each)\s*week\b.{0,50}\b(office|on-?site|in[- ]person)", re.I), "office days each week"),
     (re.compile(r"\b(office|on-?site|in[- ]person)\b.{0,40}\b(\d|one|two|three|four)\s*\+?\s*days?\s*(a|per|/|each)\s*week", re.I), "office days each week"),
     (re.compile(r"\bup to \d\s*days?\s*(a|per|/)\s*week (of )?telework", re.I), "mostly on-site (limited telework)"),
@@ -186,20 +199,50 @@ def read_job(page, url: str) -> dict:
     return page.evaluate(_JOB_JS)
 
 
+REMOTE_JD = re.compile(r"\b(fully|100\s*%|completely|100 percent)\s+remote\b|\bremote[- ](first|friendly|position|role|opportunity|work|job)\b|"
+                       r"\bthis (is a|role is|position is) (a )?remote\b|\bwork (from|remotely from) (home|anywhere)\b|\bremote\s*\((us|usa|u\.s\.)", re.I)
+
+
 def check_remote(job: dict, strict: bool = False) -> tuple[bool, str]:
+    """The job page decides: Remote in the location, tags, header, title or Dice's data, or a clearly remote
+    description; Hybrid anywhere in the header / title, or on-site phrases in the description, reject it."""
     loc = (job.get("location") or "").lower()
     tags = [t.lower() for t in job.get("tags", [])]
-    remote_listed = loc.startswith("remote") or any(t == "remote" for t in tags) or job.get("remoteLd")
-    if not remote_listed:
-        return False, f"location is '{job.get('location') or 'not shown'}'"
-    if strict and any(t in ("on-site", "onsite", "hybrid") for t in tags):
-        return False, "tagged On-site / Hybrid"
-    text = f"{job.get('title', '')}\n{job.get('jd', '')}"
-    for rx, why in NOT_REMOTE:
-        m = rx.search(text)
+    head = f"{job.get('title', '')}\n{job.get('header', '')}"
+    if HYBRID_WORK.search(f"{head}\n{' '.join(tags)}"):
+        return False, "hybrid"
+    signals = []
+    if loc.startswith("remote") or re.search(r"\bremote\b", loc):
+        signals.append("location")
+    if "remote" in tags:
+        signals.append("tag")
+    if job.get("remoteLd"):
+        signals.append("Dice data")
+    if re.search(r"\bremote\b|\btelework\b|\bwork from home\b|\bwfh\b", head, re.I):
+        signals.append("job header")
+    onsite_tag = any(t in ("on-site", "onsite") for t in tags)
+    # the description counts only when the page itself does not say On-site (a "remote team" line in the
+    # company blurb must not turn an on-site job remote)
+    if not signals and not onsite_tag and REMOTE_JD.search(job.get("jd", "")):
+        signals.append("description")
+    if not signals:
+        return False, "on-site" if onsite_tag else f"no sign of remote work (location '{job.get('location') or 'not shown'}')"
+    if strict and onsite_tag:
+        return False, "tagged On-site"
+    for rx, why in NOT_REMOTE[1:]:  # hybrid was handled above (header/title); here the description's on-site phrases
+        m = rx.search(f"{job.get('title', '')}\n{job.get('jd', '')}")
         if m:
             return False, f"{why} (\"{m.group(0)[:60]}\")"
-    return True, "remote"
+    m = NOT_REMOTE[0][0].search(job.get("jd", ""))
+    if m and not re.search(r"\b(not|no)\s+hybrid\b|hybrid (or|/) remote|remote (or|/) hybrid", job.get("jd", ""), re.I):
+        return False, f"hybrid (\"{job['jd'][max(0, m.start() - 30):m.end() + 30].strip()}\")"
+    return True, "remote (" + ", ".join(signals) + ")"
+
+
+def job_age(job: dict) -> int | None:
+    """Days since the job page's newest date ('Posted 60+ days ago • Updated 10 hours ago' -> 0, as Dice's list shows it)."""
+    ages = [a for a in (age_days(d) for d in job.get("dates") or [job.get("posted", "")]) if a is not None]
+    return min(ages) if ages else None
 
 
 # ---------- Easy Apply ----------

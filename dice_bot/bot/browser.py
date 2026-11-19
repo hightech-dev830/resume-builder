@@ -15,10 +15,11 @@ class Browser:
     def start(self):
         if self.ctx:
             try:
-                _ = self.ctx.pages  # still alive?
+                if self.ctx.pages is not None and self.ctx.browser is None and not self.ctx.pages:
+                    raise RuntimeError("closed")  # persistent context with every window closed
                 return self
             except Exception:
-                self.ctx = None
+                self._reset()
         from playwright.sync_api import sync_playwright
         self._pw = self._pw or sync_playwright().start()
         BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
@@ -49,10 +50,27 @@ class Browser:
         except Exception:
             return False
 
+    def _reset(self):
+        """The window was closed by hand: forget it so start() opens a new one."""
+        try:
+            if self._pw:
+                self._pw.stop()
+        except Exception:
+            pass
+        self.ctx = None
+        self._pw = None
+
     def page(self, url: str | None = None):
         self.start()
-        blank = [p for p in self.ctx.pages if p.url in ("about:blank", "chrome://newtab/")]
-        p = blank[0] if blank else self.ctx.new_page()
+        try:
+            blank = [p for p in self.ctx.pages if p.url in ("about:blank", "chrome://newtab/")]
+            p = blank[0] if blank else self.ctx.new_page()
+        except Exception as e:
+            if "closed" not in str(e).lower():
+                raise
+            self._reset()
+            self.start()
+            p = self.ctx.new_page()
         if url:
             p.goto(url, wait_until="domcontentloaded", timeout=60000)
         return p

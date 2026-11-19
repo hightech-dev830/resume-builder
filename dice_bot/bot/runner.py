@@ -91,6 +91,16 @@ class Run:
                 break
             self.ui.status(f"Reading recommended jobs, page {page_no}…")
             cards = dice.read_list(lst, page_no)
+            if page_no == 1:
+                # keep the real list page, to tune the reader if Dice changes its layout
+                try:
+                    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+                    (DEBUG_DIR / "list_page1.html").write_text(lst.content(), encoding="utf-8")
+                except Exception:
+                    pass
+                if cards and not any(c.get("posted") or c.get("location") for c in cards):
+                    self.log("The list cards show no location or date the bot can read; each job page is checked instead. "
+                             f"(Send {DEBUG_DIR / 'list_page1.html'} to update the list reader.)", "warn")
             if not cards:
                 self.log(f"Page {page_no}: no more jobs.")
                 break
@@ -126,11 +136,15 @@ class Run:
             return skip("already applied on Dice", quiet=True)
         if (prev := ledger_seen(card["id"])) in ("applied", "attention", "skipped"):
             return skip(f"done before ({prev})", quiet=True)
-        if not card["location"].lower().startswith("remote"):
-            return skip(f"not remote ({card['location'] or 'no location'})")
-        age = dice.age_days(card["posted"])
-        if age is None or age > int(self.s["max_age_days"]) - 1:
-            return skip(f"posted '{card['posted'] or '?'}' (outside {self.s['max_age_days']} day(s))")
+        # the list only weeds out what is clearly not remote; the job page makes the real remote check
+        if card.get("hybridWord"):
+            return skip("hybrid (on the card)")
+        if card.get("onsiteWord") and not card.get("remoteWord"):
+            return skip("on-site (on the card)")
+        # date range: from the card when it shows one, else checked on the job page
+        age = dice.age_days(card.get("posted", ""))
+        if age is not None and age > int(self.s["max_age_days"]) - 1:
+            return skip(f"posted '{card['posted']}' (outside {self.s['max_age_days']} day(s))")
         if self.sb.ready and self.sb.already_applied(card["url"]):
             return skip("already in Supabase")
         return False
@@ -159,9 +173,14 @@ class Run:
             say(f"{job['title']} @ {job['company']} ({job['location']}; {job['posted'] or card['posted']})")
             if job.get("applied"):
                 return self._end(card, job, row, "skipped", "already applied", steps)
+            if dice.age_days(card.get("posted", "")) is None:
+                age = dice.job_age(job)
+                if age is None or age > int(self.s["max_age_days"]) - 1:
+                    return self._end(card, job, row, "skipped", f"date '{job.get('posted') or 'not shown'}' (outside {self.s['max_age_days']} day(s))", steps)
             ok, why = dice.check_remote(job, bool(self.s["strict_remote"]))
             if not ok:
                 return self._end(card, job, row, "skipped", f"not remote: {why}", steps)
+            say(f"  {why}")
             if not job.get("canApply") or not dice.apply_button(self.work):
                 return self._end(card, job, row, "skipped", "no Easy Apply button", steps)
             if len(job.get("jd", "")) < 300:
