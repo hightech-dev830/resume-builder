@@ -9,7 +9,7 @@ A Python bot with a small window. It applies to **remote** jobs from your Dice *
 3. **Settings**:
    - **Resume / profile JSON:** your resume file. The format is a full profile like `extension-v2/profiles/sample-profile.json` (personal answers, plus jobs with `industry` and the real `stack`), or a plain JSON Resume.
    - **Save bids in:** the folder for the generated files.
-   - **Resume writer:** *DeepSeek chat* (your DeepSeek account in the bot's browser, no API cost), *DeepSeek API*, or *OpenAI API*. Add the key for an API option.
+   - **Resume writer:** *DeepSeek chat* or *ChatGPT chat* (your account in the bot's browser, no API cost), *DeepSeek API*, or *OpenAI API*. Add the key for an API option. If a chat site shows a Cloudflare check or 'Access denied', the bot says so; that is the site refusing the network (common on cloud servers), not the bot.
    - **Posted within (days):** 1 = today (24 h), 2 = today and yesterday, and so on.
    - **Daily limit**, **Limit per Start**, **Pause between jobs:** these keep your Dice account safe.
    - **Supabase:** read from the repo's `.env`, so it is normally already filled in.

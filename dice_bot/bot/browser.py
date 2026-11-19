@@ -157,10 +157,10 @@ class Browser:
             p.goto(url, wait_until="domcontentloaded", timeout=60000)
         return p
 
-    def chat_page(self, url: str):
+    def chat_page(self, url: str, host: str = "chat.deepseek.com"):
         self.start()
         for p in self.ctx.pages:
-            if "chat.deepseek.com" in p.url:
+            if host in p.url:
                 p.goto(url, wait_until="domcontentloaded")
                 return p
         return self.page(url)

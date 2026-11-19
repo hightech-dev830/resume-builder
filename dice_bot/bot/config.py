@@ -25,7 +25,7 @@ ASSETS = ROOT / "assets"
 DEFAULTS: dict = {
     "profile_path": "",                  # the resume / profile JSON you upload
     "output_dir": str(Path.home() / "Documents" / "DiceBids"),
-    "engine": "deepseek_chat",           # openai | deepseek_api | deepseek_chat
+    "engine": "deepseek_chat",           # openai | deepseek_api | deepseek_chat | chatgpt_chat
     "openai_key": "",
     "openai_model": "gpt-5",
     "deepseek_key": "",

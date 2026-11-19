@@ -77,10 +77,10 @@ class Worker(threading.Thread):
         p = b.page("https://www.dice.com/recommended-jobs")
         p.bring_to_front()
         if b.attached:
-            self.ui.log(f"Connected to your Chrome window (debug port {b.port}). Sign in to Dice there (and DeepSeek / other sites you need) once; "
+            self.ui.log(f"Connected to your Chrome window (debug port {b.port}). Sign in to Dice there (and DeepSeek or ChatGPT if you use their chat) once; "
                         "keep that window open and use it normally. Closing the bot leaves it open.", "ok")
         else:
-            self.ui.log("Browser open. Sign in to Dice there (and to chat.deepseek.com if you use DeepSeek chat). The sign-ins are kept for next time.", "ok")
+            self.ui.log("Browser open. Sign in to Dice there (and to DeepSeek or ChatGPT if you use their chat). The sign-ins are kept for next time.", "ok")
 
     def _start(self, settings):
         self.stop.clear()

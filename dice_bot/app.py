@@ -18,7 +18,8 @@ from bot.store import ledger, ledger_applied_today  # noqa: E402
 from bot.worker import Worker  # noqa: E402
 
 RED, RED_DARK, INK, MUTED, BG, CARD, LINE = "#cc1f2f", "#a3141f", "#1d2433", "#6b7385", "#f4f5f8", "#ffffff", "#dde1ea"
-ENGINES = {"deepseek_chat": "DeepSeek chat (browser, no API cost)", "deepseek_api": "DeepSeek API", "openai": "OpenAI API"}
+ENGINES = {"deepseek_chat": "DeepSeek chat (browser, no API cost)", "chatgpt_chat": "ChatGPT chat (browser, no API cost)",
+           "deepseek_api": "DeepSeek API", "openai": "OpenAI API"}
 LEVEL_COLORS = {"ok": "#15803d", "warn": "#b45309", "err": "#b91c1c", "dim": "#8a90a0", "info": INK}
 
 
@@ -260,7 +261,7 @@ class App(tk.Tk):
         row(g, 2, "openai_model", "OpenAI model")
         row(g, 3, "deepseek_key", "DeepSeek API key", "secret")
         row(g, 4, "deepseek_model", "DeepSeek model", hint="deepseek-chat or deepseek-reasoner")
-        row(g, 5, "keep_chat_tab", "Keep the DeepSeek tab open", "check")
+        row(g, 5, "keep_chat_tab", "Keep the chat tab open (DeepSeek / ChatGPT)", "check")
 
         g = group("Jobs and account safety")
         row(g, 0, "max_age_days", "Posted within (days)", "spin", "1 = today (24 h), 2 = today + yesterday, …", lo=1, hi=30)

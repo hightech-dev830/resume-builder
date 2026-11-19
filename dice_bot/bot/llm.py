@@ -1,8 +1,9 @@
-"""The three resume writers:
+"""The resume writers:
   openai        OpenAI API (strict JSON schema)
   deepseek_api  DeepSeek API (OpenAI-compatible, JSON mode)
-  deepseek_chat chat.deepseek.com in a browser tab, signed in with your account (no API cost);
-                it types the prompt and reads the answer with extension-v2's content/chat.js
+  deepseek_chat chat.deepseek.com in a browser tab, signed in with your account (no API cost)
+  chatgpt_chat  chatgpt.com in a browser tab, signed in with your account (no API cost)
+The chat engines type the prompt and read the answer with extension-v2's content/chat.js.
 A Chat object keeps one conversation, so correction rounds go to the same chat."""
 from __future__ import annotations
 
@@ -14,7 +15,16 @@ import urllib.request
 from .config import REPO
 
 CHAT_JS = (REPO / "extension-v2" / "content" / "chat.js").read_text(encoding="utf-8")
-DEEPSEEK_HOME = "https://chat.deepseek.com/"
+# chat engine -> (start page, host, name)
+CHAT_SITES = {
+    "deepseek_chat": ("https://chat.deepseek.com/", "chat.deepseek.com", "DeepSeek"),
+    "chatgpt_chat": ("https://chatgpt.com/", "chatgpt.com", "ChatGPT"),
+}
+# what a site shows when it refuses the browser or the network instead of loading the chat
+BLOCKED = (("verify you are human", "a human check (Cloudflare)"), ("just a moment", "a Cloudflare check"),
+           ("access denied", "'Access denied'"), ("unable to load site", "'Unable to load site'"),
+           ("not available in your country", "'not available in your country'"), ("unusual activity", "'unusual activity'"),
+           ("too many requests", "'too many requests'"), ("error 1020", "Cloudflare error 1020 (blocked network)"))
 
 
 class LLMError(RuntimeError):
@@ -85,14 +95,22 @@ class Chat:
         except Exception:
             return None
 
+    def _blocked(self) -> str:
+        try:
+            t = self.page.evaluate("document.title + ' ' + (document.body ? document.body.innerText.slice(0, 3000) : '')").lower()
+        except Exception:
+            return ""
+        return next((why for key, why in BLOCKED if key in t), "")
+
     def _chat(self, text: str, new: bool, plain: bool) -> str:
+        home, host, site = CHAT_SITES[self.engine]
         if not self.browser:
-            raise LLMError("DeepSeek chat needs the browser.")
+            raise LLMError(f"{site} chat needs the browser.")
         if self.page is None or self.page.is_closed():
-            self.page = self.browser.chat_page(DEEPSEEK_HOME)
+            self.page = self.browser.chat_page(home, host)
             new = True
         elif new:
-            self.page.goto(DEEPSEEK_HOME, wait_until="domcontentloaded")
+            self.page.goto(home, wait_until="domcontentloaded")
         self.page.bring_to_front()
         st = None
         for i in range(60):
@@ -102,35 +120,42 @@ class Chat:
             if st and st.get("ready"):
                 break
             if st and st.get("loggedOut") and i > 3:
-                raise LLMError("Sign in to DeepSeek in the bot's browser (button: Open browser), then start again.")
+                raise LLMError(f"Sign in to {site} in the bot's browser (button: Open browser), then start again.")
+            if i in (8, 30) and (why := self._blocked()):
+                raise LLMError(f"{site} did not load its chat: it shows {why}. This is {site} refusing this network or browser, "
+                               "not the bot (common on cloud servers). Solve the check in the tab if it offers one, or use another engine.")
             time.sleep(0.7)
         if not st or not st.get("ready"):
-            raise LLMError("DeepSeek did not show its chat box. Check the DeepSeek tab in the bot's browser.")
-        before = st["count"]
-        self.page.evaluate("window.__abChat.overlay(true, 'Dice Auto Bid is writing with DeepSeek…')")
+            raise LLMError(f"{site} did not show its chat box. Check the {site} tab in the bot's browser.")
+        # mark the answers already in the thread: the new answer is the one without the mark
+        # (counting fails in long threads, where the sites drop older messages from the page)
+        self.page.evaluate("window.__abChat.markOld()")
+        self.page.evaluate(f"window.__abChat.overlay(true, 'Dice Auto Bid is writing with {site}…')")
         try:
             sent = self.page.evaluate("t => window.__abChat.send(t)", text)
             if not sent or not sent.get("ok"):
-                raise LLMError(f"Could not send the prompt to DeepSeek ({(sent or {}).get('note', 'no response')}).")
+                raise LLMError(f"Could not send the prompt to {site} ({(sent or {}).get('note', 'no response')}).")
             end = time.time() + 8 * 60
             last, still, started = -1, 0, False
             while time.time() < end:
                 if self.stop():
                     raise LLMError("Stopped")
-                time.sleep(1.5)
+                time.sleep(0.7)
                 st = self._state()
                 if not st:
                     continue
-                if st["count"] > before:
+                if st.get("fresh", 0) > 0 and st["length"] > 0:
                     started = True
                 if not started:
                     continue
                 still = still + 1 if (st["length"] == last and not st["generating"]) else 0
                 last = st["length"]
-                if still >= 4 and st["length"] > 0:
+                if not plain and st.get("jsonReady") and still >= 1:
+                    break  # the JSON block closed and parses
+                if still >= (3 if plain else 6) and st["length"] > 0:
                     break
             if not started:
-                raise LLMError("DeepSeek did not answer in time.")
+                raise LLMError(f"{site} did not answer in time.")
             ans = self.page.evaluate("window.__abChat.lastAnswer()")
             return (ans.get("plain") if plain else ans.get("text")) or ""
         finally:
@@ -140,7 +165,7 @@ class Chat:
                 pass
 
     def send(self, text: str, json_mode: bool = True) -> str:
-        if self.engine == "deepseek_chat":
+        if self.engine in CHAT_SITES:
             out = self._chat(text, new=not self.messages, plain=not json_mode)
             self.messages.append({"role": "user", "content": text})
             return out

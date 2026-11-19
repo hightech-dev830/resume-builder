@@ -346,7 +346,8 @@ class Run:
         return status
 
     def _model(self) -> str:
-        return {"openai": self.s.get("openai_model"), "deepseek_api": self.s.get("deepseek_model")}.get(self.s["engine"], "deepseek web chat")
+        return {"openai": self.s.get("openai_model"), "deepseek_api": self.s.get("deepseek_model"),
+                "chatgpt_chat": "chatgpt web chat"}.get(self.s["engine"], "deepseek web chat")
 
     def _debug(self, card):
         try:
