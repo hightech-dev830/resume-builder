@@ -1,0 +1,4 @@
+# browser session (Dice / DeepSeek sign-ins), settings with API keys, bid log, debug pages
+data/
+.venv/
+__pycache__/

@@ -7,6 +7,10 @@ The same app as the desktop version, running in the browser:
 - **PDFs:** headless Chromium (`@sparticuz/chromium` on Vercel), from the same templates as the desktop app. Windows fonts are swapped for metric-compatible Google Fonts (Calibri → Carlito, Times New Roman → Tinos, Georgia → Gelasio and so on), so line and page breaks stay close to the desktop output.
 - **AI:** Claude or OpenAI, with the editable prompts and proxy settings, all stored in Supabase.
 
+## Dice Auto Bid (Python bot)
+
+[`dice_bot/`](dice_bot/README.md) is a desktop bot with a small window (`start.bat`). It applies to remote jobs from your Dice *Recommended Jobs*, within a date range and a daily limit. It uses the extension-v2 resume engine for the resume and cover letter (OpenAI API, DeepSeek API or DeepSeek chat), saves them as `<Name>_cv.docx` in a folder per company, completes Dice Easy Apply (replacing the preloaded resume), and saves successful bids to Supabase (`resumes`, `source = 'dice'`). Manual Dice bids can be saved from the same window.
+
 ## Chrome extension v2 (half-automatic)
 
 [`extension-v2/`](extension-v2/README.md) is a standalone, server-free assistant. It has profiles for several candidates and a job feed. It writes ATS-tailored resumes through your ChatGPT or DeepSeek chat, checks them for consistency, exports PDF and Word, and fills the open application page when you press a button. You still press Next and Submit yourself. It can sync profiles and applications to this Supabase project: run [`supabase/migrations/004_extension_v2.sql`](supabase/migrations/004_extension_v2.sql) once. Its templates come from `desktop/src/templates.js` through `npm run sync`.
