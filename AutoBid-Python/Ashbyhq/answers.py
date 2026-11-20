@@ -268,7 +268,7 @@ def sync_bank(conn, bank):
     # Only REQUIRED questions are kept. One that no relevant job requires (any more) is
     # removed - unless you already answered it: then it stays (hidden, asked_in_jobs = 0)
     # so the answer is not lost if such a job comes back.
-    # No relevant jobs here at all (e.g. a new computer before its first 'Sync DB'): remove
+    # No relevant jobs here at all (e.g. a new computer before its first 'Sync from DB'): remove
     # nothing, other computers still need these questions.
     for key in list(existing) if stats else []:
         if key not in stats:

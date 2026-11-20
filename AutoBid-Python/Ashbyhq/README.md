@@ -59,11 +59,14 @@ Run it again at any time. New jobs are added, closed ones are marked `is_active=
 - **jobs**: one row per job. `status` moves through `new` → `ready` (questions collected) → `applied` / `skipped` / `failed`. After applying, you set `1Interview` → `2Interview` → `3Interview` → `Offer` / `Rejected` in the app (Jobs tab → **Status** → **Set status**, for the ticked jobs or the one shown).
 - **questions**: one row per application-form field for each job, with `type` (String, LongText, Boolean, ValueSelect, MultiValueSelect, File, Location, Email, ...), `required`, `options`, and an empty `answer` column for the bid step.
 
-### Jobs in Supabase (`sync_db.py`, **⇅ Sync DB** button)
+### Jobs in Supabase (`sync_db.py`, **⬇ Sync from DB** / **⬆ Sync to DB** buttons)
 
-Every job, with its questions and your status, is also stored in Supabase table `autobid_jobs` (run [`supabase/migrations/005_autobid_jobs.sql`](../../supabase/migrations/005_autobid_jobs.sql) once). **⇅ Sync DB** works both ways: jobs changed on another computer come to this board, and jobs changed here go to Supabase. Only changed jobs are sent. When both sides changed the same job, the newest status wins.
+Every job, with its questions and your status, is also stored in Supabase table `autobid_jobs` (run [`supabase/migrations/005_autobid_jobs.sql`](../../supabase/migrations/005_autobid_jobs.sql) once). - **⬇ Sync from DB** (`sync_db.py --pull`): download. Jobs changed in Supabase (for example on another computer) come to this board; nothing is uploaded.
+- **⬆ Sync to DB** (`sync_db.py --push`): upload. Jobs changed on this computer go to Supabase; nothing else is downloaded, but a newer status set on another computer is kept, never overwritten.
 
-It also runs by itself after every collection and every bid run, and a status you set in the app is saved to Supabase right away. On a new computer: copy the `.env`, open the app and click **⇅ Sync DB** to get every job.
+Only changed jobs are sent. When both sides changed the same job, the newest status wins.
+
+Both directions also run by themselves (`sync_db.py` without options) after every collection and every bid run, and a status you set in the app is saved to Supabase right away. On a new computer: copy the `.env`, open the app and click **⬇ Sync from DB** to get every job.
 
 Not synced: the resume PDF path (it points into one computer's disk), `description_html` and the raw Ashby field JSON (large and unused).
 

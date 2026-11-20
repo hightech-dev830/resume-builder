@@ -82,7 +82,7 @@ def sync_supabase(conn):
         import sync_db
         sync_db.sync(conn)
     except Exception as e:
-        print(f"! Supabase sync skipped: {str(e)[:200]}  (click 'Sync DB' later)")
+        print(f"! Supabase sync skipped: {str(e)[:200]}  (click 'Sync to DB' later)")
 
 
 if __name__ == "__main__":

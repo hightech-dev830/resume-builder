@@ -287,7 +287,8 @@ class App(tk.Tk):
         self.f_search.bind("<KeyRelease>", lambda e: self.load_jobs())
         self.job_count = ttk.Label(bar, text="", style="Stat.TLabel")
         self.job_count.pack(side="left", padx=12)
-        ttk.Button(bar, text="⇅ Sync DB", command=self.sync_db).pack(side="right")
+        ttk.Button(bar, text="⬆ Sync to DB", command=self.sync_to_db).pack(side="right")
+        ttk.Button(bar, text="⬇ Sync from DB", command=self.sync_from_db).pack(side="right", padx=(4, 4))
         ttk.Button(bar, text="Collect today's jobs", command=self.collect_today).pack(side="right", padx=4)
         ttk.Button(bar, text="⟳ Collect jobs", command=self.collect).pack(side="right")
 
@@ -337,10 +338,13 @@ class App(tk.Tk):
         self.d_meta.pack(anchor="w", pady=(2, 6))
         selbar = ttk.Frame(right)
         selbar.pack(fill="x", pady=(0, 4))
-        self.sel_info = ttk.Label(selbar, text="", foreground="#1f4fbf")
-        self.sel_info.pack(side="left")
+        # buttons packed FIRST so they always keep their full size; the hint gets the rest
+        # of the row and wraps to a second line when the panel is narrow
         ttk.Button(selbar, text="Select all shown", command=self.select_all_jobs).pack(side="right")
         ttk.Button(selbar, text="Clear selection", command=self.clear_job_selection).pack(side="right", padx=4)
+        self.sel_info = ttk.Label(selbar, text="", foreground="#1f4fbf", justify="left")
+        self.sel_info.pack(side="left", fill="x", expand=True)
+        self.sel_info.bind("<Configure>", lambda e: self.sel_info.config(wraplength=max(120, e.width - 4)))
         btns = ttk.Frame(right)
         btns.pack(fill="x", pady=(0, 6))
         ttk.Button(btns, text="Open job page", command=self.open_job).pack(side="left")
@@ -358,8 +362,10 @@ class App(tk.Tk):
         self.d_status.pack(side="left", padx=4)
         self.b_status = ttk.Button(stbar, text="Set status", command=self.set_status_selected)
         self.b_status.pack(side="left")
-        ttk.Label(stbar, text="(ticked jobs, else the one shown; saved to Supabase)",
-                  style="Stat.TLabel").pack(side="left", padx=6)
+        st_hint = ttk.Label(stbar, text="ticked jobs, else the one shown · saved to Supabase",
+                            style="Stat.TLabel", justify="left")
+        st_hint.pack(side="left", padx=6, fill="x", expand=True)
+        st_hint.bind("<Configure>", lambda e: st_hint.config(wraplength=max(120, e.width - 4)))
 
         self.d_tabs = ttk.Notebook(right)
         self.d_tabs.pack(fill="both", expand=True)
@@ -1015,9 +1021,13 @@ class App(tk.Tk):
         return self.run_script(["collect.py", "--today"], "Collecting today's jobs" + (" (auto)" if auto else ""),
                                quiet=auto)
 
-    def sync_db(self):
-        """Both ways: jobs changed on other computers come here, jobs changed here go to Supabase."""
-        return self.run_script(["sync_db.py"], "Syncing jobs with Supabase")
+    def sync_from_db(self):
+        """Download: jobs changed in Supabase (e.g. on another computer) come to this board."""
+        return self.run_script(["sync_db.py", "--pull"], "Sync from DB (Supabase → this computer)")
+
+    def sync_to_db(self):
+        """Upload: jobs changed on this computer go to Supabase."""
+        return self.run_script(["sync_db.py", "--push"], "Sync to DB (this computer → Supabase)")
 
     def set_status_selected(self):
         status = self.d_status.get()
@@ -1042,7 +1052,7 @@ class App(tk.Tk):
             except Exception as e:
                 msg = str(e)[:200]
                 self.ui_q.put(lambda: self.log(f"! Status not saved to Supabase yet ({msg}) - "
-                                               f"click 'Sync DB' later\n"))
+                                               f"click 'Sync to DB' later\n"))
         threading.Thread(target=push, daemon=True).start()
 
     # ---------------- auto-collection

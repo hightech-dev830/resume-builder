@@ -1,6 +1,8 @@
 """Sync the local job DB (data/ashbyhq.db) with Supabase table autobid_jobs, both ways.
 
-    python sync_db.py          # pull jobs changed on other computers, push jobs changed here
+    python sync_db.py          # both ways: pull jobs changed elsewhere, then push jobs changed here
+    python sync_db.py --pull   # only download (app: "Sync from DB")
+    python sync_db.py --push   # only upload   (app: "Sync to DB")
 
 Every job is one row in Supabase: the job (title, company, pay, description, ...), its
 application questions and your status (applied, 1Interview, 2Interview, 3Interview, Offer, ...).
@@ -147,63 +149,95 @@ def push_jobs(conn, ids):
 
 # ---------------------------------------------------------------- the sync
 
-def sync(conn=None, quiet=False):
-    """Pull, then push. Returns (pulled_new, pulled_updated, pushed)."""
+def sync(conn=None, quiet=False, pull=True, push=True):
+    """pull: Supabase -> this computer ("Sync from DB"). push: this computer -> Supabase
+    ("Sync to DB"). Both (default, used after collections / bid runs): pull, then push.
+    Returns (pulled_new, pulled_updated, pushed)."""
     conn = conn or db.connect()
     say = (lambda *a: None) if quiet else print
     t0 = time.time()
-    say("Sync with Supabase: comparing ...")
+    what = "both ways" if pull and push else ("from Supabase" if pull else "to Supabase")
+    say(f"Sync {what}: comparing ...")
     remote = {r["id"]: r for r in supa.select_all(TABLE, {
-        "select": "id,hash,status,status_at", "platform": f"eq.{PLATFORM}", "order": "id"})}
+        "select": "id,hash,status,status_at,note,applied_at", "platform": f"eq.{PLATFORM}",
+        "order": "id"})}
     local = {r["id"]: r for r in conn.execute("SELECT * FROM jobs")}
+    new = upd = 0
 
     # ---- pull: rows another computer changed since our last sync
     changed_remote = [jid for jid, r in remote.items()
                       if jid not in local or r["hash"] != local[jid]["sync_hash"]]
-    new = upd = 0
-    for i in range(0, len(changed_remote), 200):
-        for r in _fetch_full(changed_remote[i:i + 200]):
-            jid = r["id"]
-            loc = local.get(jid)
-            if loc is None:
-                write_local(conn, r)
-                new += 1
-            else:
-                local_changed = (loc["sync_hash"] is None or
-                                 fingerprint(payload(conn, loc)) != loc["sync_hash"])
+    if pull:
+        for i in range(0, len(changed_remote), 200):
+            for r in _fetch_full(changed_remote[i:i + 200]):
+                jid = r["id"]
+                loc = local.get(jid)
+                local_changed = False
+                if loc is None:
+                    write_local(conn, r)
+                    new += 1
+                else:
+                    h_local = fingerprint(payload(conn, loc))
+                    if h_local == r["hash"]:                   # already identical (e.g. never synced)
+                        conn.execute("UPDATE jobs SET sync_hash=? WHERE id=?", (r["hash"], jid))
+                        continue
+                    local_changed = loc["sync_hash"] is None or h_local != loc["sync_hash"]
+                    if not local_changed:
+                        write_local(conn, r)                   # take the other computer's version
+                    elif (r.get("status_at") or "") > (loc["status_at"] or ""):
+                        write_local(conn, r, content=False)    # both changed: newest status wins
+                    upd += 1
                 if not local_changed:
-                    write_local(conn, r)                       # take the other computer's version
-                elif (r.get("status_at") or "") > (loc["status_at"] or ""):
-                    write_local(conn, r, content=False)        # both changed: newest status wins
-                upd += 1
-            if loc is None or not local_changed:
-                conn.execute("UPDATE jobs SET sync_hash=? WHERE id=?", (r["hash"], jid))
-        conn.commit()
-        if len(changed_remote) > 200:
-            say(f"  pulled {min(i + 200, len(changed_remote))}/{len(changed_remote)}")
+                    conn.execute("UPDATE jobs SET sync_hash=? WHERE id=?", (r["hash"], jid))
+            conn.commit()
+            if len(changed_remote) > 200:
+                say(f"  pulled {min(i + 200, len(changed_remote))}/{len(changed_remote)}")
+    elif changed_remote:
+        say(f"  ({len(changed_remote)} jobs changed in Supabase are not downloaded - "
+            f"use 'Sync from DB' for those)")
 
     # ---- push: rows changed here since our last sync
     rows = []
-    for job in conn.execute("SELECT * FROM jobs"):
-        p = payload(conn, job)
-        h = fingerprint(p)
-        if h != job["sync_hash"] or job["id"] not in remote:     # changed here, or missing there
+    if push:
+        for job in conn.execute("SELECT * FROM jobs"):
+            p = payload(conn, job)
+            h = fingerprint(p)
+            if h == job["sync_hash"] and job["id"] in remote:
+                continue                                       # unchanged here
+            r = remote.get(job["id"])
+            if (not pull and r and r["hash"] != job["sync_hash"]
+                    and (r.get("status_at") or "") > (job["status_at"] or "")):
+                # upload only, but the job got a NEWER status on another computer: keep that
+                write_local(conn, r, content=False)
+                job = conn.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone()
+                p = payload(conn, job)
+                h = fingerprint(p)
             p["hash"], p["updated_at"] = h, db.now()
             rows.append(p)
-    if rows:
-        say(f"  pushing {len(rows)} jobs ...")
-        _push(rows, label="pushed" if len(rows) > 300 else None)
-        for r in rows:
-            conn.execute("UPDATE jobs SET sync_hash=? WHERE id=?", (r["hash"], r["id"]))
-        conn.commit()
-    say(f"Sync done: {new} new + {upd} updated from Supabase, {len(rows)} sent to Supabase "
-        f"({len(local) + new} jobs here); {time.time() - t0:.0f}s")
+        if rows:
+            say(f"  pushing {len(rows)} jobs ...")
+            _push(rows, label="pushed" if len(rows) > 300 else None)
+            for r in rows:
+                conn.execute("UPDATE jobs SET sync_hash=? WHERE id=?", (r["hash"], r["id"]))
+            conn.commit()
+    parts = []
+    if pull:
+        parts.append(f"{new} new + {upd} updated from Supabase")
+    if push:
+        parts.append(f"{len(rows)} sent to Supabase")
+    say(f"Sync done: {', '.join(parts)} ({len(local) + new} jobs here); {time.time() - t0:.0f}s")
     return new, upd, len(rows)
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Sync jobs with Supabase table autobid_jobs.")
+    parser.add_argument("--pull", action="store_true", help="only download: Supabase -> this computer")
+    parser.add_argument("--push", action="store_true", help="only upload: this computer -> Supabase")
+    args = parser.parse_args()
+    both = args.pull == args.push            # neither or both flags: both directions
     try:
-        sync()
+        sync(pull=both or args.pull, push=both or args.push)
     except supa.SupabaseError as e:
         print(f"! {e}")
         sys.exit(1)
