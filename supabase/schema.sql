@@ -63,6 +63,45 @@ CREATE TABLE IF NOT EXISTS public.ai_usage (
 CREATE INDEX IF NOT EXISTS ai_usage_created_at_idx ON public.ai_usage (created_at DESC);
 ALTER TABLE public.ai_usage ENABLE ROW LEVEL SECURITY;
 
+-- answer bank + profile of the Python auto-bid bots (same as migrations/004_autobid_answers.sql)
+CREATE TABLE IF NOT EXISTS public.autobid_questions (
+  platform       TEXT NOT NULL DEFAULT 'ashby',
+  key            TEXT NOT NULL,
+  question       TEXT NOT NULL DEFAULT '',
+  type           TEXT NOT NULL DEFAULT '',
+  form           TEXT NOT NULL DEFAULT '',
+  note           TEXT,
+  choices        JSONB,
+  asked_in_jobs  INTEGER NOT NULL DEFAULT 0,
+  answer         JSONB,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (platform, key)
+);
+CREATE TABLE IF NOT EXISTS public.autobid_profile (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL DEFAULT '',
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE public.autobid_questions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.autobid_profile   ENABLE ROW LEVEL SECURITY;
+
+-- jobs of the Python auto-bid bots (same as migrations/005_autobid_jobs.sql)
+CREATE TABLE IF NOT EXISTS public.autobid_jobs (
+  platform TEXT NOT NULL DEFAULT 'ashby', id TEXT NOT NULL,
+  org TEXT NOT NULL DEFAULT '', company TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'new', status_at TEXT, note TEXT, applied_at TEXT, published_at TEXT,
+  department TEXT, team TEXT, dept_path TEXT, employment_type TEXT, location TEXT, locations_all JSONB,
+  workplace_type TEXT, is_remote INTEGER, job_url TEXT, apply_url TEXT, compensation TEXT,
+  compensation_tiers TEXT, description TEXT, first_seen_at TEXT, is_active INTEGER NOT NULL DEFAULT 1,
+  relevant INTEGER, relevance_by TEXT, details_at TEXT, questions JSONB, hash TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (platform, id)
+);
+CREATE INDEX IF NOT EXISTS autobid_jobs_status_idx    ON public.autobid_jobs (status);
+CREATE INDEX IF NOT EXISTS autobid_jobs_published_idx ON public.autobid_jobs (published_at DESC);
+ALTER TABLE public.autobid_jobs ENABLE ROW LEVEL SECURITY;
+
 -- Row level security ON with no policies: the publishable (anon) key can read nothing.
 -- The web app's server uses the secret key, which bypasses RLS.
 -- This matters because settings holds your AI API keys.

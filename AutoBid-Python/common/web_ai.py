@@ -1,7 +1,10 @@
-"""Ask an AI without an API key: through a local AI CLI, or through its web page.
+"""Ask an AI: through a local AI CLI, your own API key, or a chat web page.
 
 Providers:
     claude_code   "claude -p" (Claude Code, uses your Claude login)   <- recommended
+    claude_api    Claude API with your Anthropic key  } same code as Resume Builder / the extension
+    openai_api    OpenAI API with your OpenAI key     } (resume_bridge.js ai-complete -> lib/shared/ai.js);
+                  keys from Resume Builder settings (Supabase), tokens + cost saved to ai_usage
     cursor        "cursor-agent -p" (Cursor CLI, uses your Cursor login)
     chatgpt / claude / deepseek   the chat WEB page in the bot's Chrome window.
         Not recommended: these sites detect automated browsers (ChatGPT shows a
@@ -53,22 +56,30 @@ CLI = {
     "cursor": ["cursor-agent", "-p", "--output-format", "text"],
 }
 
+# API platforms -> the provider name in lib/shared/ai.js
+API = {"claude_api": "anthropic", "openai_api": "openai"}
+BRIDGE = Path(__file__).resolve().parent / "resume_bridge.js"
+
 LOGIN_WAIT_MIN = 5
 ANSWER_TIMEOUT_MIN = 6
+API_TIMEOUT_MIN = 15      # a full resume with a large model at high effort can take minutes
 
 
 class WebAI:
-    def __init__(self, provider, context=None, model=""):
-        """provider: a PROVIDERS key (needs a Playwright browser context) or a CLI key.
-        model: CLI model name/alias ("opus", "haiku", "claude-sonnet-5-5", ...); "" = default.
-        Web chat pages use whatever model is selected on the page."""
-        if provider not in PROVIDERS and provider not in CLI:
+    def __init__(self, provider, context=None, model="", task=""):
+        """provider: a PROVIDERS key (needs a Playwright browser context), a CLI key or an API key.
+        model: model name/alias ("opus", "claude-sonnet-5-5", "gpt-5", ...); "" = default.
+        Web chat pages use whatever model is selected on the page.
+        task: what the calls are for ("resume" / "relevance"), saved with the API usage."""
+        if provider not in PROVIDERS and provider not in CLI and provider not in API:
             raise ValueError(f"unknown AI provider {provider!r}; use one of "
-                             f"{', '.join([*PROVIDERS, *CLI])}")
+                             f"{', '.join([*CLI, *API, *PROVIDERS])}")
         self.provider = provider
         self.model = (model or "").strip()
         self.context = context
+        self.task = task
         self.page = None
+        self.last_model = None     # API: the model that actually answered
 
     @property
     def label(self):
@@ -76,18 +87,24 @@ class WebAI:
 
     # ------------------------------------------------------------ public
 
-    def ask(self, prompt):
-        """Send one prompt in a fresh chat and return the answer text."""
+    def ask(self, prompt, **api_opts):
+        """Send one prompt in a fresh chat and return the answer text.
+        api_opts (API platforms only): system, schema, max_tokens, effort."""
+        if self.provider in API:
+            return self._ask_api(prompt, **api_opts)
         if self.provider in CLI:
             return self._ask_cli(prompt)
         return self._ask_web(prompt)
 
-    def ask_json(self, prompt, required_keys=()):
-        """ask() and parse a JSON object from the answer (one retry in the same chat)."""
-        text = self.ask(prompt)
+    def ask_json(self, prompt, required_keys=(), **api_opts):
+        """ask() and parse a JSON object from the answer (one retry in the same chat).
+        API platforms: pass schema=... for a guaranteed-valid JSON answer (structured output)."""
+        text = self.ask(prompt, **api_opts)
         data = extract_json(text)
         if data is None or any(k not in data for k in required_keys):
-            if self.provider in CLI:
+            if self.provider in API:
+                text = self.ask(prompt + "\n\nReturn ONLY the JSON object, nothing else.", **api_opts)
+            elif self.provider in CLI:
                 text = self.ask(prompt + "\n\nReturn ONLY the JSON object, nothing else.")
             else:
                 text = self._send_and_wait(
@@ -100,6 +117,33 @@ class WebAI:
         if missing:
             raise RuntimeError(f"{self.provider} answer is missing {missing}")
         return data
+
+    # ------------------------------------------------------------ API (your key)
+
+    def _ask_api(self, prompt, system=None, schema=None, max_tokens=16000, effort="low"):
+        """One call with your API key through Resume Builder's own AI code (Node)."""
+        req = {"provider": API[self.provider], "model": self.model, "system": system,
+               "user": prompt, "schema": schema, "maxTokens": max_tokens, "effort": effort,
+               "task": f"autobid-{self.task}" if self.task else "autobid"}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump(req, f, ensure_ascii=False)
+            path = f.name
+        try:
+            res = subprocess.run(["node", str(BRIDGE), "ai-complete", path], capture_output=True,
+                                 text=True, encoding="utf-8", timeout=API_TIMEOUT_MIN * 60,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except FileNotFoundError:
+            raise RuntimeError("Node.js is not installed (needed for the API platforms)")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"{self.provider} did not answer in {API_TIMEOUT_MIN} min")
+        finally:
+            Path(path).unlink(missing_ok=True)
+        if res.returncode != 0:
+            first = (res.stderr or "").strip().splitlines()
+            raise RuntimeError(first[0][:400] if first else f"{self.provider} call failed")
+        out = json.loads(res.stdout)
+        self.last_model = out.get("model")
+        return out.get("text") or ""
 
     # ------------------------------------------------------------ CLI
 

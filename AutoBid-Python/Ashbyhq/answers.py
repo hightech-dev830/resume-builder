@@ -7,26 +7,31 @@ The same question ("Will you now or in the future require sponsorship...",
 the Diversity Survey, ...) appears on many jobs with a different field id each time,
 so answers are matched by question text + type.
 
+The bank and your profile are stored in Supabase (the Resume Builder project), not in a
+local file, so the same answers are used on every computer.
+
 Usage:
-    python answers.py              # add new questions from the DB to answers.json, show coverage
+    python answers.py              # add new questions from the DB to the bank, show coverage
     python answers.py <job-id>     # preview how one job's form would be autofilled
 
 Workflow:
     1. python collect.py
-    2. python answers.py           -> creates/updates answers.json
-    3. open answers.json, fill "profile" and the "answer" of each question
+    2. python answers.py           -> adds new questions to the bank in Supabase
+    3. in the desktop app's Answers tab, fill "My profile" and answer the questions
     4. python answers.py           -> shows how many jobs can now be filled fully
 """
 import json
-import os
 import re
 import sys
-import time
+from datetime import datetime, timezone
 
 import db
 from config import BASE_DIR, TAILORED_RESUME
+import supabase_db as supa
 
-ANSWERS_PATH = BASE_DIR / "answers.json"
+PLATFORM = "ashby"                       # autobid_questions.platform for this bot
+LEGACY_PATH = BASE_DIR / "answers.json"  # old local bank: imported into Supabase once
+STORAGE_NAME = "the answer bank (Supabase)"
 TAILORED_PLACEHOLDER = "<tailored resume>"
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -76,70 +81,150 @@ def profile_key(q):
     return None
 
 
-# ---------------------------------------------------------------- answers.json I/O
+# ---------------------------------------------------------------- storage: Supabase
+# The bank lives in Supabase (tables autobid_questions + autobid_profile, created by
+# supabase/migrations/004_autobid_answers.sql), so every computer uses the same answers.
+# Nothing is kept locally. An old local answers.json is imported once, then renamed.
+
+META_FIELDS = ("question", "type", "form", "note", "choices", "asked_in_jobs")
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _sort(questions):
+    """Survey last; within a form, most common questions first."""
+    return sorted(questions, key=lambda e: (e.get("form") == "survey", -e.get("asked_in_jobs", 0),
+                                            e["question"]))
+
+
+def _entry(row):
+    """Supabase row -> bank entry (same shape as the old answers.json entries)."""
+    e = {"key": row["key"], "question": row["question"], "type": row["type"], "form": row["form"]}
+    if row.get("note"):
+        e["note"] = row["note"]
+    if row.get("choices"):
+        e["choices"] = row["choices"]
+    e["asked_in_jobs"] = row.get("asked_in_jobs") or 0
+    e["answer"] = row.get("answer")
+    return e
+
+
+def _meta(e):
+    """Bank entry -> the question columns (never the answer)."""
+    return {"platform": PLATFORM, "key": e["key"], "question": e.get("question") or "",
+            "type": e.get("type") or "", "form": e.get("form") or "", "note": e.get("note") or None,
+            "choices": e.get("choices") or None, "asked_in_jobs": int(e.get("asked_in_jobs") or 0)}
+
+
+def _fetch_questions():
+    return supa.select_all("autobid_questions", {
+        "select": "key,question,type,form,note,choices,asked_in_jobs,answer",
+        "platform": f"eq.{PLATFORM}", "order": "key"})
+
+
+def _fetch_profile():
+    profile = dict(DEFAULT_PROFILE)
+    for r in supa.select_all("autobid_profile", {"select": "key,value", "order": "key"}):
+        profile[r["key"]] = r["value"] or ""
+    return profile
+
+
+def _import_local_file():
+    """One time: copy an old local answers.json into Supabase, then rename the file."""
+    if not LEGACY_PATH.exists():
+        return
+    try:
+        old = json.loads(LEGACY_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Could not read {LEGACY_PATH.name} to import it: {e}")
+        return
+    remote = {r["key"]: r for r in _fetch_questions()}
+    rows = []
+    for q in old.get("questions", []):
+        if not q.get("key"):
+            continue
+        r = _meta(q)
+        have = remote.get(q["key"])
+        # an answer already in Supabase wins over the old file
+        r["answer"] = have["answer"] if have and not _is_empty(have.get("answer")) else q.get("answer")
+        r["updated_at"] = _now()
+        rows.append(r)
+    supa.upsert("autobid_questions", rows, "platform,key")
+    profile = _fetch_profile()
+    prows = [{"key": k, "value": str(v), "updated_at": _now()}
+             for k, v in (old.get("profile") or {}).items() if not _is_empty(v) and _is_empty(profile.get(k))]
+    if prows:
+        supa.upsert("autobid_profile", prows, "key")
+    done = LEGACY_PATH.with_name("answers.json.imported")
+    if done.exists():
+        done.unlink()
+    LEGACY_PATH.rename(done)
+    print(f"Imported {len(rows)} questions and {len(prows)} profile fields from answers.json "
+          f"into Supabase (old file kept as {done.name}; you can delete it).")
+
 
 def load_bank():
-    if ANSWERS_PATH.exists():
-        bank = json.loads(ANSWERS_PATH.read_text(encoding="utf-8"))
-    else:
-        bank = {}
-    bank.setdefault("profile", {})
-    for k, v in DEFAULT_PROFILE.items():
-        bank["profile"].setdefault(k, v)
-    bank.setdefault("questions", [])
-    return bank
-
-
-def _write(bank):
-    """Atomic write: a crash or a second process never leaves a half-written file."""
-    tmp = ANSWERS_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(bank, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    for attempt in range(10):                       # Windows: the file may be open for a moment
-        try:
-            os.replace(tmp, ANSWERS_PATH)
-            return
-        except PermissionError:
-            time.sleep(0.1 * (attempt + 1))
-    os.replace(tmp, ANSWERS_PATH)
+    """The whole bank from Supabase: {"profile": {...}, "questions": [...]}."""
+    _import_local_file()
+    return {"profile": _fetch_profile(), "questions": _sort(_entry(r) for r in _fetch_questions())}
 
 
 def save_bank(bank):
-    """Save the whole bank (after sync_bank). Never loses an answer someone else saved
-    meanwhile: answers / profile fields that are empty here but filled on disk are kept."""
-    if ANSWERS_PATH.exists():
-        try:
-            disk = json.loads(ANSWERS_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            disk = {}
-        disk_answers = {q["key"]: q.get("answer") for q in disk.get("questions", [])}
-        for q in bank["questions"]:
-            if _is_empty(q.get("answer")) and not _is_empty(disk_answers.get(q["key"])):
-                q["answer"] = disk_answers[q["key"]]
-        for k, v in (disk.get("profile") or {}).items():
-            if _is_empty(bank["profile"].get(k)) and not _is_empty(v):
-                bank["profile"][k] = v
-    _write(bank)
+    """Save the questions after sync_bank: new questions are added, changed question
+    details updated, dropped unanswered ones deleted. Answers and the profile are never
+    written here (only set_answer / set_profile do), so an answer saved meanwhile on
+    another computer is never lost - it is copied into `bank` instead."""
+    remote = {r["key"]: r for r in _fetch_questions()}
+    changed = []
+    for q in bank["questions"]:
+        r = remote.get(q["key"])
+        if r and _is_empty(q.get("answer")) and not _is_empty(r.get("answer")):
+            q["answer"] = r["answer"]
+        m = _meta(q)
+        if r is None or any(m[f] != (r.get(f) if f != "asked_in_jobs" else int(r.get(f) or 0))
+                            for f in META_FIELDS):
+            m["updated_at"] = _now()
+            changed.append(m)
+    if changed:
+        supa.upsert("autobid_questions", changed, "platform,key")
+    keys = {q["key"] for q in bank["questions"]}
+    gone = [k for k, r in remote.items() if k not in keys and _is_empty(r.get("answer"))]
+    for i in range(0, len(gone), 40):
+        supa.request("DELETE", "autobid_questions", {"platform": f"eq.{PLATFORM}",
+                     "key": supa.in_list(gone[i:i + 40]), "answer": "is.null"}, prefer="return=minimal")
+    # answered questions only another computer knows about: keep them in this bank too
+    for k, r in remote.items():
+        if k not in keys and not _is_empty(r.get("answer")):
+            bank["questions"].append(_entry(r))
+    bank["questions"] = _sort(bank["questions"])
 
 
-def set_answer(key, answer):
-    """Save ONE answer: re-read the file, change only this question, write it back.
-    answer=None clears it. Returns the fresh bank."""
-    bank = load_bank()
+def set_answer(key, answer, bank=None):
+    """Save ONE answer in Supabase (only this question changes). answer=None clears it.
+    Returns `bank` with the answer updated, or a freshly loaded bank when none is given."""
+    rows = supa.request("PATCH", "autobid_questions", {"platform": f"eq.{PLATFORM}", "key": f"eq.{key}"},
+                        {"answer": None if _is_empty(answer) else answer, "updated_at": _now()},
+                        prefer="return=representation")
+    if not rows:
+        raise KeyError(f"question not in the answer bank: {key}")
+    if bank is None:
+        return load_bank()
     for q in bank["questions"]:
         if q["key"] == key:
-            q["answer"] = answer
-            break
-    else:
-        raise KeyError(f"question not in answers.json: {key}")
-    _write(bank)
+            q["answer"] = rows[0]["answer"]
     return bank
 
 
-def set_profile(values):
-    """Save profile fields (dict) the same way. Returns the fresh bank."""
-    bank = load_bank()
-    bank["profile"].update(values)
-    _write(bank)
+def set_profile(values, bank=None):
+    """Save profile fields (dict) in Supabase. Returns `bank` with the profile refreshed
+    (or a freshly loaded bank)."""
+    supa.upsert("autobid_profile", [{"key": k, "value": "" if v is None else str(v), "updated_at": _now()}
+                                    for k, v in values.items()], "key")
+    if bank is None:
+        return load_bank()
+    bank["profile"] = _fetch_profile()
     return bank
 
 
@@ -183,7 +268,9 @@ def sync_bank(conn, bank):
     # Only REQUIRED questions are kept. One that no relevant job requires (any more) is
     # removed - unless you already answered it: then it stays (hidden, asked_in_jobs = 0)
     # so the answer is not lost if such a job comes back.
-    for key in list(existing):
+    # No relevant jobs here at all (e.g. a new computer before its first 'Sync DB'): remove
+    # nothing, other computers still need these questions.
+    for key in list(existing) if stats else []:
         if key not in stats:
             if _is_empty(existing[key].get("answer")):
                 del existing[key]
@@ -205,7 +292,7 @@ def _is_empty(v):
 
 
 def to_form_value(q, answer):
-    """Convert a human answer from answers.json into the value Ashby expects.
+    """Convert a human answer from the bank into the value Ashby expects.
 
     Returns (value, error). Boolean -> True/False, ValueSelect -> option value,
     MultiValueSelect -> list of option values, everything else -> text.
@@ -317,13 +404,13 @@ def print_coverage(conn, bank):
     answered = sum(not _is_empty(q["answer"]) for q in qs)
     profile_missing = [k for k, v in bank["profile"].items() if _is_empty(v)
                        and not (k == "resume_file" and TAILORED_RESUME)]
-    print(f"Answer bank: {answered}/{len(qs)} questions answered  ->  {ANSWERS_PATH}")
+    print(f"Answer bank: {answered}/{len(qs)} questions answered  ->  {STORAGE_NAME}")
     if profile_missing:
         print(f"Profile still empty: {', '.join(profile_missing)}")
     print(f"\nJobs to bid: {len(jobs)}")
     print(f"  {ready:>4}  can be autofilled fully right now")
     print(f"  {need_text:>4}  only missing text/essay answers (AI can write these per job)")
-    print(f"  {need_other:>4}  missing yes/no, choice or profile answers -> fill answers.json")
+    print(f"  {need_other:>4}  missing yes/no, choice or profile answers -> answer them in the app")
 
     todo = [q for q in qs if _is_empty(q["answer"]) and q.get("asked_in_jobs")
             and q["type"] not in TEXT_TYPES]
@@ -359,7 +446,7 @@ def main():
     added = sync_bank(conn, bank)
     save_bank(bank)
     if added:
-        print(f"Added {added} new questions to answers.json\n")
+        print(f"Added {added} new questions to the answer bank\n")
     if len(sys.argv) > 1:
         print_job(conn, sys.argv[1], bank)
     else:

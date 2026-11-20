@@ -4,7 +4,7 @@ __pycache__/
 data/
 *.db
 # personal answers / resumes
-answers.json
+answers.json*
 resumes/
 .cache/
 .browser-profile/

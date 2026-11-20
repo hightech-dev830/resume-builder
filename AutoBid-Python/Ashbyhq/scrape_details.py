@@ -21,8 +21,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
-def scrape_details(conn, refresh=False, orgs=None):
-    todo = db.jobs_needing_details(conn, refresh=refresh, orgs=orgs)
+def scrape_details(conn, refresh=False, orgs=None, since=None):
+    todo = db.jobs_needing_details(conn, refresh=refresh, orgs=orgs, since=since)
     if not todo:
         print("Stage 2: all relevant jobs already have their details.")
         return

@@ -22,7 +22,7 @@ Relevance is decided by [`common/relevance.py`](common/relevance.py), the same f
 
 1. **Cache:** the same title and department were decided before (`.cache/relevance.json`).
 2. **Rules:** clear titles. "Senior Backend Engineer" → yes, "Account Executive" → no. Titles containing *engineer*, *developer* or *engineering* are never rejected by rules alone.
-3. **AI:** only the unclear rest, such as "Solutions Engineer", "Product Manager" or "Data Scientist", sent 150 titles per call. It uses Claude Code (`claude -p`) with your login, so there's no API key. The criteria are the `TARGET` text at the top of `relevance.py`. Edit it to widen or narrow what counts as relevant.
+3. **AI:** only the unclear rest, such as "Solutions Engineer", "Product Manager" or "Data Scientist", sent 150 titles per call. It uses the platform chosen in the desktop app's AI tab: Claude Code (`claude -p`, your login, no API key), or the Claude / OpenAI API with your own key. The criteria are the `TARGET` text at the top of `relevance.py`. Edit it to widen or narrow what counts as relevant.
 
 A new platform bot needs only two functions: `list jobs` (stage 1) and `job details` (stage 2). It reuses `relevance.py`, `resume.py`, `web_ai.py`, `captcha.py`, `notify.py` and `browser.py`.
 
@@ -32,6 +32,10 @@ A new platform bot needs only two functions: `list jobs` (stage 1) and `job deta
 |---|---|
 | `relevance.py` | Stage-1 filter: software/hardware development + engineering management |
 | `resume.py` + `resume_bridge.js` | Tailored resume with the same prompt, base profile, template and PDF as the Resume Builder extension |
-| `web_ai.py` | AI without an API key: Claude Code / Cursor CLI (web chat sites are supported but not recommended) |
+| `web_ai.py` | One AI interface for every platform: Claude Code / Cursor CLI (your login), Claude API / OpenAI API (your key), web chat sites (supported but not recommended) |
+| `ai_settings.py` | Platform + model per task (resume writing, job sorting), set in the app's AI tab. API keys are Resume Builder's `claude_api_key` / `openai_api_key` settings in Supabase, shared with the web app and the extension |
+| `supabase_db.py` | Small Supabase client (answer bank, jobs sync, settings) |
+
+**API platforms** (`claude_api`, `openai_api`) call the API through `resume_bridge.js ai-complete`, i.e. Resume Builder's own `lib/shared/ai.js` (official SDKs, the proxy from Settings, Claude server-side fallbacks). A resume is the same request as the extension's (system prompt + base profile + job, JSON schema enforced). Tokens of every call are saved in the `ai_usage` table (task `autobid-resume` / `autobid-relevance`). An empty model box means the model chosen in Resume Builder Settings.
 | `browser.py` | The bot's own Chrome profile (Playwright) |
 | `captcha.py`, `notify.py` | Bot-check detection and Windows notifications |

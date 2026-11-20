@@ -18,6 +18,7 @@ from datetime import date
 from pathlib import Path
 
 import ai_settings
+from web_ai import API
 
 BRIDGE = Path(__file__).resolve().parent / "resume_bridge.js"
 FALLBACK_DIR = Path.home() / "Documents" / "Resume_bot"
@@ -106,6 +107,13 @@ def build_prompt(s, job):
     )
 
 
+def api_user_message(s, job):
+    """Same user message as tailorResume() in lib/shared/ai.js."""
+    return ("<base_profile>\n" + json.dumps(s["base"], indent=2, ensure_ascii=False) + "\n</base_profile>\n\n"
+            + job_block(job)
+            + "\n\nWrite the resume for this job exactly as the system instructions say, and return it as JSON.")
+
+
 def make_resume(ai, job, source="bot"):
     """Generate, render and save a tailored resume. Returns the PDF path.
 
@@ -113,7 +121,13 @@ def make_resume(ai, job, source="bot"):
     ai:  a web_ai.WebAI
     """
     s = settings()
-    tailored = ai.ask_json(build_prompt(s, job), required_keys=REQUIRED)
+    if ai.provider in API:
+        # API key: the exact request of the extension / web app (lib/shared/ai.js tailorResume):
+        # system = prompt + output rules, user = base profile + job, JSON schema enforced
+        tailored = ai.ask_json(api_user_message(s, job), required_keys=REQUIRED, system=s["prompt"],
+                               schema=s["schema"], max_tokens=32000, effort="high")
+    else:
+        tailored = ai.ask_json(build_prompt(s, job), required_keys=REQUIRED)
     if len(tailored.get("work") or []) != len(s["base"]["work"]):
         print(f"  ! AI returned {len(tailored.get('work') or [])} jobs, base profile has "
               f"{len(s['base']['work'])}; missing ones keep the base text")
@@ -143,7 +157,8 @@ def make_resume(ai, job, source="bot"):
         f"Location:  {job.get('location', '')}",
         f"Salary:    {job.get('salary', '')}",
         f"Link:      {job.get('job_link', '')}",
-        f"AI:        {ai.provider}",
+        f"AI:        {ai.provider}" + (f" / {ai.last_model or ai.model}" if ai.provider in API else
+                                       (f" / {ai.model}" if ai.model else "")),
         f"Keywords:  {', '.join(tailored.get('keywords_matched') or [])}",
         "", job.get("jd") or "",
     ]), encoding="utf-8")

@@ -100,8 +100,12 @@ def classify(conn, use_ai):
     ai = None
     provider, _ = ai_settings.get("relevance")
     if use_ai and provider:
-        if provider not in ai_settings.CLI_PROVIDERS:
-            print(f"  ({provider} is a web chat page; job sorting uses rules only - pick a CLI in the AI tab)")
+        problem = ai_settings.api_key_problem(provider)
+        if provider not in ai_settings.NO_BROWSER:
+            print(f"  ({provider} is a web chat page; job sorting uses rules only - pick a CLI "
+                  f"or an API in the AI tab)")
+        elif problem:
+            print(f"  ({provider}: {problem}; job sorting uses rules only, unclear titles are kept)")
         else:
             ai = ai_settings.make_ai("relevance")
             print(f"  unclear titles are sorted by {ai.label}")

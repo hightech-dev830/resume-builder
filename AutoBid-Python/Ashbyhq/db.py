@@ -12,6 +12,7 @@ from html_text import html_to_text
 #                            relevant = 1/0 (software/hardware dev + eng management?)
 #   stage 2 (job details) -> only relevant jobs: description, pay, questions; status 'ready'
 # Then:  ready -> applied / failed / skipped,  ready -> needs_you (bot check) -> applied
+#        applied -> 1Interview -> 2Interview -> 3Interview -> Offer / Rejected  (set by you in the app)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id               TEXT PRIMARY KEY,
@@ -63,6 +64,14 @@ CREATE INDEX IF NOT EXISTS idx_questions_job ON questions(job_id);
 """
 
 
+# Every status a job can have. The bot sets the first six; you set the rest in the app.
+BOT_STATUSES = ["new", "ready", "needs_you", "applied", "failed", "skipped"]
+MY_STATUSES = ["1Interview", "2Interview", "3Interview", "Offer", "Rejected"]
+STATUSES = BOT_STATUSES + MY_STATUSES
+# Statuses that mean "an application was sent" (counted as applied).
+APPLIED_STATUSES = ("applied",) + tuple(MY_STATUSES)
+
+
 def bank_key(title, ftype):
     """Same question text + type => same key on every job (field ids differ per job)."""
     text = re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
@@ -91,7 +100,9 @@ def connect():
     if "resume_path" not in cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN resume_path TEXT")
     for col, typ in [("company", "TEXT"), ("dept_path", "TEXT"), ("relevant", "INTEGER"),
-                     ("relevance_by", "TEXT"), ("details_at", "TEXT")]:
+                     ("relevance_by", "TEXT"), ("details_at", "TEXT"),
+                     ("status_at", "TEXT"),      # when the status was last set (sync: newest wins)
+                     ("sync_hash", "TEXT")]:     # fingerprint of the row as last synced with Supabase
         if col not in cols:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typ}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_relevant ON jobs(relevant, is_active)")
@@ -164,12 +175,16 @@ def jobs_needing_relevance(conn):
 
 # ---------------------------------------------------------------- stage 2: job details
 
-def jobs_needing_details(conn, refresh=False, orgs=None):
-    """Relevant, active jobs whose details (description + questions) are not loaded yet."""
-    sql = "SELECT id, org FROM jobs WHERE is_active=1 AND relevant=1"
+def jobs_needing_details(conn, refresh=False, orgs=None, since=None):
+    """Relevant, active jobs whose details (description + questions) are not loaded yet.
+    since: only jobs first seen at/after this time (db.now() format)."""
+    sql, params = "SELECT id, org FROM jobs WHERE is_active=1 AND relevant=1", []
     if not refresh:
         sql += " AND details_at IS NULL"
-    rows = conn.execute(sql).fetchall()
+    if since:
+        sql += " AND first_seen_at >= ?"
+        params.append(since)
+    rows = conn.execute(sql, params).fetchall()
     return [(r["org"], r["id"]) for r in rows if not orgs or r["org"] in orgs]
 
 
@@ -215,10 +230,12 @@ def save_questions(conn, job_id, questions):
 
 
 def set_status(conn, job_id, status, note=None):
-    """status: ready | needs_you (waiting on a bot check) | applied | failed | skipped"""
-    applied_at = now() if status == "applied" else None
-    conn.execute("UPDATE jobs SET status=?, note=?, applied_at=COALESCE(?, applied_at) WHERE id=?",
-                 (status, note, applied_at, job_id))
+    """status: one of STATUSES (ready | needs_you (waiting on a bot check) | applied | failed |
+    skipped | 1Interview | 2Interview | 3Interview | Offer | Rejected)"""
+    t = now()
+    applied_at = t if status in APPLIED_STATUSES else None
+    conn.execute("UPDATE jobs SET status=?, note=?, applied_at=COALESCE(applied_at, ?), status_at=? WHERE id=?",
+                 (status, note, applied_at, t, job_id))
     conn.commit()
 
 
@@ -229,8 +246,9 @@ def save_answer(conn, question_id, value):
 
 def applied_recently(conn, org, days):
     row = conn.execute(
-        "SELECT COUNT(*) n FROM jobs WHERE org=? AND status='applied' "
-        "AND applied_at >= datetime('now', ?)", (org, f"-{days} days")).fetchone()
+        # by applied_at, not status: a job moved on to 1Interview / Offer / ... still counts
+        "SELECT COUNT(*) n FROM jobs WHERE org=? AND applied_at IS NOT NULL "
+        "AND datetime(applied_at) >= datetime('now', ?)", (org, f"-{days} days")).fetchone()
     return row["n"]
 
 

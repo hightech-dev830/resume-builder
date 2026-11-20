@@ -30,7 +30,9 @@ import answers as bank_mod
 import db
 
 STATUS_COLORS = {"applied": "#1a7f37", "needs_you": "#b35900", "failed": "#c62828",
-                 "skipped": "#777777", "ready": "#1f4fbf", "new": "#555555"}
+                 "skipped": "#777777", "ready": "#1f4fbf", "new": "#555555",
+                 "1Interview": "#7b1fa2", "2Interview": "#6a1b9a", "3Interview": "#4a148c",
+                 "Offer": "#00796b", "Rejected": "#8d6e63"}
 PY = sys.executable.replace("pythonw.exe", "python.exe")
 SETTINGS_PATH = BASE_DIR / "data" / "app_settings.json"   # also read by bid.py --selected
 
@@ -73,6 +75,12 @@ def load_settings():
     s.setdefault("auto_collect", False)
     s.setdefault("auto_hours", 6)
     s.setdefault("last_collect", None)     # ISO time of the last finished collection
+    if "auto_kind" not in s:
+        # Auto-collection = "Collect today's jobs" every 2 hours, on from the first start of
+        # this version (you can change or switch it off in the Run tab).
+        s.update(auto_collect=True, auto_hours=2, auto_kind="today", auto_started=None)
+        save_settings(s)
+    s.setdefault("auto_started", None)     # ISO time the last AUTO collection started (2 h counted from it)
     return s
 
 
@@ -160,9 +168,14 @@ class App(tk.Tk):
         self.geometry("1280x820")
         self.minsize(1000, 640)
         self.conn = db.connect()
-        self.bank = bank_mod.load_bank()
-        bank_mod.sync_bank(self.conn, self.bank)
-        bank_mod.save_bank(self.bank)
+        try:
+            self.bank = bank_mod.load_bank()            # answer bank + profile live in Supabase
+            bank_mod.sync_bank(self.conn, self.bank)
+            bank_mod.save_bank(self.bank)
+        except Exception as e:
+            self.withdraw()
+            messagebox.showerror("AutoBid - Supabase", f"The answer bank could not be loaded from Supabase:\n\n{e}")
+            raise SystemExit(1)
         self.proc = None
         self.proc_label = ""
         self.settings = load_settings()
@@ -243,7 +256,7 @@ class App(tk.Tk):
         self.f_relevant.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
         ttk.Label(bar, text="Status").pack(side="left")
         self.f_status = ttk.Combobox(bar, width=12, state="readonly",
-                                     values=["all", "ready", "needs_you", "applied", "failed", "skipped"])
+                                     values=["all", "applied + later"] + db.STATUSES)
         self.f_status.set("all")
         self.f_status.pack(side="left", padx=(4, 12))
         self.f_status.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
@@ -274,6 +287,8 @@ class App(tk.Tk):
         self.f_search.bind("<KeyRelease>", lambda e: self.load_jobs())
         self.job_count = ttk.Label(bar, text="", style="Stat.TLabel")
         self.job_count.pack(side="left", padx=12)
+        ttk.Button(bar, text="⇅ Sync DB", command=self.sync_db).pack(side="right")
+        ttk.Button(bar, text="Collect today's jobs", command=self.collect_today).pack(side="right", padx=4)
         ttk.Button(bar, text="⟳ Collect jobs", command=self.collect).pack(side="right")
 
         split = ttk.PanedWindow(tab, orient="horizontal")
@@ -336,6 +351,15 @@ class App(tk.Tk):
         self.b_dry.pack(side="left", padx=4)
         self.b_apply = ttk.Button(btns, text="Apply", style="Accent.TButton", command=self.apply_selected)
         self.b_apply.pack(side="left")
+        stbar = ttk.Frame(right)
+        stbar.pack(fill="x", pady=(0, 6))
+        ttk.Label(stbar, text="Status").pack(side="left")
+        self.d_status = ttk.Combobox(stbar, width=12, state="readonly", values=db.STATUSES)
+        self.d_status.pack(side="left", padx=4)
+        self.b_status = ttk.Button(stbar, text="Set status", command=self.set_status_selected)
+        self.b_status.pack(side="left")
+        ttk.Label(stbar, text="(ticked jobs, else the one shown; saved to Supabase)",
+                  style="Stat.TLabel").pack(side="left", padx=6)
 
         self.d_tabs = ttk.Notebook(right)
         self.d_tabs.pack(fill="both", expand=True)
@@ -374,7 +398,10 @@ class App(tk.Tk):
             sql += " AND relevant=1"
         elif show == "not relevant":
             sql += " AND relevant=0"
-        if status != "all":
+        if status == "applied + later":
+            sql += f" AND status IN ({','.join('?' * len(db.APPLIED_STATUSES))})"
+            params += db.APPLIED_STATUSES
+        elif status != "all":
             sql += " AND status=?"
             params.append(status)
         chosen = self.settings["companies"]
@@ -574,6 +601,7 @@ class App(tk.Tk):
         if not job:
             return
         self.selected_job = job
+        self.d_status.set(job["status"] or "")
         self.d_title.config(text=f"{job['title']}  ·  {job['company'] or job['org']}")
         tiers = (job["compensation_tiers"] or job["compensation"] or "").replace("\n", "   ·   ")
         meta = f"{job['department']} › {job['team']}  ·  {job['employment_type']}  ·  {job['workplace_type']}\n" \
@@ -766,8 +794,9 @@ class App(tk.Tk):
 
     def save_profile(self):
         try:
-            # re-reads answers.json and changes only the profile: answers are never overwritten
-            self.bank = bank_mod.set_profile({k: e.get().strip() for k, e in self.p_entries.items()})
+            # saved in Supabase; changes only the profile: answers are never overwritten
+            self.bank = bank_mod.set_profile({k: e.get().strip() for k, e in self.p_entries.items()},
+                                             self.bank)
         except Exception as e:
             messagebox.showerror("Not saved", f"The profile could not be saved:\n{e}")
             return
@@ -863,8 +892,8 @@ class App(tk.Tk):
         rows = self.qlist.get_children()
         pos = rows.index(self.qlist.selection()[0]) if self.qlist.selection() else 0
         try:
-            # re-reads answers.json and changes only this question: nothing else is overwritten
-            self.bank = bank_mod.set_answer(q["key"], answer)
+            # saved in Supabase; changes only this question: nothing else is overwritten
+            self.bank = bank_mod.set_answer(q["key"], answer, self.bank)
         except Exception as e:
             messagebox.showerror("Not saved", f"The answer could not be saved:\n{e}")
             return
@@ -909,20 +938,27 @@ class App(tk.Tk):
         ttk.Checkbutton(opts, text="Bid only on the companies selected in the Jobs tab",
                         variable=self.r_only_sel).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
-        auto = ttk.LabelFrame(tab, text="  Auto-collection (all companies)  ", padding=10)
+        auto = ttk.LabelFrame(tab, text="  Auto-collection  ", padding=10)
         auto.pack(fill="x", pady=(12, 0))
         self.a_on = tk.BooleanVar(value=self.settings["auto_collect"])
-        ttk.Checkbutton(auto, text="Collect all companies automatically every", variable=self.a_on,
+        ttk.Checkbutton(auto, text="Automatically run", variable=self.a_on,
                         command=self.save_auto).grid(row=0, column=0, sticky="w")
+        self.a_kind = ttk.Combobox(auto, width=22, state="readonly",
+                                   values=["Collect today's jobs", "Collect all companies"])
+        self.a_kind.set("Collect all companies" if self.settings.get("auto_kind") == "all"
+                        else "Collect today's jobs")
+        self.a_kind.bind("<<ComboboxSelected>>", lambda e: self.save_auto())
+        self.a_kind.grid(row=0, column=1, padx=6)
+        ttk.Label(auto, text="every").grid(row=0, column=2, sticky="w")
         self.a_hours = ttk.Spinbox(auto, from_=1, to=48, width=4, command=self.save_auto)
         self.a_hours.set(self.settings["auto_hours"])
         self.a_hours.bind("<FocusOut>", lambda e: self.save_auto())
-        self.a_hours.grid(row=0, column=1, padx=6)
-        ttk.Label(auto, text="hours  (while this app is open)").grid(row=0, column=2, sticky="w")
+        self.a_hours.grid(row=0, column=3, padx=6)
+        ttk.Label(auto, text="hours  (while this app is open)").grid(row=0, column=4, sticky="w")
         ttk.Button(auto, text="⟳ Collect all companies now", style="Accent.TButton",
-                   command=self.collect).grid(row=0, column=3, padx=(24, 0))
+                   command=self.collect).grid(row=0, column=5, padx=(24, 0))
         self.a_info = ttk.Label(auto, text="", style="Stat.TLabel")
-        self.a_info.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.a_info.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
         acts = ttk.Frame(tab, padding=(0, 14, 0, 0))
         acts.pack(fill="x")
@@ -955,15 +991,16 @@ class App(tk.Tk):
                 waiting += 1
             else:
                 blocked += 1
+        applied = sum(rows.get(s, 0) for s in db.APPLIED_STATUSES)
         resumes = self.conn.execute("SELECT COUNT(*) FROM jobs WHERE resume_path IS NOT NULL AND resume_path != ''").fetchone()[0]
         total = sum(rows.values())
-        self.stats.config(text=f"{total} jobs   ·   {rows.get('applied', 0)} applied   ·   "
+        self.stats.config(text=f"{total} jobs   ·   {applied} applied   ·   "
                                f"{rows.get('needs_you', 0)} need you   ·   {resumes} resumes")
         self.r_summary.config(text=(
             f"Ready to apply now:  {ready}\n"
             f"Only essays missing (not built yet):  {waiting}\n"
             f"Missing profile / yes-no / choice answers:  {blocked}   → fill the Answers tab\n"
-            f"Applied: {rows.get('applied', 0)}   ·   Waiting for your bot check: {rows.get('needs_you', 0)}   ·   "
+            f"Applied: {applied}   ·   Waiting for your bot check: {rows.get('needs_you', 0)}   ·   "
             f"Failed: {rows.get('failed', 0)}"))
 
     # ------------------------------------------------------------ actions
@@ -973,6 +1010,41 @@ class App(tk.Tk):
         return self.run_script(["collect.py"], "Collecting all companies" + (" (auto)" if auto else ""),
                                quiet=auto)
 
+    def collect_today(self, auto=False):
+        """Jobs new on the boards since the last collection; then shows the ones posted today."""
+        return self.run_script(["collect.py", "--today"], "Collecting today's jobs" + (" (auto)" if auto else ""),
+                               quiet=auto)
+
+    def sync_db(self):
+        """Both ways: jobs changed on other computers come here, jobs changed here go to Supabase."""
+        return self.run_script(["sync_db.py"], "Syncing jobs with Supabase")
+
+    def set_status_selected(self):
+        status = self.d_status.get()
+        ids = self.selected_ids()
+        if not ids or not status:
+            return
+        if len(ids) > 1 and not messagebox.askyesno(
+                "Set status", f"Set the status of {len(ids)} ticked jobs to \"{status}\"?"):
+            return
+        for jid in ids:
+            db.set_status(self.conn, jid, status)
+        self.log(f"✓ Status \"{status}\": {self._selection_label(ids)}\n")
+        self.refresh_all()
+
+        def push():                                    # to Supabase, without freezing the window
+            try:
+                import sync_db
+                conn = db.connect()
+                n = sync_db.push_jobs(conn, ids)
+                conn.close()
+                self.ui_q.put(lambda: self.log(f"  saved to Supabase ({n} job{'s' if n != 1 else ''})\n"))
+            except Exception as e:
+                msg = str(e)[:200]
+                self.ui_q.put(lambda: self.log(f"! Status not saved to Supabase yet ({msg}) - "
+                                               f"click 'Sync DB' later\n"))
+        threading.Thread(target=push, daemon=True).start()
+
     # ---------------- auto-collection
 
     def save_auto(self):
@@ -980,13 +1052,19 @@ class App(tk.Tk):
             hours = max(1, min(48, int(float(self.a_hours.get()))))
         except ValueError:
             hours = self.settings["auto_hours"]
+        turned_on = bool(self.a_on.get()) and not self.settings["auto_collect"]
         self.settings["auto_collect"] = bool(self.a_on.get())
         self.settings["auto_hours"] = hours
+        self.settings["auto_kind"] = "all" if self.a_kind.get() == "Collect all companies" else "today"
+        if turned_on:
+            self.settings["auto_started"] = None     # switched on now: first run right away
         save_settings(self.settings)
         self._auto_info()
 
     def _next_due(self):
-        last = self.settings.get("last_collect")
+        """Every N hours counted from the START of the last automatic run (so 2 h = 2 h,
+        however long a collection takes). Never started yet -> now."""
+        last = self.settings.get("auto_started")
         if not last:
             return datetime.now()
         return datetime.fromisoformat(last) + timedelta(hours=self.settings["auto_hours"])
@@ -994,10 +1072,12 @@ class App(tk.Tk):
     def _auto_info(self):
         last = self.settings.get("last_collect")
         last_txt = datetime.fromisoformat(last).strftime("%b %d %H:%M") if last else "never"
+        what = "today's jobs" if self.settings.get("auto_kind") != "all" else "all companies"
         if self.settings["auto_collect"]:
             nxt = max(self._next_due(), datetime.now())
-            txt = f"Last collection: {last_txt}   ·   next: {nxt.strftime('%b %d %H:%M')}"
-            self.auto_hdr.config(text=f"auto-collect on · next {nxt.strftime('%H:%M')}")
+            txt = (f"Last collection: {last_txt}   ·   auto: {what} every {self.settings['auto_hours']} h   ·   "
+                   f"next: {nxt.strftime('%b %d %H:%M')}")
+            self.auto_hdr.config(text=f"auto-collect ({what}) on · next {nxt.strftime('%H:%M')}")
         else:
             txt = f"Last collection: {last_txt}   ·   auto-collection is off"
             self.auto_hdr.config(text="")
@@ -1009,8 +1089,12 @@ class App(tk.Tk):
         try:
             if self.settings["auto_collect"] and datetime.now() >= self._next_due():
                 busy = self.proc and self.proc.poll() is None
-                if not busy and self.collect(auto=True):
-                    self.log("(auto-collection started)\n")
+                today = self.settings.get("auto_kind") != "all"
+                if not busy and (self.collect_today(auto=True) if today else self.collect(auto=True)):
+                    self.settings["auto_started"] = datetime.now().isoformat(timespec="seconds")
+                    save_settings(self.settings)
+                    self.log(f"(auto-collection started: {'today' if today else 'all companies'}; "
+                             f"next in {self.settings['auto_hours']} h)\n")
             self._auto_info()
         finally:
             self.after(60_000, self._auto_tick)
@@ -1146,6 +1230,28 @@ class App(tk.Tk):
                 values=ai_settings.MODELS.get(p.get().split(" - ")[0], [""])))
             self.ai_widgets[task] = (plat, model, test_lbl)
 
+        kbox = ttk.LabelFrame(tab, text="  API keys (for claude_api / openai_api)  ", padding=10)
+        kbox.pack(fill="x", pady=(10, 0))
+        ttk.Label(kbox, text="Saved in Supabase as Resume Builder's keys, so the web app, the Chrome "
+                             "extension and every computer use the same ones. Paid per use; tokens and "
+                             "cost of each call are saved in the ai_usage table.",
+                  style="Stat.TLabel", wraplength=900).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+        self.key_entries = {}
+        for r, (prov, label) in enumerate([("claude_api", "Claude (Anthropic) key"),
+                                           ("openai_api", "OpenAI key")], 1):
+            ttk.Label(kbox, text=label).grid(row=r, column=0, sticky="w")
+            e = ttk.Entry(kbox, width=70, show="•")
+            e.grid(row=r, column=1, sticky="w", padx=6, pady=2)
+            self.key_entries[prov] = e
+        self.k_show = tk.BooleanVar(value=False)
+        ttk.Checkbutton(kbox, text="Show", variable=self.k_show, command=lambda: [
+            e.config(show="" if self.k_show.get() else "•") for e in self.key_entries.values()]).grid(
+            row=1, column=2, sticky="w")
+        ttk.Button(kbox, text="Save keys", command=self.save_keys).grid(row=2, column=2, sticky="w")
+        self.k_status = ttk.Label(kbox, text="loading saved keys ...", style="Stat.TLabel")
+        self.k_status.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.after(200, self.load_keys)
+
         ttk.Button(tab, text="Save AI settings", style="Accent.TButton", command=self.save_ai).pack(
             anchor="e", pady=(8, 4))
 
@@ -1195,11 +1301,45 @@ class App(tk.Tk):
             self.ai_conf["resume"]["provider"], self.ai_conf["resume"]["model"] or "(default)",
             self.ai_conf["relevance"]["provider"], self.ai_conf["relevance"]["model"] or "(default)"))
 
+    def _key_status(self, keys):
+        parts = [f"{'Claude' if p == 'claude_api' else 'OpenAI'}: " +
+                 (f"saved (…{v[-4:]})" if v else "not set") for p, v in keys.items()]
+        return "   ·   ".join(parts)
+
+    def load_keys(self):
+        """Saved API keys from Supabase, in the background (the window opens at once)."""
+        def work():
+            try:
+                keys = ai_settings.load_api_keys()
+
+                def show():
+                    for p, e in self.key_entries.items():
+                        e.delete(0, "end")
+                        e.insert(0, keys.get(p, ""))
+                    self.k_status.config(text=self._key_status(keys))
+            except Exception as ex:
+                msg = str(ex)[:160]
+
+                def show():
+                    self.k_status.config(text=f"Could not load the keys from Supabase: {msg}")
+            self.ui_q.put(show)
+        threading.Thread(target=work, daemon=True).start()
+
+    def save_keys(self):
+        keys = {p: e.get().strip() for p, e in self.key_entries.items()}
+        try:
+            ai_settings.save_api_keys(keys)
+        except Exception as e:
+            messagebox.showerror("Not saved", f"The API keys could not be saved:\n{e}")
+            return
+        self.k_status.config(text="✓ Saved   ·   " + self._key_status(keys))
+        self.log("✓ API keys saved in Supabase (shared with Resume Builder).\n")
+
     def test_ai(self, task):
         """Ask the chosen platform/model a one-line question in the background."""
         provider, model = self._ai_choice(task)
         lbl = self.ai_widgets[task][2]
-        if provider not in ai_settings.CLI_PROVIDERS:
+        if provider not in ai_settings.NO_BROWSER:
             lbl.config(text="Web chat pages are tested by running the bot (they open in its Chrome window).")
             return
         lbl.config(text=f"Testing {provider} {model or '(default model)'} ...")
@@ -1209,9 +1349,13 @@ class App(tk.Tk):
             from web_ai import WebAI
             started = _t.time()
             try:
-                reply = WebAI(provider, model=model).ask(
-                    "Reply with one short line: OK and the name of the model you are.").strip()
-                msg = f"✓ {reply[:120]}   ({_t.time() - started:.0f}s)"
+                problem = ai_settings.api_key_problem(provider)
+                if problem:
+                    raise RuntimeError(problem)
+                ai = WebAI(provider, model=model, task="test")
+                reply = ai.ask("Reply with one short line: OK and the name of the model you are.").strip()
+                used = f"  [{ai.last_model}]" if ai.last_model else ""
+                msg = f"✓ {reply[:120]}{used}   ({_t.time() - started:.0f}s)"
             except Exception as e:
                 msg = f"✗ {str(e)[:200]}"
             self.ui_q.put(lambda: lbl.config(text=msg))
@@ -1360,9 +1504,18 @@ class App(tk.Tk):
                         self.settings["last_collect"] = datetime.now().isoformat(timespec="seconds")
                         save_settings(self.settings)
                         self._auto_info()
-                    self.bank = bank_mod.load_bank()
-                    bank_mod.sync_bank(self.conn, self.bank)
-                    bank_mod.save_bank(self.bank)
+                    # clicked by you: show today's postings (an automatic run leaves your filters alone)
+                    if self.proc_label.startswith("Collecting today") and "(auto)" not in self.proc_label:
+                        self.f_relevant.set("relevant")
+                        self.f_status.set("all")
+                        self.f_answers.set("any")
+                        self.f_posted.set("today")
+                    try:
+                        self.bank = bank_mod.load_bank()
+                        bank_mod.sync_bank(self.conn, self.bank)
+                        bank_mod.save_bank(self.bank)
+                    except Exception as e:
+                        self.log(f"!! Answer bank not refreshed from Supabase: {e}\n")
                     self.refresh_all()
                 else:
                     self.log(line)

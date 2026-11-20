@@ -184,7 +184,10 @@ class RelevanceFilter:
             "Reply with ONLY one JSON object inside a ```json code block: "
             '{"relevant": [numbers of the YES jobs]}. Every number not listed counts as NO.')
         try:
-            data = self.ai.ask_json(prompt, required_keys=["relevant"])
+            # schema / effort are used by the API platforms only (structured JSON output)
+            data = self.ai.ask_json(prompt, required_keys=["relevant"], effort="low", schema={
+                "type": "object", "additionalProperties": False, "required": ["relevant"],
+                "properties": {"relevant": {"type": "array", "items": {"type": "integer"}}}})
         except Exception as e:
             self.log(f"  ! relevance AI failed ({str(e)[:120]}); unclear jobs are kept")
             return {}

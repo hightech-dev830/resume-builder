@@ -1,7 +1,7 @@
 """Step 3: apply to jobs in BATCH MODE.
 
   1. Open up to BATCH_SIZE jobs, one tab each, fill the REQUIRED fields from
-     answers.json, click "Submit Application".
+     answer bank (Supabase), click "Submit Application".
        - no bot check  -> submitted, tab closed, status 'applied'
        - bot check     -> tab left open, status 'needs_you'
   2. One notification: "N applications are waiting for you". Solve the bot checks
@@ -572,7 +572,7 @@ def main():
         print(f"{len(only_jobs)} selected job(s)")
     ready, waiting_ai, blocked = pick_jobs(conn, bank, only_jobs or None, companies)
     print(f"{len(ready)} jobs ready | {waiting_ai} need AI-written essays (not built yet) | "
-          f"{blocked} need answers in answers.json")
+          f"{blocked} need answers in the answer bank")
 
     planned, queue = {}, []
     for job, items in ready:
@@ -595,6 +595,12 @@ def main():
                   f"No job was touched.")
             notify("AutoBid: not started", f"'{provider}' is not installed - change it in the AI tab.")
             return
+    problem = ai_settings.api_key_problem(provider) if TAILORED_RESUME else None
+    if problem:
+        print(f"\nSTOPPED: resumes are set to be written by '{provider}', but {problem}.\n"
+              f"No job was touched.")
+        notify("AutoBid: not started", f"{provider}: {problem}")
+        return
 
     with sync_playwright() as pw:
         ctx = open_browser(pw)
@@ -639,6 +645,12 @@ def main():
                        "SUM(status='failed') f FROM jobs").fetchone()
     print(f"\nTotal: {row['a'] or 0} applied | {row['n'] or 0} waiting for bot check | "
           f"{row['f'] or 0} failed")
+    try:                                   # statuses to Supabase, so every computer sees them
+        import sync_db
+        sync_db.sync(conn, quiet=True)
+        print("Statuses synced with Supabase.")
+    except Exception as e:
+        print(f"! Supabase sync skipped: {str(e)[:200]}  (click 'Sync DB' later)")
 
 
 if __name__ == "__main__":

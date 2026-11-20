@@ -75,6 +75,9 @@ def main():
     if not jobs:
         sys.exit("No matching jobs.")
 
+    problem = ai_settings.api_key_problem(args.ai or ai_settings.get("resume")[0])
+    if problem:
+        sys.exit(f"Not started: {problem}.")
     s = settings()
     print(f"Prompt + base profile from: {s['source']} | template: {s['template']} | "
           f"folder: {s['outputDir']}")

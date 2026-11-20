@@ -56,8 +56,20 @@ Run it again at any time. New jobs are added, closed ones are marked `is_active=
 
 ## Database (`data/ashbyhq.db`, SQLite)
 
-- **jobs**: one row per job. `status` moves through `new` → `ready` (questions collected) → `applied` / `skipped` / `failed`.
+- **jobs**: one row per job. `status` moves through `new` → `ready` (questions collected) → `applied` / `skipped` / `failed`. After applying, you set `1Interview` → `2Interview` → `3Interview` → `Offer` / `Rejected` in the app (Jobs tab → **Status** → **Set status**, for the ticked jobs or the one shown).
 - **questions**: one row per application-form field for each job, with `type` (String, LongText, Boolean, ValueSelect, MultiValueSelect, File, Location, Email, ...), `required`, `options`, and an empty `answer` column for the bid step.
+
+### Jobs in Supabase (`sync_db.py`, **⇅ Sync DB** button)
+
+Every job, with its questions and your status, is also stored in Supabase table `autobid_jobs` (run [`supabase/migrations/005_autobid_jobs.sql`](../../supabase/migrations/005_autobid_jobs.sql) once). **⇅ Sync DB** works both ways: jobs changed on another computer come to this board, and jobs changed here go to Supabase. Only changed jobs are sent. When both sides changed the same job, the newest status wins.
+
+It also runs by itself after every collection and every bid run, and a status you set in the app is saved to Supabase right away. On a new computer: copy the `.env`, open the app and click **⇅ Sync DB** to get every job.
+
+Not synced: the resume PDF path (it points into one computer's disk), `description_html` and the raw Ashby field JSON (large and unused).
+
+### Collect today's jobs (`collect.py --today`)
+
+Ashby's job lists carry no posted date, so this still lists every board (that is how new jobs are found, about 20 minutes). It then downloads details only for the jobs that are new since the last collection, prints the relevant ones posted today and switches the Jobs list to **Posted: today**.
 
 ## Settings (`config.py`)
 
@@ -66,22 +78,31 @@ Run it again at any time. New jobs are added, closed ones are marked `is_active=
 - `BOARD_WORKERS` / `WORKERS`: how many boards and question requests run in parallel.
 - `APPLY_LIMITS`: per-company application limits, for example `{"ashby": (3, 60)}`.
 
-## Answer bank (`answers.json`)
+## Answer bank (Supabase)
 
 Only **required** questions are answered. Optional ones, including the Diversity Survey, are left empty. The one exception is the resume, which is always uploaded.
 
 Most Ashby questions repeat on every job, but each job gives them a different field id. `answers.py` stores each distinct required question once, matched by its text and type. You answer it once, and that answer fills it on every job.
 
+The questions, your answers and your profile are saved in **Supabase** (the same project as Resume Builder), not in a local file, so every computer uses the same answers:
+
+- table `autobid_questions`: one row per question (`platform` = `ashby`, `key`, question text, type, choices, `answer`)
+- table `autobid_profile`: name, email, phone, LinkedIn, GitHub, website, location, resume file
+
+Setup, once: run [`supabase/migrations/004_autobid_answers.sql`](../../supabase/migrations/004_autobid_answers.sql) in Supabase → SQL Editor. The bot reads `SUPABASE_URL` and `SUPABASE_SECRET_KEY` from `resume-builder/.env.local` or `.env`, the same file as the web app. On a new computer, copy that `.env` and you have all your answers.
+
+An old local `answers.json` is imported automatically on the first start, then renamed to `answers.json.imported`.
+
 ```
-python answers.py            # add new questions to answers.json + show coverage
+python answers.py            # add new questions to the bank + show coverage
 python answers.py <job-id>   # preview how one job's form will be autofilled
 ```
 
-- `profile`: name, email, phone, LinkedIn, GitHub, website, location, resume. These fill the Name, Email, Resume, Location, LinkedIn URL and GitHub URL fields.
-- `questions[].answer`: write `"Yes"`/`"No"`, one choice label (for example `"30-39"`), a list for multi-select (for example `["Asian or Asian American"]`), or text.
-- Text and essay questions left empty (`null`) are written per job by the AI in the bid step.
+Answer questions in the desktop app's **Answers** tab:
 
-`answers.json` holds personal data and is excluded from git.
+- **My profile**: name, email, phone, LinkedIn, GitHub, website, location, resume. These fill the Name, Email, Resume, Location, LinkedIn URL and GitHub URL fields.
+- **Answers**: `"Yes"`/`"No"`, one choice label (for example `"30-39"`), several choices for multi-select (for example `["Asian or Asian American"]`), or text.
+- Text and essay questions left empty are written per job by the AI in the bid step.
 
 ## Bot check (captcha)
 
@@ -105,7 +126,7 @@ python bid.py --dry-run --job <job-id>   # fill one form, don't submit: check it
 python bid.py                            # apply for real, in batches
 ```
 
-1. It opens up to `BATCH_SIZE` jobs (default 5), one tab each. It fills the required fields from `answers.json`, uploads the resume, and clicks **Submit Application**.
+1. It opens up to `BATCH_SIZE` jobs (default 5), one tab each. It fills the required fields from the answer bank, uploads the resume, and clicks **Submit Application**.
    - If no bot check appears, the application is submitted, the tab closes, and the job is marked `applied`.
    - If a bot check appears, the tab stays open and the job is marked `needs_you`.
 2. You get **one** notification: "N applications are waiting for you". Solve the bot check in each tab. Each tab submits and closes by itself, and the next tab comes to the front.
