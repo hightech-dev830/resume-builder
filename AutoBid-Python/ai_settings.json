@@ -1,0 +1,11 @@
+{
+  "resume": {
+    "provider": "claude_code",
+    "model": "claude-opus-5-5"
+  },
+  "relevance": {
+    "provider": "claude_code",
+    "model": "haiku"
+  },
+  "prompt_source": "resume_builder"
+}

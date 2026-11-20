@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+*.db
+# personal answers / resumes
+answers.json
+resumes/
+.cache/
+.browser-profile/
