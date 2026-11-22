@@ -37,6 +37,8 @@ CLI_PROVIDERS = {"claude_code", "cursor", "cursor_auto"}
 # (claude_api_key / openai_api_key), shared with the web app and the Chrome extension.
 API_PROVIDERS = {"claude_api": "anthropic", "openai_api": "openai"}
 KEY_SETTINGS = {"claude_api": "claude_api_key", "openai_api": "openai_api_key"}
+# Chat web pages: no model picker (the page's own model is used).
+WEB_PROVIDERS = {"chatgpt", "claude", "deepseek"}
 # Platforms that need no browser (CLI or API).
 NO_BROWSER = CLI_PROVIDERS | set(API_PROVIDERS)
 

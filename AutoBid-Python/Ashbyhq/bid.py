@@ -498,15 +498,27 @@ def write_essays(ai, job, items):
         job_txt = f"Role: {job_info.get('role')}\nCompany: {job_info.get('company')}\n" \
                   f"<job_description>\n{(job_info.get('jd') or '')[:6000]}\n</job_description>"
 
+    # Web chat models (DeepSeek/ChatGPT) choke on huge profiles; keep essays focused
+    try:
+        from web_ai import PROVIDERS
+        if ai.provider in PROVIDERS and len(profile) > 12000:
+            profile = profile[:12000] + "\n…[profile truncated]"
+        if ai.provider in PROVIDERS and len(job_txt) > 7000:
+            job_txt = job_txt[:7000] + "\n…[job truncated]"
+    except Exception:
+        pass
+
     q_lines = []
+    keys = [str(n) for n in range(len(todo))]
     for n, item in enumerate(todo):
         q = item["q"]                       # sqlite3.Row (no .get)
         tip = "1-2 short sentences or a phrase" if q["type"] == "String" else \
               "a short essay, about 80-180 words, first person"
         desc = (q["description"] or "").strip()
         note = f"\n   hint under the question: {desc}" if desc else ""
-        q_lines.append(f"{n}. [{q['type']}] {q['title']}{note}\n   write: {tip}")
+        q_lines.append(f'{n}. key="{n}" [{q["type"]}] {q["title"]}{note}\n   write: {tip}')
 
+    example = "{" + ", ".join(f'"{k}": "your answer for question {k}"' for k in keys) + "}"
     prompt = (
         "You are filling a job application form for the candidate below. Write truthful, "
         "specific answers that fit THIS job. Do not invent employers, degrees, dates, URLs or "
@@ -516,11 +528,13 @@ def write_essays(ai, job, items):
         f"<candidate_profile>\n{profile}\n</candidate_profile>\n\n"
         f"{job_txt}\n\n"
         "<questions>\n" + "\n".join(q_lines) + "\n</questions>\n\n"
-        'Reply with ONLY one JSON object inside a ```json code block, shaped like:\n'
-        '{"0": "answer for question 0", "1": "answer for question 1", ...}\n'
-        "Keys are the question numbers as strings. No text before or after the JSON."
+        "Reply with ONLY one JSON object inside a ```json code block.\n"
+        f"Required keys (strings): {', '.join(keys)}\n"
+        f"Exact shape:\n{example}\n"
+        "Do not use an array. Do not nest objects. Do not use question titles as keys. "
+        "No text before or after the JSON."
     )
-    data = ai.ask_json(prompt, required_keys=[str(n) for n in range(len(todo))])
+    data = ai.ask_json(prompt, required_keys=keys)
     for n, item in enumerate(todo):
         text = data.get(str(n))
         if not isinstance(text, str) or not text.strip():
@@ -563,17 +577,12 @@ def handle_error(conn, job, page, msg):
 
 
 def prepare(ctx, conn, ai, job, items, dry_run):
-    """(Essays) + (Resume) + open + fill + submit one job. Returns (page, state)."""
+    """(Resume) + (Essays) + open + fill + submit one job. Returns (page, state).
+
+    Resume runs first so a ChatGPT essay capture failure still leaves a PDF on the job
+    (Jobs board '✓ ready' / Make resume no longer stuck on 'not made yet').
+    """
     print(f"\n- {job['title']}  ({job['id']})")
-    try:
-        write_essays(ai, job, items)
-    except Exception as e:
-        # an AI problem is not the job's fault: it stays 'ready' and is tried again
-        msg = f"essays not written: {str(e).splitlines()[0][:200]}"
-        print(f"    ! {msg} (job stays ready)")
-        conn.execute("UPDATE jobs SET note=? WHERE id=?", (msg, job["id"]))
-        conn.commit()
-        return None, "skipped"
     for item in items:
         if item["value"] == bank_mod.TAILORED_PLACEHOLDER:
             try:
@@ -585,6 +594,15 @@ def prepare(ctx, conn, ai, job, items, dry_run):
                 conn.execute("UPDATE jobs SET note=? WHERE id=?", (msg, job["id"]))
                 conn.commit()
                 return None, "skipped"
+    try:
+        write_essays(ai, job, items)
+    except Exception as e:
+        # an AI problem is not the job's fault: it stays 'ready' and is tried again
+        msg = f"essays not written: {str(e).splitlines()[0][:200]}"
+        print(f"    ! {msg} (job stays ready)")
+        conn.execute("UPDATE jobs SET note=? WHERE id=?", (msg, job["id"]))
+        conn.commit()
+        return None, "skipped"
     page = ctx.new_page()
     page.goto(job["apply_url"], wait_until="domcontentloaded", timeout=60000)
     page.wait_for_selector(FORM_READY, timeout=45000)

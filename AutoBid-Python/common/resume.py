@@ -82,8 +82,9 @@ def safe_name(s, max_len=60):
     return s[:max_len].strip() or "x"
 
 
-def job_block(job):
-    """Same layout as jobBlock() in lib/shared/ai.js."""
+def job_block(job, jd_limit=None):
+    """Same layout as jobBlock() in lib/shared/ai.js.
+    jd_limit: optional max chars for the job description (web ChatGPT Free handles shorter prompts better)."""
     head = [
         f"Company: {job.get('company') or '(not given)'}",
         f"Role: {job.get('role') or '(not given)'}",
@@ -91,18 +92,26 @@ def job_block(job):
         f"Salary: {job['salary']}" if job.get("salary") else None,
         f"Job link: {job['job_link']}" if job.get("job_link") else None,
     ]
+    jd = job.get("jd") or "(no job description provided)"
+    if jd_limit and len(jd) > jd_limit:
+        jd = jd[:jd_limit] + "\n…[truncated for chat length]"
     return "\n".join([l for l in head if l] + [
-        "<job_description>", job.get("jd") or "(no job description provided)", "</job_description>"])
+        "<job_description>", jd, "</job_description>"])
 
 
-def build_prompt(s, job):
+def build_prompt(s, job, jd_limit=None):
     """The extension sends system + user + a JSON schema to the API. A web chat has one
     message box, so everything goes in one message, with the schema spelled out."""
+    schema = s["schema"]
+    schema_txt = json.dumps(schema, ensure_ascii=False)
+    # Keep web prompts smaller: full schema can be huge and ChatGPT Free truncates/refuses.
+    if jd_limit and len(schema_txt) > 8000:
+        schema_txt = schema_txt[:8000] + "…[schema truncated]"
     return (
         "<instructions>\n" + s["prompt"] + "\n</instructions>\n\n"
         "<base_profile>\n" + json.dumps(s["base"], indent=2, ensure_ascii=False) + "\n</base_profile>\n\n"
-        + job_block(job) + "\n\n"
-        "<json_schema>\n" + json.dumps(s["schema"], ensure_ascii=False) + "\n</json_schema>\n\n"
+        + job_block(job, jd_limit=jd_limit) + "\n\n"
+        "<json_schema>\n" + schema_txt + "\n</json_schema>\n\n"
         "Write the resume for this job exactly as the instructions say. Reply with ONLY one JSON "
         "object that matches <json_schema>, inside a single ```json code block. No text before or after it."
     )
@@ -128,7 +137,11 @@ def make_resume(ai, job, source="bot"):
         tailored = ai.ask_json(api_user_message(s, job), required_keys=REQUIRED, system=s["prompt"],
                                schema=s["schema"], max_tokens=32000, effort="high")
     else:
-        tailored = ai.ask_json(build_prompt(s, job), required_keys=REQUIRED)
+        # Web ChatGPT (Free or Plus): shorter JD so the composer accepts the prompt.
+        # Free does not need a special OpenAI permission - same chat UI as Plus.
+        from web_ai import PROVIDERS
+        jd_limit = 6000 if ai.provider in PROVIDERS else None
+        tailored = ai.ask_json(build_prompt(s, job, jd_limit=jd_limit), required_keys=REQUIRED)
     if len(tailored.get("work") or []) != len(s["base"]["work"]):
         print(f"  ! AI returned {len(tailored.get('work') or [])} jobs, base profile has "
               f"{len(s['base']['work'])}; missing ones keep the base text")

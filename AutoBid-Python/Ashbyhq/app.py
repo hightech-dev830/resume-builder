@@ -1123,33 +1123,46 @@ class App(tk.Tk):
             self.auto_hdr.config(text="")
         self.a_info.config(text=txt)
 
-    def _auto_tick(self):
-        """Every minute: start a collection when auto-collection is on and it is due.
-        If the bot is busy (bidding, a resume, ...) it waits for the next free minute."""
+    def _auto_tick(self, reschedule=True):
+        """Start a collection when auto-collection is on and it is due.
+        Called every minute, and also right after another task finishes if overdue.
+        If the bot is busy (bidding, a resume, ...) it waits until free."""
         try:
-            if self.settings["auto_collect"] and datetime.now() >= self._next_due():
+            # Reload from disk so a Save on the Run tab is always honored
+            try:
+                self.settings = load_settings()
+            except Exception:
+                pass
+            if self.settings.get("auto_collect") and datetime.now() >= self._next_due():
                 busy = self.proc and self.proc.poll() is None
                 today = self.settings.get("auto_kind") != "all"
                 if busy:
                     if not getattr(self, "_auto_busy_logged", False):
-                        self.log("(auto-collection due - waiting until the current task finishes)\n")
+                        self.log("(auto-collection due - waiting until the current task finishes; "
+                                 "new jobs will land on the Jobs board and sync to Supabase after)\n")
                         self._auto_busy_logged = True
                 elif self.collect_today(auto=True) if today else self.collect(auto=True):
                     self._auto_busy_logged = False
                     self.settings["auto_started"] = datetime.now().isoformat(timespec="seconds")
                     save_settings(self.settings)
                     self.log(f"(auto-collection started: {'today' if today else 'all companies'}; "
-                             f"scrapes every board, saves new jobs to the local DB, syncs to "
-                             f"Supabase, then refreshes the Jobs tab; next in "
-                             f"{self.settings['auto_hours']} h)\n")
+                             f"scrapes every board, saves new jobs to the local DB + Jobs board, "
+                             f"syncs to Supabase; next in {self.settings['auto_hours']} h)\n")
             self._auto_info()
         finally:
-            self.after(60_000, self._auto_tick)
+            if reschedule:
+                self.after(60_000, self._auto_tick)
 
     def _selection_label(self, ids):
         if len(ids) == 1:
             return self.jobs.set(ids[0], "title")
         return f"{len(ids)} selected jobs"
+
+    def _flush_ai_settings(self):
+        """Write the AI tab (including an unsaved Platform change) to disk before any AI task.
+        Prevents bid.py from still using claude_api after you switched to ChatGPT web."""
+        if getattr(self, "ai_widgets", None):
+            self.save_ai()
 
     def make_resume_selected(self):
         ids = self.selected_ids()
@@ -1159,15 +1172,18 @@ class App(tk.Tk):
                 "Make resumes", f"Write {len(ids)} tailored resumes with the AI?\n"
                                 f"(about 1-2 minutes each, one after another)"):
             return
+        self._flush_ai_settings()
         self.run_script(["make_resume.py", "--jobs-file", self._write_selection(ids)],
                         f"Resume for {self._selection_label(ids)}")
 
     def make_all_resumes(self):
+        self._flush_ai_settings()
         self.run_script(["make_resume.py", "--all"], "Making missing resumes")
 
     def dry_run_selected(self):
         ids = self.selected_ids()
         if ids:
+            self._flush_ai_settings()
             self.run_script(["bid.py", "--dry-run", "--batch", self.r_batch.get(),
                              "--jobs-file", self._write_selection(ids)],
                             f"Dry run: {self._selection_label(ids)}")
@@ -1185,6 +1201,7 @@ class App(tk.Tk):
                 f"written by the AI per job. Jobs missing profile / yes-no / choice answers are "
                 f"skipped and listed in the log. Company limits (Ashby: 3 in 60 days) apply.")):
             return
+        self._flush_ai_settings()
         self.run_script(["bid.py", "--batch", self.r_batch.get(), "--jobs-file", self._write_selection(ids)],
                         f"Applying: {self._selection_label(ids)}")
 
@@ -1199,6 +1216,7 @@ class App(tk.Tk):
             args.append("--dry-run")
         elif not messagebox.askyesno("Start bidding", "Dry run is off: applications will be SUBMITTED. Continue?"):
             return
+        self._flush_ai_settings()
         self.run_script(args, "Bidding" + (" (dry run)" if self.r_dry.get() else ""))
 
     def stop(self):
@@ -1303,22 +1321,27 @@ class App(tk.Tk):
             plat = ttk.Combobox(box, state="readonly", width=48,
                                 values=[f"{k} - {v}" for k, v in ai_settings.PROVIDERS.items()])
             plat.grid(row=1, column=1, columnspan=2, sticky="w", padx=6, pady=2)
-            ttk.Label(box, text="Model").grid(row=2, column=0, sticky="w")
+            model_lbl = ttk.Label(box, text="Model")
+            model_lbl.grid(row=2, column=0, sticky="w")
             model = ttk.Combobox(box, width=26)   # editable: any model name can be typed
             model.grid(row=2, column=1, sticky="w", padx=6, pady=2)
+            test_btn = ttk.Button(box, text="Test", command=lambda t=task: self.test_ai(t))
+            test_btn.grid(row=2, column=2, sticky="w")
             test_lbl = ttk.Label(box, text="", style="Stat.TLabel", wraplength=480)
-            ttk.Button(box, text="Test", command=lambda t=task: self.test_ai(t)).grid(row=2, column=2, sticky="w")
-            ttk.Label(box, text="Empty model = the platform's default. Type any model name, e.g. "
-                                "claude-opus-5-5.", style="Stat.TLabel").grid(row=3, column=0, columnspan=3, sticky="w")
+            model_hint = ttk.Label(box, text="Empty model = the platform's default. Type any model name, e.g. "
+                                             "claude-opus-5-5.", style="Stat.TLabel")
+            model_hint.grid(row=3, column=0, columnspan=3, sticky="w")
+            web_hint = ttk.Label(box, text="Web chat pages use the model selected on the site "
+                                           "(no model box here).", style="Stat.TLabel")
             test_lbl.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
             provider = self.ai_conf[task]["provider"]
             plat.set(f"{provider} - {ai_settings.PROVIDERS.get(provider, '')}")
             model["values"] = ai_settings.MODELS.get(provider, [""])
             model.set(self.ai_conf[task]["model"])
-            plat.bind("<<ComboboxSelected>>", lambda e, m=model, p=plat: m.configure(
-                values=ai_settings.MODELS.get(p.get().split(" - ")[0], [""])))
-            self.ai_widgets[task] = (plat, model, test_lbl)
+            self.ai_widgets[task] = (plat, model, test_lbl, model_lbl, test_btn, model_hint, web_hint)
+            plat.bind("<<ComboboxSelected>>", lambda e, t=task: self._on_ai_platform(t))
+            self._ai_platform_ui(task)
 
         kbox = ttk.LabelFrame(tab, text="  API keys (for claude_api / openai_api)  ", padding=10)
         kbox.pack(fill="x", pady=(10, 0))
@@ -1377,8 +1400,39 @@ class App(tk.Tk):
         self.r_ai_label.config(text=f"{p}" + (f"  ·  {m}" if m else "  ·  default model"))
 
     def _ai_choice(self, task):
-        plat, model, _ = self.ai_widgets[task]
-        return plat.get().split(" - ")[0], model.get().strip()
+        plat, model = self.ai_widgets[task][0], self.ai_widgets[task][1]
+        provider = plat.get().split(" - ")[0]
+        # web pages have no model (the chat site picks it)
+        if provider in ai_settings.WEB_PROVIDERS:
+            return provider, ""
+        return provider, model.get().strip()
+
+    def _ai_platform_ui(self, task):
+        """Show/hide the Model row: web chat pages have no model setting."""
+        plat, model, _test_lbl, model_lbl, test_btn, model_hint, web_hint = self.ai_widgets[task]
+        provider = plat.get().split(" - ")[0]
+        if provider in ai_settings.WEB_PROVIDERS:
+            model.set("")
+            model_lbl.grid_remove()
+            model.grid_remove()
+            test_btn.grid_remove()
+            model_hint.grid_remove()
+            web_hint.grid(row=3, column=0, columnspan=3, sticky="w")
+        else:
+            web_hint.grid_remove()
+            model_lbl.grid()
+            model.grid()
+            test_btn.grid()
+            model_hint.grid()
+            model["values"] = ai_settings.MODELS.get(provider, [""])
+            if model.get() not in (model["values"] or [""]) and model.get():
+                pass  # keep a typed custom model name
+            elif not model.get() and ai_settings.MODELS.get(provider):
+                model.set(ai_settings.MODELS[provider][0])
+
+    def _on_ai_platform(self, task):
+        self._ai_platform_ui(task)
+        self.save_ai()   # so bidding never keeps using the previous API after you switch
 
     def save_ai(self):
         for task in ("resume", "relevance"):
@@ -1587,17 +1641,18 @@ class App(tk.Tk):
             while True:
                 line = self.out_q.get_nowait()
                 if line is None:
+                    finished_label = self.proc_label
                     self.busy.config(text="")
                     self._hide_run_bar()
                     STOP_FLAG.unlink(missing_ok=True)
                     self.b_start.config(state="normal")
                     self.b_stop.config(state="disabled")
                     self.log("━━ finished ━━\n")
-                    if self.proc_label.startswith("Collecting") and self.proc and self.proc.returncode == 0:
+                    if finished_label.startswith("Collecting") and self.proc and self.proc.returncode == 0:
                         self.settings["last_collect"] = datetime.now().isoformat(timespec="seconds")
                         save_settings(self.settings)
                         self._auto_info()
-                    if self.proc_label.startswith("Collecting"):
+                    if finished_label.startswith("Collecting"):
                         self._sort_unsorted()
                         # show the jobs this scrape found (Posted = today uses first_seen_at too)
                         self.f_relevant.set("relevant")
@@ -1611,11 +1666,15 @@ class App(tk.Tk):
                     except Exception as e:
                         self.log(f"!! Answer bank not refreshed from Supabase: {e}\n")
                     self.refresh_all()
-                    if self.proc_label.startswith("Collecting"):
+                    if finished_label.startswith("Collecting"):
                         self._log_collect_result()
                         # Safety net: even if collect.py was killed mid-run ("Stop now"),
                         # push whatever is already in the local DB to Supabase, then refresh again.
                         self._sync_after_collect()
+                    # Apply/resume/etc. just freed the bot: if auto-collect is overdue, run it now
+                    # (do not wait up to 60 s for the next minute tick).
+                    elif self.settings.get("auto_collect") and datetime.now() >= self._next_due():
+                        self.after(500, lambda: self._auto_tick(reschedule=False))
                 else:
                     self.log(line)
         except queue.Empty:
