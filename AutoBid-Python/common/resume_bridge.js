@@ -13,6 +13,7 @@
 //       request = { base, tailored, template, outDir, fileBase }
 //       -> merges the AI answer into the base profile (same rules as the app), writes
 //          <outDir>/<fileBase>_Resume.pdf and <outDir>/resume.json, prints { pdf, resume }
+//          AutoBid uses fileBase "KevinBurgess" and outDir .../<platform>/<date>/<Company>/<Role>
 const fs = require('fs');
 const path = require('path');
 

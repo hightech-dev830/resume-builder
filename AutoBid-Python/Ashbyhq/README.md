@@ -15,7 +15,7 @@ Double-click **`AutoBid-Ashbyhq.bat`**, or run `python app.py`.
 - **Answers:** your profile, plus every required question with how many jobs ask it. Pick a question and answer it with Yes/No, a choice, or text, once for all jobs.
 - **Run:** pick the AI and batch size, keep Dry run on to test, then **Start bidding**. Tick *Bid only on the companies selected* to limit bidding to your Companies selection. A live log is at the bottom, and **Stop** always works.
 - **AI:** separate settings for **resume writing** and **job sorting** (unclear titles in stage 1). For each one:
-  - **Platform:** Claude Code or Cursor CLI, using your login. The ChatGPT, Claude.ai and DeepSeek web pages are listed but not recommended.
+  - **Platform:** Claude Code, Cursor Agent Auto (desktop CLI + Auto model), Cursor Agent (pick a model), or an API key. The ChatGPT, Claude.ai and DeepSeek web pages are listed but not recommended. Cursor Agent needs the CLI: `irm 'https://cursor.com/install?win32=true' | iex`, then `agent login`.
   - **Model:** pick one (opus, sonnet, haiku…) or type any model name. Empty means the platform's default.
   - **Test** asks the chosen model a one-line question.
 
@@ -139,5 +139,5 @@ Notes:
 - Ashby uses **invisible reCAPTCHA Enterprise**. There's no checkbox on the form; an image challenge appears only after Submit, when reCAPTCHA isn't sure.
 - The bot uses your installed Chrome with its own profile (`data/chrome-profile`). Cookies build up over time, so bot checks get rarer.
 - `APPLY_LIMITS` in `config.py` keeps the bot within company limits. Ashby allows 3 applications in 60 days.
-- Jobs whose required essays aren't answered yet are skipped until the AI step exists.
+- Empty required text/essay questions are written by the AI per job during the bid step (same AI as resumes). Yes/no, choice and profile answers must still be filled in the Answers tab.
 - The "Autofill from resume" box at the top of the form is never used, because it would overwrite answers.

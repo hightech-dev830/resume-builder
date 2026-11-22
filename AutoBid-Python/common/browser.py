@@ -14,7 +14,12 @@ def open_browser(playwright, headless=False):
     try:
         return playwright.chromium.launch_persistent_context(
             str(PROFILE_DIR), channel="chrome", headless=headless,
-            no_viewport=True, args=["--start-maximized"])
+            no_viewport=True,
+            # Playwright's defaults mark the browser as automated (navigator.webdriver = true,
+            # the "controlled by automated software" flag). reCAPTCHA Enterprise scores that
+            # as a bot -> "There was a problem verifying this submission with CAPTCHA".
+            ignore_default_args=["--enable-automation"],
+            args=["--start-maximized", "--disable-blink-features=AutomationControlled"])
     except Exception as e:
         if "ProcessSingleton" in str(e) or "in use" in str(e).lower():
             raise SystemExit("The bot's Chrome window is already open (another bot running?). "

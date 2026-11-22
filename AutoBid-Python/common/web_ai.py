@@ -5,7 +5,8 @@ Providers:
     claude_api    Claude API with your Anthropic key  } same code as Resume Builder / the extension
     openai_api    OpenAI API with your OpenAI key     } (resume_bridge.js ai-complete -> lib/shared/ai.js);
                   keys from Resume Builder settings (Supabase), tokens + cost saved to ai_usage
-    cursor        "cursor-agent -p" (Cursor CLI, uses your Cursor login)
+    cursor        "agent -p" (Cursor Agent desktop CLI, pick a model; your Cursor login)
+    cursor_auto   "agent -p --model auto" (same CLI, Auto routing - Cursor picks the model)
     chatgpt / claude / deepseek   the chat WEB page in the bot's Chrome window.
         Not recommended: these sites detect automated browsers (ChatGPT shows a
         Cloudflare "Just a moment..." check) and their terms forbid automated use,
@@ -15,6 +16,7 @@ Each question goes to a NEW chat, so jobs never mix. The browser profile is shar
 the bots (common/browser.py), so you log in to the AI sites only once.
 """
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -53,7 +55,10 @@ PROVIDERS = {
 CLI = {
     # --tools "": text answers only, Claude Code never runs tools (faster, nothing touched)
     "claude_code": ["claude", "-p", "--output-format", "text", "--tools", ""],
-    "cursor": ["cursor-agent", "-p", "--output-format", "text"],
+    # Cursor Agent desktop CLI (https://cursor.com/docs/cli). Ask mode = text only, no file edits.
+    # Binary is "agent" (newer) or legacy "cursor-agent". find_cli() resolves either.
+    "cursor": ["agent", "-p", "--output-format", "text", "--mode", "ask", "--trust"],
+    "cursor_auto": ["agent", "-p", "--output-format", "text", "--mode", "ask", "--trust"],
 }
 
 # API platforms -> the provider name in lib/shared/ai.js
@@ -150,18 +155,27 @@ class WebAI:
     def _ask_cli(self, prompt):
         cmd = list(CLI[self.provider])
         exe = find_cli(cmd[0])
+        if not exe and cmd[0] == "agent":
+            # older installs used the name cursor-agent
+            exe = find_cli("cursor-agent")
         if not exe:
-            raise RuntimeError(f"'{cmd[0]}' is not installed or not on PATH")
+            hint = ("Install Cursor Agent CLI: in PowerShell run  "
+                    "irm 'https://cursor.com/install?win32=true' | iex   "
+                    "then  agent login") if cmd[0] == "agent" else ""
+            raise RuntimeError(f"'{cmd[0]}' is not installed or not on PATH. {hint}".strip())
         cmd[0] = exe
-        if self.model:
+        if self.provider == "cursor_auto":
+            cmd += ["--model", self.model or "auto"]
+        elif self.model:
             cmd += ["--model", self.model]
-        # run in an empty temp folder so the CLI does not read any project files
+        # run in an empty temp folder so the CLI does not read / edit any project files
         with tempfile.TemporaryDirectory() as tmp:
             res = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
                                  encoding="utf-8", timeout=ANSWER_TIMEOUT_MIN * 60, cwd=tmp,
                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if res.returncode != 0:
-            raise RuntimeError(f"{cmd[0]} failed: {res.stderr.strip()[:300]}")
+            err = (res.stderr or res.stdout or "").strip()[:400]
+            raise RuntimeError(f"{Path(cmd[0]).name} failed: {err or 'exit ' + str(res.returncode)}")
         return res.stdout
 
     # ------------------------------------------------------------ web
@@ -280,7 +294,7 @@ class WebAI:
 
 
 def find_cli(name):
-    """A CLI on PATH, or Claude Code's copy bundled with the VS Code extension."""
+    """A CLI on PATH, or a known install location (Claude Code / Cursor Agent)."""
     found = shutil.which(name)
     if found:
         return found
@@ -289,6 +303,19 @@ def find_cli(name):
             ".vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude*"))
         if bundled:
             return str(bundled[-1])
+    if name in ("agent", "cursor-agent"):
+        home = Path.home()
+        candidates = [
+            home / ".local" / "bin" / name,
+            home / ".local" / "bin" / f"{name}.exe",
+            home / ".cursor" / "bin" / name,
+            home / ".cursor" / "bin" / f"{name}.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "cursor-agent" / name,
+            Path(os.environ.get("LOCALAPPDATA", "")) / "cursor-agent" / f"{name}.exe",
+        ]
+        for p in candidates:
+            if p.is_file():
+                return str(p)
     return None
 
 

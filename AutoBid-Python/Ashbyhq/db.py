@@ -102,7 +102,8 @@ def connect():
     for col, typ in [("company", "TEXT"), ("dept_path", "TEXT"), ("relevant", "INTEGER"),
                      ("relevance_by", "TEXT"), ("details_at", "TEXT"),
                      ("status_at", "TEXT"),      # when the status was last set (sync: newest wins)
-                     ("sync_hash", "TEXT")]:     # fingerprint of the row as last synced with Supabase
+                     ("sync_hash", "TEXT"),      # fingerprint of the row as last synced with Supabase
+                     ("resume_id", "INTEGER")]:  # public.resumes.id in Supabase
         if col not in cols:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typ}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_relevant ON jobs(relevant, is_active)")
@@ -122,9 +123,17 @@ def job_for_ai(job):
     }
 
 
-def set_resume(conn, job_id, path):
+def set_resume(conn, job_id, path, ai_provider="", ai_model=""):
+    """Save the local PDF path and upload it to Supabase `resumes` (pdf_path / resume_dir)."""
     conn.execute("UPDATE jobs SET resume_path=? WHERE id=?", (str(path), job_id))
     conn.commit()
+    try:
+        import resume_cloud
+        rid = resume_cloud.push_one(conn, job_id, ai_provider=ai_provider, ai_model=ai_model)
+        if rid:
+            print(f"    resume saved to Supabase resumes.id={rid}")
+    except Exception as e:
+        print(f"    ! resume path not uploaded to Supabase yet: {str(e)[:160]}")
 
 
 # ---------------------------------------------------------------- stage 1: job list
@@ -170,7 +179,10 @@ def set_relevance(conn, job_id, relevant, method):
 
 def jobs_needing_relevance(conn):
     return conn.execute("SELECT id, title, COALESCE(NULLIF(dept_path, ''), department, '') dept "
-                        "FROM jobs WHERE is_active=1 AND relevant IS NULL").fetchall()
+                        # 'unclear-kept' = kept without the AI (rules only, e.g. after Stop): the AI
+                        # decides them on the next collection
+                        "FROM jobs WHERE is_active=1 AND (relevant IS NULL "
+                        "OR relevance_by='unclear-kept')").fetchall()
 
 
 # ---------------------------------------------------------------- stage 2: job details
@@ -211,7 +223,19 @@ def mark_inactive(conn, org, active_ids):
 
 
 def save_questions(conn, job_id, questions):
-    conn.execute("DELETE FROM questions WHERE job_id = ? AND answer IS NULL", (job_id,))
+    """Store only REQUIRED questions (the ones with * on the Ashby form).
+    Optional fields are never saved or answered. Exception: the resume field is kept
+    even when Ashby marks it optional, because we always upload a resume."""
+    questions = [q for q in questions
+                 if q.get("required") or q.get("path") == "_systemfield_resume"]
+    # drop previously stored optional rows for this job (and any required row we no longer see)
+    keep_ids = [q["id"] for q in questions]
+    if keep_ids:
+        conn.execute(
+            f"DELETE FROM questions WHERE job_id=? AND id NOT IN ({','.join('?' * len(keep_ids))})",
+            [job_id, *keep_ids])
+    else:
+        conn.execute("DELETE FROM questions WHERE job_id=?", (job_id,))
     for pos, q in enumerate(questions):
         conn.execute("""
             INSERT INTO questions (id, job_id, position, form, form_id, section, path, title,
@@ -223,7 +247,7 @@ def save_questions(conn, job_id, questions):
                 description=excluded.description, options=excluded.options,
                 raw=excluded.raw, bank_key=excluded.bank_key""",
             (q["id"], job_id, pos, q["form"], q["form_id"], q["section"], q["path"],
-             q["title"], q["type"], int(q["required"]), q["description"],
+             q["title"], q["type"], int(bool(q["required"])), q["description"],
              json.dumps(q["options"]), json.dumps(q["raw"]),
              bank_key(q["title"], q["type"])))
     conn.execute("UPDATE jobs SET status='ready' WHERE id=? AND status='new'", (job_id,))
@@ -237,6 +261,11 @@ def set_status(conn, job_id, status, note=None):
     conn.execute("UPDATE jobs SET status=?, note=?, applied_at=COALESCE(applied_at, ?), status_at=? WHERE id=?",
                  (status, note, applied_at, t, job_id))
     conn.commit()
+    try:
+        import resume_cloud
+        resume_cloud.update_status(conn, job_id)
+    except Exception:
+        pass
 
 
 def save_answer(conn, question_id, value):

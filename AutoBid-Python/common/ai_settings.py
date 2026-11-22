@@ -2,7 +2,8 @@
 
 AutoBid-Python/ai_settings.json:
     {
-      # provider: claude_code | claude_api | openai_api | cursor | chatgpt | claude | deepseek
+      # provider: claude_code | claude_api | openai_api | cursor | cursor_auto |
+      #           chatgpt | claude | deepseek
       "resume":    {"provider": "claude_code", "model": "opus"},    # writes tailored resumes
       "relevance": {"provider": "claude_code", "model": "haiku"},   # sorts unclear job titles
       "prompt_source": "resume_builder"   # or "local"
@@ -25,12 +26,13 @@ PROVIDERS = {
     "claude_code": "Claude Code (CLI, your Claude login) - recommended",
     "claude_api": "Claude API (your Anthropic API key)",
     "openai_api": "OpenAI API (your OpenAI API key)",
-    "cursor": "Cursor (cursor-agent CLI, your Cursor login)",
+    "cursor_auto": "Cursor Agent Auto (desktop CLI, your Cursor login) - Auto model",
+    "cursor": "Cursor Agent (desktop CLI, pick a model)",
     "chatgpt": "ChatGPT web page (not recommended: blocks bots)",
     "claude": "Claude.ai web page (not recommended: blocks bots)",
     "deepseek": "DeepSeek web page (not recommended: blocks bots)",
 }
-CLI_PROVIDERS = {"claude_code", "cursor"}
+CLI_PROVIDERS = {"claude_code", "cursor", "cursor_auto"}
 # Paid API with your own key. The keys are Resume Builder's settings in Supabase
 # (claude_api_key / openai_api_key), shared with the web app and the Chrome extension.
 API_PROVIDERS = {"claude_api": "anthropic", "openai_api": "openai"}
@@ -46,7 +48,8 @@ MODELS = {
                     "claude-haiku-5-5", "claude-fable-5-2"],
     "claude_api": ["", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"],
     "openai_api": ["", "gpt-5", "gpt-5-mini", "gpt-5-nano"],
-    "cursor": ["", "auto", "sonnet-5.5", "opus-5.5", "gpt-5", "gemini-2.5-pro"],
+    "cursor_auto": [""],   # always Auto routing (Cursor picks the model)
+    "cursor": ["", "auto", "composer-2.5", "sonnet-5.5", "opus-5.5", "gpt-5", "gemini-2.5-pro"],
     "chatgpt": [""], "claude": [""], "deepseek": [""],
 }
 

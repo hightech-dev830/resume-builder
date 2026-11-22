@@ -4,8 +4,9 @@ Same as the extension (via resume_bridge.js -> Resume Builder code):
   - your resume prompt from Resume Builder Settings (Supabase), plus the app's output rules
   - your base profile (Base Profile tab), the JSON schema and the merge rules
   - the HTML template (Settings default) and PDF renderer
-  - the folder:  <Resume_bot folder>/<date>/<source>_<job>_<Company>/<Name>_<Company>_Resume.pdf
+  - the folder:  <Resume folder>/<platform>/<date>/<Company>/<Role>/KevinBurgess_Resume.pdf
                  + resume.json + job.txt
+                 e.g. .../Resume/ashby/2026-11-22/Titan_AI/Principal_Forward_Deployed_Engineer/KevinBurgess_Resume.pdf
 Different: the prompt goes to ChatGPT / Claude / DeepSeek in the browser (or a local AI CLI)
 instead of a paid API.
 """
@@ -133,12 +134,13 @@ def make_resume(ai, job, source="bot"):
               f"{len(s['base']['work'])}; missing ones keep the base text")
 
     company = job.get("company") or "Company"
-    # <Resume_bot>/<date>/<Company>/<source>_<Company>_<JobID>/<Name>_<Role>_Resume.pdf
-    #   e.g. 2026-11-19/Ashby/ashby_Ashby_c372f239-.../KevinBurgess_Integrations Lead Partnerships AMER_Resume.pdf
-    out_dir = (Path(s["outputDir"]) / date.today().isoformat() / safe_name(company)
-               / f"{source}_{safe_name(company)}_{job.get('id', '')}")
-    person = re.sub(r"\s+", "", safe_name(s["base"]["basics"].get("name") or "Resume"))
-    file_base = f"{person}_{safe_name(job.get('role') or 'Role', 90)}"
+    role = job.get("role") or "Role"
+    platform = (source or "bot").strip().lower() or "bot"
+    # <Resume>/<platform>/<date>/<Company>/<Role>/KevinBurgess_Resume.pdf
+    #   e.g. .../Resume/ashby/2026-11-22/Titan_AI/Principal_Forward_Deployed_Engineer/KevinBurgess_Resume.pdf
+    out_dir = (Path(s["outputDir"]) / platform / date.today().isoformat()
+               / safe_name(company) / safe_name(role, 90))
+    file_base = "KevinBurgess"
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
         json.dump({"base": s["base"], "tailored": tailored, "template": s["template"],

@@ -48,6 +48,16 @@ def posted_date(value):
         return None
 
 
+def job_fresh_date(row):
+    """Date used for the Posted column and filter.
+
+    Ashby's published_at is often a day (or more) older than when the job first appeared
+    on the board for us. Jobs found by today's scrape must still count as 'today', so we
+    take the later of published_at and first_seen_at."""
+    dates = [d for d in (posted_date(row["published_at"]), posted_date(row["first_seen_at"])) if d]
+    return max(dates) if dates else None
+
+
 def posted_label(d, today):
     """today / yesterday / 5d ago / 3w ago / 4mo ago / 2y ago"""
     if not d:
@@ -229,7 +239,20 @@ class App(tk.Tk):
         self.run_bar = tk.Frame(self, bg="#fff4e5", highlightthickness=1, highlightbackground="#f0c27a")
         self.run_label = tk.Label(self.run_bar, text="", bg="#fff4e5", fg="#7a4a00",
                                   font=("Segoe UI Semibold", 10), anchor="w")
-        self.run_label.pack(side="left", padx=(12, 8), pady=6, fill="x", expand=True)
+        self.run_label.pack(side="left", padx=(12, 8), pady=6)
+        # Live apply counters (this run only): success / failed / need you
+        self.run_stats = {"ok": 0, "fail": 0, "need": 0}
+        self.run_ok = tk.Label(self.run_bar, text="", bg="#fff4e5", fg="#1a7f37",
+                               font=("Segoe UI Semibold", 10))
+        self.run_fail = tk.Label(self.run_bar, text="", bg="#fff4e5", fg="#c62828",
+                                 font=("Segoe UI Semibold", 10))
+        self.run_need = tk.Label(self.run_bar, text="", bg="#fff4e5", fg="#b35900",
+                                 font=("Segoe UI Semibold", 10))
+        self.run_ok.pack(side="left", padx=(16, 4), pady=6)
+        self.run_fail.pack(side="left", padx=(4, 4), pady=6)
+        self.run_need.pack(side="left", padx=(4, 4), pady=6)
+        # spacer so Stop buttons stay on the right
+        tk.Label(self.run_bar, text="", bg="#fff4e5").pack(side="left", fill="x", expand=True)
         self.b_stop_now = tk.Button(self.run_bar, text="■  Stop now", command=self.stop,
                                     bg="#c62828", fg="white", activebackground="#a51f1f",
                                     activeforeground="white", relief="flat", padx=14, pady=3,
@@ -271,8 +294,9 @@ class App(tk.Tk):
         bar = ttk.Frame(tab)                       # second filter row
         bar.pack(fill="x", pady=(0, 6))
         ttk.Label(bar, text="Answers").pack(side="left")
-        self.f_answers = ttk.Combobox(bar, width=22, state="readonly", values=[
+        self.f_answers = ttk.Combobox(bar, width=28, state="readonly", values=[
             "any", "✓ all (ready to apply)", "missing answers", "AI essay needed", "no details yet"])
+        # "✓ all (ready to apply)" includes jobs whose only gaps are AI-written essays
         self.f_answers.set("any")
         self.f_answers.pack(side="left", padx=(4, 12))
         self.f_answers.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
@@ -427,7 +451,7 @@ class App(tk.Tk):
             company = r["company"] or r["org"]
             if term and term not in f"{company} {r['title']} {r['department']} {r['location']}".lower():
                 continue
-            posted = posted_date(r["published_at"])
+            posted = job_fresh_date(r)
             if max_age is not None and (posted is None or (today - posted).days > max_age):
                 continue
             self.posted_dates[r["id"]] = posted
@@ -438,14 +462,20 @@ class App(tk.Tk):
                 ready, state = "no details yet", "no details"
             elif not missing:
                 ready, state = "✓ all", "all"
+            elif all(bank_mod.ai_writable(i) for i in missing):
+                # bid step writes these with AI - treat as apply-available
+                ready, state = (f"AI writes ({len(missing)})", "essay")
             else:
-                ready = f"{len(missing)} missing"
-                # only AI-written essays left -> the AI essay step can answer them
-                state = "essay" if all(bank_mod.ai_writable(i) for i in missing) else "missing"
-            if answers_filter != "any" and {
-                    "✓ all (ready to apply)": "all", "missing answers": "missing",
-                    "AI essay needed": "essay", "no details yet": "no details"}[answers_filter] != state:
-                continue
+                ready, state = f"{len(missing)} missing", "missing"
+            if answers_filter != "any":
+                want = {"✓ all (ready to apply)": "all", "missing answers": "missing",
+                        "AI essay needed": "essay", "no details yet": "no details"}[answers_filter]
+                # "ready to apply" also includes jobs whose only gaps the AI will write
+                if want == "all":
+                    if state not in ("all", "essay"):
+                        continue
+                elif want != state:
+                    continue
             has_resume = "✓" if r["resume_path"] and os.path.isfile(r["resume_path"]) else ""
             resume_filter = self.f_resume.get()
             if (resume_filter == "✓ ready" and not has_resume) or (resume_filter == "not made yet" and has_resume):
@@ -1004,7 +1034,7 @@ class App(tk.Tk):
                                f"{rows.get('needs_you', 0)} need you   ·   {resumes} resumes")
         self.r_summary.config(text=(
             f"Ready to apply now:  {ready}\n"
-            f"Only essays missing (not built yet):  {waiting}\n"
+            f"AI will write essays for:  {waiting}   (text/essay questions left empty in Answers)\n"
             f"Missing profile / yes-no / choice answers:  {blocked}   → fill the Answers tab\n"
             f"Applied: {applied}   ·   Waiting for your bot check: {rows.get('needs_you', 0)}   ·   "
             f"Failed: {rows.get('failed', 0)}"))
@@ -1100,11 +1130,18 @@ class App(tk.Tk):
             if self.settings["auto_collect"] and datetime.now() >= self._next_due():
                 busy = self.proc and self.proc.poll() is None
                 today = self.settings.get("auto_kind") != "all"
-                if not busy and (self.collect_today(auto=True) if today else self.collect(auto=True)):
+                if busy:
+                    if not getattr(self, "_auto_busy_logged", False):
+                        self.log("(auto-collection due - waiting until the current task finishes)\n")
+                        self._auto_busy_logged = True
+                elif self.collect_today(auto=True) if today else self.collect(auto=True):
+                    self._auto_busy_logged = False
                     self.settings["auto_started"] = datetime.now().isoformat(timespec="seconds")
                     save_settings(self.settings)
                     self.log(f"(auto-collection started: {'today' if today else 'all companies'}; "
-                             f"next in {self.settings['auto_hours']} h)\n")
+                             f"scrapes every board, saves new jobs to the local DB, syncs to "
+                             f"Supabase, then refreshes the Jobs tab; next in "
+                             f"{self.settings['auto_hours']} h)\n")
             self._auto_info()
         finally:
             self.after(60_000, self._auto_tick)
@@ -1144,8 +1181,9 @@ class App(tk.Tk):
         if not messagebox.askyesno("Apply", (
                 f"Really apply to {len(ids)} job(s)? This SUBMITS the applications.\n\n"
                 + "\n".join(titles) + more + "\n\n"
-                f"Batch mode, {self.r_batch.get()} at a time. Jobs with missing answers or "
-                f"essays are skipped and listed in the log. Company limits (Ashby: 3 in 60 days) apply.")):
+                f"Batch mode, {self.r_batch.get()} at a time. Empty text/essay questions are "
+                f"written by the AI per job. Jobs missing profile / yes-no / choice answers are "
+                f"skipped and listed in the log. Company limits (Ashby: 3 in 60 days) apply.")):
             return
         self.run_script(["bid.py", "--batch", self.r_batch.get(), "--jobs-file", self._write_selection(ids)],
                         f"Applying: {self._selection_label(ids)}")
@@ -1190,12 +1228,54 @@ class App(tk.Tk):
         self.log("\n⏸ Will stop after the current job (press 'Stop now' to end at once).\n")
 
     def _show_run_bar(self, label):
+        self.run_stats = {"ok": 0, "fail": 0, "need": 0}
         self.run_label.config(text=f"●  Running: {label}")
+        self._update_run_stats()
         self.b_stop_after.config(text="⏸  Stop after this job", state="normal")
         self.run_bar.pack(fill="x", padx=10, pady=(0, 6), after=self._header_frame)
 
     def _hide_run_bar(self):
         self.run_bar.pack_forget()
+
+    def _update_run_stats(self):
+        """Refresh the live counters on the orange run bar (this run only)."""
+        s = self.run_stats
+        bidding = self.proc_label.startswith(("Bidding", "Applying", "Dry run"))
+        if bidding:
+            self.run_ok.config(text=f"✓ {s['ok']} success")
+            self.run_fail.config(text=f"✗ {s['fail']} failed")
+            self.run_need.config(text=f"⚠ {s['need']} need you")
+        else:
+            self.run_ok.config(text="")
+            self.run_fail.config(text="")
+            self.run_need.config(text="")
+
+    def _track_run_line(self, line):
+        """Parse one bid.py log line and bump success / failed / need-you for this run."""
+        if not self.proc_label.startswith(("Bidding", "Applying", "Dry run")):
+            return
+        t = line.strip()
+        # success
+        if t == "APPLIED" or t.startswith("APPLIED:") or t.startswith("APPLIED (by you)"):
+            self.run_stats["ok"] += 1
+        # need you (bot check / unclear / spam retry left open)
+        elif ("bot check -> waiting for you" in t
+              or t.startswith("UNCLEAR")
+              or t.startswith("NOT SUBMITTED")
+              or "needs_you" in t.lower() and "stays" in t):
+            self.run_stats["need"] += 1
+        # failed (form/page error) — not company-limit (job goes back to ready)
+        elif (t.startswith("FAILED") or "FAILED -" in t
+              or t.startswith("failed:") or t.startswith("NOT applied")):
+            self.run_stats["fail"] += 1
+        else:
+            return
+        self._update_run_stats()
+        # keep the header totals in sync while applying
+        try:
+            self.update_summary()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ child process + log
 
@@ -1463,8 +1543,11 @@ class App(tk.Tk):
 
     def log(self, text):
         tag = "warn" if (">>>" in text or "!" in text[:6]) else ("ok" if "APPLIED" in text or "done in" in text else "")
+        if "FAILED" in text:
+            tag = "warn"
         self.logbox.insert("end", text, tag)
         self.logbox.see("end")
+        self._track_run_line(text)
 
     def run_script(self, args, label, quiet=False):
         """Run a bot script as a child process. Returns False if something is already running."""
@@ -1514,8 +1597,9 @@ class App(tk.Tk):
                         self.settings["last_collect"] = datetime.now().isoformat(timespec="seconds")
                         save_settings(self.settings)
                         self._auto_info()
-                    # clicked by you: show today's postings (an automatic run leaves your filters alone)
-                    if self.proc_label.startswith("Collecting today") and "(auto)" not in self.proc_label:
+                    if self.proc_label.startswith("Collecting"):
+                        self._sort_unsorted()
+                        # show the jobs this scrape found (Posted = today uses first_seen_at too)
                         self.f_relevant.set("relevant")
                         self.f_status.set("all")
                         self.f_answers.set("any")
@@ -1527,11 +1611,75 @@ class App(tk.Tk):
                     except Exception as e:
                         self.log(f"!! Answer bank not refreshed from Supabase: {e}\n")
                     self.refresh_all()
+                    if self.proc_label.startswith("Collecting"):
+                        self._log_collect_result()
+                        # Safety net: even if collect.py was killed mid-run ("Stop now"),
+                        # push whatever is already in the local DB to Supabase, then refresh again.
+                        self._sync_after_collect()
                 else:
                     self.log(line)
         except queue.Empty:
             pass
         self.after(150, self._drain_output)
+
+    def _log_collect_result(self):
+        """After a scrape: say where the jobs live and how many are new today (so the Jobs
+        tab filter switch to Posted=today is not a mystery)."""
+        try:
+            today = date.today().isoformat()
+            row = self.conn.execute(
+                "SELECT COUNT(*) n, SUM(relevant=1) rel FROM jobs "
+                "WHERE is_active=1 AND substr(COALESCE(first_seen_at, published_at), 1, 10)=?",
+                (today,)).fetchone()
+            shown = len(self.jobs.get_children())
+            self.log(
+                f"1) Scraped → local DB:  {db.DB_PATH}\n"
+                f"2) Jobs board: {shown} shown (Posted=today) · "
+                f"{row['n']} first seen today ({row['rel'] or 0} relevant)\n"
+                f"3) Syncing to Supabase …\n")
+        except Exception as e:
+            self.log(f"! Could not summarise the collection: {str(e)[:120]}\n")
+
+    def _sync_after_collect(self):
+        """Push the local job DB to Supabase after every collection (and refresh the board).
+        Runs in a background thread so the window stays usable."""
+        def work():
+            try:
+                import sync_db
+                conn = db.connect()
+                _new, _upd, pushed = sync_db.sync(conn, quiet=True)
+                conn.close()
+                self.ui_q.put(lambda: (
+                    self.log(f"3) Synced to Supabase: {pushed} job(s) uploaded.\n"),
+                    self.refresh_all()))
+            except Exception as e:
+                msg = str(e)[:200]
+                self.ui_q.put(lambda: self.log(
+                    f"! Supabase sync failed ({msg}) - click 'Sync to DB' to retry.\n"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _sort_unsorted(self):
+        """A collection that was stopped ("Stop now" ends it at once) leaves scraped jobs that
+        are not sorted yet, and the Jobs tab only lists relevant ones. Sort them by rules
+        (fast, no AI) so they show up; unclear titles are kept and the AI sorts them at the
+        next collection."""
+        try:
+            from relevance import RelevanceFilter
+            todo = db.jobs_needing_relevance(self.conn)
+            todo = [r for r in todo if self.conn.execute(
+                "SELECT relevant FROM jobs WHERE id=?", (r["id"],)).fetchone()["relevant"] is None]
+            if not todo:
+                return
+            decisions = RelevanceFilter(ai=None, log=lambda *a: None).classify(
+                [(r["id"], r["title"], r["dept"]) for r in todo])
+            for jid, (relevant, method) in decisions.items():
+                db.set_relevance(self.conn, jid, relevant, method)
+            self.conn.commit()
+            yes = sum(1 for r, _ in decisions.values() if r)
+            self.log(f"Sorted {len(decisions)} scraped jobs by rules: {yes} relevant "
+                     f"(unclear titles are kept; the AI sorts them at the next collection).\n")
+        except Exception as e:
+            self.log(f"! Could not sort the scraped jobs: {str(e)[:150]}\n")
 
     def refresh_all(self):
         # answers for every job, computed once per refresh (thousands of jobs)

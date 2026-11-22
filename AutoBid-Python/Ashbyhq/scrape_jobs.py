@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import ashby_api
 import db
 import ai_settings
+import skip_orgs
 from config import stop_requested
 from config import (BOARD_WORKERS, COMPANIES_FILE, LOCATION_FILTER, ONLY_ORGS,
                     WORKPLACE_TYPES)
@@ -65,28 +66,37 @@ def scrape_boards(conn, companies):
     print(f"Stage 1: listing jobs at {len(companies)} companies ({BOARD_WORKERS} at a time) ...")
     started, seen_at = time.time(), db.now()
     kept = listed = new = failed = 0
-    with ThreadPoolExecutor(max_workers=BOARD_WORKERS) as pool:
+    pool = ThreadPoolExecutor(max_workers=BOARD_WORKERS)
+    stopped = False
+    try:
         futures = {pool.submit(fetch_board, slug): slug for slug in companies}
         for i, fut in enumerate(as_completed(futures), 1):
-            if stop_requested():
-                for f in futures:
-                    f.cancel()                     # not started yet -> dropped
-                print("\n⏸ Stop requested - finishing the requests already running, then stopping.")
-                break
             slug = futures[fut]
             try:
                 jobs, total = fut.result()
             except Exception as e:
                 failed += 1
-                print(f"  ! {companies[slug]} ({slug}): {str(e)[:80]}")
-                continue
-            n_new = sum(db.upsert_listing(conn, slug, companies[slug], j, seen_at) for j in jobs)
-            db.mark_inactive(conn, slug, [j["id"] for j in jobs])   # closed / filtered out
-            kept, listed, new = kept + len(jobs), listed + total, new + n_new
-            if i % 10 == 0 or i == len(companies):   # short write locks: the app stays usable
+                skip_orgs.mark_failed(slug, companies[slug], e)   # skipped from now on
+                print(f"  ! {companies[slug]} ({slug}): {str(e)[:80]}  -> skipped from now on")
+            else:
+                if skip_orgs.is_skipped(slug):      # it works again (explicitly asked for)
+                    skip_orgs.clear(slug)
+                n_new = sum(db.upsert_listing(conn, slug, companies[slug], j, seen_at) for j in jobs)
+                db.mark_inactive(conn, slug, [j["id"] for j in jobs])   # closed / filtered out
+                kept, listed, new = kept + len(jobs), listed + total, new + n_new
+                # saved company by company: whatever is scraped when you press Stop is kept
+                # (and the write lock is short, so the app stays usable)
                 conn.commit()
+            if i % 10 == 0 or i == len(companies):
                 print(f"  {i}/{len(companies)} companies | {kept} remote US jobs so far | "
                       f"{time.time() - started:.0f}s")
+            if stop_requested():
+                stopped = True
+                print(f"\n⏸ Stop requested - {kept} jobs scraped so far are saved.")
+                break
+    finally:
+        # on stop do not wait for the requests still running (a 429 backoff can take minutes)
+        pool.shutdown(wait=not stopped, cancel_futures=True)
     conn.commit()
     print(f"Listed {listed} jobs; {kept} are remote US ({new} new); {failed} boards failed; "
           f"{time.time() - started:.0f}s")
@@ -132,10 +142,21 @@ def main(argv=None):
     only = args.org or ONLY_ORGS
     if only:
         companies = {s: companies.get(s) or ashby_api.fetch_company_name(s) for s in only}
+    if not args.org:
+        # automatic run: companies whose collection failed before are skipped (skip_orgs.py)
+        skipped = [s for s in companies if skip_orgs.is_skipped(s)]
+        if skipped:
+            print(f"Skipping {len(skipped)} companies whose collection failed before "
+                  f"(python skip_orgs.py to see them): {', '.join(skipped[:8])}"
+                  + (" ..." if len(skipped) > 8 else ""))
+            companies = {s: n for s, n in companies.items() if s not in skipped}
     conn = db.connect()
     scrape_boards(conn, companies)
     if stop_requested():
-        print("Stopped: job sorting runs on the next collection.")
+        # sort what was scraped by rules now (fast, no AI), so the jobs show up in the app;
+        # unclear titles are kept and get sorted by the AI on the next collection
+        print("Stopped: sorting the scraped jobs by rules so you can see them ...")
+        classify(conn, use_ai=False)
         return list(companies)
     classify(conn, use_ai=not args.no_ai)
     return list(companies)

@@ -98,7 +98,8 @@ def main():
                 except Exception as e:
                     print(f"  ! {e}")
                     continue
-                db.set_resume(conn, job["id"], pdf)
+                model = (getattr(ai, "last_model", None) or ai.model or "")
+                db.set_resume(conn, job["id"], pdf, ai_provider=ai.provider, ai_model=model)
                 made += 1
                 print(f"  done in {time.time() - started:.0f}s -> {pdf}")
             if made:

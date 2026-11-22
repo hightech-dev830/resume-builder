@@ -35,44 +35,56 @@ def main():
                         help="details only for jobs new since the last collection; list today's postings")
     args = parser.parse_args()
     started = db.now()
-
-    stage1 = []
-    if args.org:
-        for o in args.org:
-            stage1 += ["--org", o]
-    if args.no_ai:
-        stage1.append("--no-ai")
-    scrape_jobs.main(stage1)
-    print()
-    from config import stop_requested
-    if stop_requested():
-        print("⏸ Stopped after stage 1, as you asked.")
-        return
     conn = db.connect()
-    scrape_details.scrape_details(conn, refresh=args.refresh, orgs=args.org,
-                                  since=started if args.today else None)
-    if args.today:
-        print_today(conn, started)
 
-    row = conn.execute("""SELECT COUNT(*) total, SUM(relevant=1) rel,
-        COUNT(DISTINCT CASE WHEN relevant=1 THEN org END) orgs,
-        SUM(relevant=1 AND status='ready') ready, SUM(status='applied') applied
-        FROM jobs WHERE is_active=1""").fetchone()
-    print(f"\nDB: {row['total']} remote US jobs | {row['rel'] or 0} relevant at {row['orgs']} companies | "
-          f"{row['ready'] or 0} ready to bid | {row['applied'] or 0} applied")
-    sync_supabase(conn)
+    # Always: scrape -> local DB -> (job list reads that DB) -> sync Supabase.
+    # Sync runs even if you press Stop after stage 1, so scraped jobs are not left only local.
+    try:
+        stage1 = []
+        if args.org:
+            for o in args.org:
+                stage1 += ["--org", o]
+        if args.no_ai:
+            stage1.append("--no-ai")
+        scrape_jobs.main(stage1)
+        print()
+        from config import stop_requested
+        if stop_requested():
+            print("⏸ Stopped after stage 1, as you asked. "
+                  "Scraped jobs stay in the local DB and will be synced to Supabase now.")
+        else:
+            scrape_details.scrape_details(conn, refresh=args.refresh, orgs=args.org,
+                                          since=started if args.today else None)
+            if args.today:
+                print_today(conn, started)
+
+        row = conn.execute("""SELECT COUNT(*) total, SUM(relevant=1) rel,
+            COUNT(DISTINCT CASE WHEN relevant=1 THEN org END) orgs,
+            SUM(relevant=1 AND status='ready') ready, SUM(status='applied') applied
+            FROM jobs WHERE is_active=1""").fetchone()
+        print(f"\nDB: {row['total']} remote US jobs | {row['rel'] or 0} relevant at {row['orgs']} companies | "
+              f"{row['ready'] or 0} ready to bid | {row['applied'] or 0} applied")
+        print(f"Local job list DB: {db.DB_PATH}")
+    finally:
+        sync_supabase(conn)
 
 
 def print_today(conn, started):
     today = date.today().isoformat()
     new = conn.execute("SELECT COUNT(*) n, SUM(relevant=1) rel FROM jobs WHERE first_seen_at >= ?",
                        (started,)).fetchone()
-    rows = conn.execute("SELECT company, org, title FROM jobs WHERE is_active=1 AND relevant=1 "
-                        "AND substr(published_at, 1, 10) = ? ORDER BY company", (today,)).fetchall()
-    print(f"\nToday: {new['n']} jobs new on the boards since the last collection "
-          f"({new['rel'] or 0} relevant). Relevant jobs posted today: {len(rows)}")
+    # "found today" = first_seen today (what this scrape added), not only Ashby's published_at
+    rows = conn.execute(
+        "SELECT company, org, title, published_at, first_seen_at FROM jobs "
+        "WHERE is_active=1 AND relevant=1 AND substr(first_seen_at, 1, 10) = ? "
+        "ORDER BY company", (today,)).fetchall()
+    print(f"\nThis run: {new['n']} jobs new on the boards since it started "
+          f"({new['rel'] or 0} relevant).")
+    print(f"Relevant jobs first seen today: {len(rows)}  (saved in {db.DB_PATH})")
     for r in rows[:40]:
-        print(f"  {r['company'] or r['org']}: {r['title']}")
+        pub = (r["published_at"] or "")[:10]
+        print(f"  {r['company'] or r['org']}: {r['title']}"
+              + (f"  [Ashby posted {pub}]" if pub and pub != today else ""))
 
 
 def sync_supabase(conn):

@@ -21,6 +21,8 @@ import json
 import re
 import sys
 import time
+import traceback
+from datetime import datetime, timedelta
 from pathlib import Path
 
 try:
@@ -61,8 +63,13 @@ _OUTCOME_JS = r"""() => {
   // (not "may not apply more than 3 times" - that sentence is part of Ashby's notice)
   const reached = /(reached|exceeded|hit) (the|your)? ?(maximum|application limit|limit)|you (have|'ve) already applied|you (can|may)not apply (again|to this job)|too many applications/i;
   const bad = msgs.filter(t => /error|invalid|required|missing|spam|failed|unable|could not|try again|not eligible|went wrong/i.test(t) || reached.test(t));
-  if (/flagged as (possible )?spam|could not be submitted|something went wrong/i.test(text) || reached.test(text) || bad.length)
+  // Ashby's red box "We couldn't submit your application" + the reason (application limit,
+  // cooling time, spam flag, ...): shown only after a failed Submit.
+  const cant = text.match(/couldn.t submit your application[\s\S]{0,300}/i);
+  if (/flagged as (possible )?spam|could not be submitted|something went wrong|problem verifying this submission/i.test(text) ||
+      cant || reached.test(text) || bad.length)
     return {state: 'error', message: ([...new Set(bad)].join(' | ') ||
+      (cant ? cant[0].replace(/\s+/g, ' ').trim() : '') ||
       text.match(/[^.\n]*(spam|could not be submitted|something went wrong|already applied|reached|exceeded|too many applications)[^.\n]*/i)?.[0] || '').slice(0, 400)};
   return {state: 'pending'};
 }"""
@@ -82,11 +89,14 @@ _DIAG_JS = r"""() => {
   };
 }"""
 
+# Bottom of the tab (not top): a top bar covers Ashby's reCAPTCHA challenge text
+# ("Select all images with …"), so you cannot solve the bot check.
 _BANNER_JS = r"""([title, text, color]) => {
   let b = document.getElementById('autobid-banner');
   if (!b) { b = document.createElement('div'); b.id = 'autobid-banner'; document.body.appendChild(b); }
-  b.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:2147483647;padding:10px 16px;
-    background:${color};color:#fff;font:14px/1.4 Segoe UI,Arial,sans-serif;box-shadow:0 2px 8px #0005;white-space:pre-wrap`;
+  b.style.cssText = `position:fixed;bottom:0;left:0;right:0;z-index:2147483647;padding:10px 16px;
+    max-height:28vh;overflow:auto;background:${color};color:#fff;
+    font:14px/1.4 Segoe UI,Arial,sans-serif;box-shadow:0 -2px 8px #0005;white-space:pre-wrap`;
   b.textContent = 'AutoBid: ' + title + '\n' + text;
 }"""
 
@@ -267,18 +277,68 @@ def wait_outcome(page, seconds=60):
 _TRY_AGAIN = re.compile(r"updating your application|uploading files|try again when (they('| a)re|it'?s) finished", re.I)
 
 
-def submit(page, tries=4):
+# Errors that say nothing about the job: reCAPTCHA scored the submit as a bot, or Ashby's
+# spam filter hit. Waiting a little and submitting again often works ("please submit again").
+_TRANSIENT = re.compile(r"problem verifying this submission|verif\w+ .{0,30}captcha|flagged as (possible )?spam|"
+                        r"submit your application again", re.I)
+# The company limits how often one person may apply: retrying never helps.
+_LIMIT = re.compile(r"limited to (\d+) applications? within a rolling (\d+) day|cooling time|"
+                    r"already applied to some of our roles|reached (the|your) .{0,30}limit|"
+                    r"too many applications|may not apply more than", re.I)
+
+
+def limit_days(message):
+    """How many days the company keeps us out, from its message ('rolling 30 day period',
+    '90 days cooling time'); None when the message is not about a limit."""
+    if not _LIMIT.search(message or ""):
+        return None
+    m = (re.search(r"rolling (\d+) day", message, re.I) or re.search(r"(\d+) days? cooling", message, re.I)
+         or re.search(r"(\d+) days?", message, re.I))
+    return int(m.group(1)) if m else 30
+
+
+def human_pause(page, seconds):
+    """Wait like a person would (a little mouse movement and scrolling): reCAPTCHA Enterprise
+    scores the behaviour before Submit, and an instant fill-and-click looks like a script."""
+    import random
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            page.mouse.move(random.randint(200, 900), random.randint(150, 600), steps=random.randint(8, 20))
+            if random.random() < 0.4:
+                page.mouse.wheel(0, random.choice([-120, 120, 200]))
+        except Exception:
+            pass
+        page.wait_for_timeout(random.randint(500, 1100))
+
+
+def submit(page, tries=4, transient_tries=2):
     """Click Submit and wait for the result. If Ashby answers "We're updating your application
-    (e.g. uploading files), please try again when they're finished", wait and submit again."""
-    for attempt in range(1, tries + 1):
+    (e.g. uploading files), please try again when they're finished", wait and submit again.
+    A reCAPTCHA / spam-filter error is retried up to `transient_tries` times."""
+    import random
+    transient = 0
+    for attempt in range(1, tries + transient_tries + 1):
         wait_page_idle(page)
+        if attempt == 1:
+            human_pause(page, random.uniform(2.5, 5))
         page.locator(SUBMIT_BTN).first.click()
         print(f"    submitted{' (again, try ' + str(attempt) + ')' if attempt > 1 else ''}, "
               f"waiting for the answer (up to 60 s) ...")
         res = wait_outcome(page)
-        if res["state"] == "error" and _TRY_AGAIN.search(res.get("message") or ""):
+        msg = res.get("message") or ""
+        if res["state"] == "error" and _TRY_AGAIN.search(msg):
             print("    Ashby: still uploading - waiting 8 s and submitting again")
             page.wait_for_timeout(8000)
+            continue
+        if res["state"] == "error" and _TRANSIENT.search(msg) and transient < transient_tries:
+            transient += 1
+            wait = 12 * transient
+            print(f"    Ashby: bot check / spam filter said no ({msg[:70]!r}) - "
+                  f"waiting {wait} s, then submitting again ({transient}/{transient_tries})")
+            human_pause(page, wait)
+            if not page.locator(SUBMIT_BTN).count():
+                return res
             continue
         return res
     return res
@@ -357,18 +417,43 @@ def pick_jobs(conn, bank, only_jobs=None, companies=None):
         if not missing:
             ready.append((job, items))
             continue
+        # only text/essay questions missing -> the AI writes them in prepare(); still bid
         if all(bank_mod.ai_writable(i) for i in missing):
             waiting_ai += 1
-        else:
-            blocked += 1
+            ready.append((job, items))
+            continue
+        blocked += 1
         if only_jobs:
             print(f"  skip {job['title']}: " + "; ".join(
-                f"{i['q']['title'][:50]} ({'AI essay - not built yet' if bank_mod.ai_writable(i) else i['error'] or 'no answer'})"
-                for i in missing[:4]))
+                f"{i['q']['title'][:50]} ({i['error'] or 'no answer'})" for i in missing[:4]
+                if not bank_mod.ai_writable(i)))
     return ready, waiting_ai, blocked
 
 
+BLOCKS_FILE = Path(__file__).resolve().parent / "data" / "org_blocks.json"
+
+
+def load_blocks():
+    """{org: {"until": ISO date, "why": text}} - companies that told us their limit is reached."""
+    try:
+        data = json.loads(BLOCKS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    now = datetime.now().isoformat()
+    return {o: b for o, b in data.items() if b.get("until", "") > now}
+
+
+def block_org(org, days, why):
+    blocks = load_blocks()
+    blocks[org] = {"until": (datetime.now() + timedelta(days=days)).isoformat(timespec="minutes"),
+                   "why": " ".join(why.split())[:200]}
+    BLOCKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BLOCKS_FILE.write_text(json.dumps(blocks, indent=2), encoding="utf-8")
+
+
 def within_limit(conn, org, planned):
+    if org in load_blocks():
+        return False
     limit = APPLY_LIMITS.get(org)
     if not limit:
         return True
@@ -386,14 +471,109 @@ def tailored_resume(conn, ai, job):
     print(f"    writing tailored resume with {ai.provider} ...")
     started = time.time()
     pdf = make_resume(ai, db.job_for_ai(job), source="ashby")
-    db.set_resume(conn, job["id"], pdf)
+    model = (getattr(ai, "last_model", None) or ai.model or "")
+    db.set_resume(conn, job["id"], pdf, ai_provider=ai.provider, ai_model=model)
     print(f"    resume ready in {time.time() - started:.0f}s: {pdf}")
     return pdf
 
 
+def write_essays(ai, job, items):
+    """Fill missing String / LongText answers with one AI call per job. Mutates items in place.
+    Answers are per job (not saved to the answer bank). Raises on AI failure."""
+    todo = [i for i in items if bank_mod.ai_writable(i)]
+    if not todo:
+        return
+    if ai is None:
+        raise RuntimeError("AI is not set up, but this job needs essays written")
+    print(f"    writing {len(todo)} text/essay answer(s) with {ai.provider} ...")
+    started = time.time()
+    job_info = db.job_for_ai(job)
+    try:
+        from resume import settings as resume_settings, job_block
+        profile = json.dumps(resume_settings()["base"], indent=2, ensure_ascii=False)
+        job_txt = job_block(job_info)
+    except Exception:
+        profile = json.dumps({k: v for k, v in (job_info or {}).items() if k != "jd"},
+                             ensure_ascii=False)
+        job_txt = f"Role: {job_info.get('role')}\nCompany: {job_info.get('company')}\n" \
+                  f"<job_description>\n{(job_info.get('jd') or '')[:6000]}\n</job_description>"
+
+    q_lines = []
+    for n, item in enumerate(todo):
+        q = item["q"]                       # sqlite3.Row (no .get)
+        tip = "1-2 short sentences or a phrase" if q["type"] == "String" else \
+              "a short essay, about 80-180 words, first person"
+        desc = (q["description"] or "").strip()
+        note = f"\n   hint under the question: {desc}" if desc else ""
+        q_lines.append(f"{n}. [{q['type']}] {q['title']}{note}\n   write: {tip}")
+
+    prompt = (
+        "You are filling a job application form for the candidate below. Write truthful, "
+        "specific answers that fit THIS job. Do not invent employers, degrees, dates, URLs or "
+        "contact details that are not in the profile; for LinkedIn/GitHub/website/phone/email "
+        "questions use the profile values (or say you prefer not to share if they are empty). "
+        "Do not refuse; answer every question.\n\n"
+        f"<candidate_profile>\n{profile}\n</candidate_profile>\n\n"
+        f"{job_txt}\n\n"
+        "<questions>\n" + "\n".join(q_lines) + "\n</questions>\n\n"
+        'Reply with ONLY one JSON object inside a ```json code block, shaped like:\n'
+        '{"0": "answer for question 0", "1": "answer for question 1", ...}\n'
+        "Keys are the question numbers as strings. No text before or after the JSON."
+    )
+    data = ai.ask_json(prompt, required_keys=[str(n) for n in range(len(todo))])
+    for n, item in enumerate(todo):
+        text = data.get(str(n))
+        if not isinstance(text, str) or not text.strip():
+            raise RuntimeError(f"AI returned no answer for: {item['q']['title'][:60]}")
+        item["value"] = text.strip()
+        item["missing"] = False
+        item["source"] = f"AI ({ai.provider})"
+        print(f"      · {item['q']['title'][:55]}: {text.strip()[:70].replace(chr(10), ' ')}"
+              + ("…" if len(text.strip()) > 70 else ""))
+    print(f"    essays ready in {time.time() - started:.0f}s")
+
+
+def handle_error(conn, job, page, msg):
+    """The page shows an error after Submit. Returns (page or None, state):
+      company limit  -> job back to 'ready', company blocked for its period, tab closed (nothing to do)
+      bot check/spam -> 'needs_you' (retried next run), tab kept: press Submit yourself
+      other          -> 'failed', tab kept with the reason"""
+    days = limit_days(msg)
+    if days:
+        block_org(job["org"], days, msg)
+        until = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+        db.set_status(conn, job["id"], "ready", f"company limit - not before {until}: {' '.join(msg.split())[:200]}")
+        print(f"    COMPANY LIMIT - {job['org']} takes no more applications until {until}. "
+              f"Its other jobs are skipped.  ({' '.join(msg.split())[:120]})")
+        try:
+            page.close()
+        except Exception:
+            pass
+        return None, "limit"
+    if _TRANSIENT.search(msg):
+        db.set_status(conn, job["id"], "needs_you", f"bot check / spam filter: {msg}"[:500])
+        print(f"    NOT SUBMITTED - the site refused it twice ({msg[:100]!r}). Tab kept: press Submit yourself.")
+        banner(page, "the site's bot check refused the submit - press Submit yourself",
+               msg + "\nIf it goes through, the bot marks it applied and closes the tab.", "#b35900")
+        return page, "retry"
+    db.set_status(conn, job["id"], "failed", msg)
+    print(f"    FAILED - the page says: {msg}")
+    banner(page, "NOT applied - the page shows an error", msg)
+    return page, "failed"
+
+
 def prepare(ctx, conn, ai, job, items, dry_run):
-    """(Resume) + open + fill + submit one job. Returns (page, state)."""
+    """(Essays) + (Resume) + open + fill + submit one job. Returns (page, state)."""
     print(f"\n- {job['title']}  ({job['id']})")
+    try:
+        write_essays(ai, job, items)
+    except Exception as e:
+        # an AI problem is not the job's fault: it stays 'ready' and is tried again
+        msg = f"essays not written: {str(e).splitlines()[0][:200]}"
+        print(f"    ! {msg} (job stays ready)")
+        conn.execute("UPDATE jobs SET note=? WHERE id=?", (msg, job["id"]))
+        conn.commit()
+        return None, "skipped"
     for item in items:
         if item["value"] == bank_mod.TAILORED_PLACEHOLDER:
             try:
@@ -441,11 +621,7 @@ def prepare(ctx, conn, ai, job, items, dry_run):
         print("    bot check -> waiting for you (tab kept open)")
         return page, "needs_you"
     if res["state"] == "error":
-        msg = res.get("message") or "error after submit"
-        db.set_status(conn, job["id"], "failed", msg)
-        print(f"    FAILED - the page says: {msg}")
-        banner(page, "NOT applied - the page shows an error", msg)
-        return page, "failed"
+        return handle_error(conn, job, page, res.get("message") or "error after submit")
     # no success, no error, no bot check: say what the page shows, keep the tab for you
     why = diagnose(page, job)
     db.set_status(conn, job["id"], "needs_you", f"no confirmation after submit: {why}"[:900])
@@ -456,8 +632,24 @@ def prepare(ctx, conn, ai, job, items, dry_run):
     return page, "unclear"
 
 
-def wait_for_you(conn, pending):
+def check_watch(conn, watch):
+    """Tabs you were asked to finish yourself (press Submit): when one goes through,
+    mark it applied and close it."""
+    for job_id, (job, page) in list(watch.items()):
+        if page.is_closed():
+            del watch[job_id]
+            continue
+        if outcome(page)["state"] == "success":
+            db.set_status(conn, job_id, "applied")
+            print(f"  APPLIED (by you): {job['title']}")
+            page.close()
+            del watch[job_id]
+
+
+def wait_for_you(conn, pending, watch=None):
     """pending: {job_id: (job, page)}. Finishes each tab as you solve its bot check."""
+    if watch:
+        check_watch(conn, watch)
     if not pending:
         return
     notify("AutoBid: bot checks waiting",
@@ -476,6 +668,8 @@ def wait_for_you(conn, pending):
         if stop_requested():
             print("  stop requested - not waiting for the bot checks any longer")
             break
+        if watch:
+            check_watch(conn, watch)
         for job_id, (job, page) in list(pending.items()):
             if page.is_closed():            # you closed it yourself
                 print(f"  closed by you: {job['title']} (stays 'needs_you')")
@@ -490,9 +684,10 @@ def wait_for_you(conn, pending):
                 if pending:   # show the next one
                     next(iter(pending.values()))[1].bring_to_front()
             elif res["state"] == "error":
-                db.set_status(conn, job_id, "failed", res.get("message"))
-                print(f"  FAILED: {job['title']} - the page says: {res.get('message')}")
-                banner(page, "NOT applied - the page shows an error", res.get("message") or "")
+                print(f"  {job['title']}:")
+                kept, state = handle_error(conn, job, page, res.get("message") or "error after submit")
+                if state == "retry" and watch is not None:
+                    watch[job_id] = (job, page)
                 del pending[job_id]          # the tab stays open (kept by main)
             elif res["state"] == "pending" and captcha_solved(page) and job_id not in resubmitted:
                 # solved, but the form did not go through by itself -> submit again once
@@ -514,7 +709,7 @@ def _has_banner(page):
         return False
 
 
-def wait_until_closed(ctx, pages, dry_run):
+def wait_until_closed(ctx, pages, dry_run, conn=None, watch=None):
     """Never close the browser while a tab needs you: wait until you closed those tabs
     (or the whole browser window). The app's Stop button ends it at any time."""
     pages = [p for p in dict.fromkeys(pages) if p and not p.is_closed()]
@@ -538,6 +733,8 @@ def wait_until_closed(ctx, pages, dry_run):
                 print("Stop requested - closing the browser.")
                 break
             ctx.pages[0].wait_for_timeout(1000)   # keeps the browser responsive
+            if watch:                             # you pressed Submit yourself and it went through
+                check_watch(conn, watch)
         except Exception:                         # browser window closed
             break
     print("All tabs closed.")
@@ -571,7 +768,7 @@ def main():
     if only_jobs:
         print(f"{len(only_jobs)} selected job(s)")
     ready, waiting_ai, blocked = pick_jobs(conn, bank, only_jobs or None, companies)
-    print(f"{len(ready)} jobs ready | {waiting_ai} need AI-written essays (not built yet) | "
+    print(f"{len(ready)} jobs ready ({waiting_ai} with AI essays to write) | "
           f"{blocked} need answers in the answer bank")
 
     planned, queue = {}, []
@@ -584,57 +781,83 @@ def main():
     if not queue:
         return
 
-    # setup check BEFORE touching any job: a missing AI tool must not fail jobs
+    # AI is needed for tailored resumes and/or per-job essay answers
+    need_ai = TAILORED_RESUME or waiting_ai > 0
     provider = args.ai or ai_settings.get("resume")[0]
-    if TAILORED_RESUME and provider in ai_settings.CLI_PROVIDERS:
+    # setup check BEFORE touching any job: a missing AI tool must not fail jobs
+    if need_ai and provider in ai_settings.CLI_PROVIDERS:
         from web_ai import CLI, find_cli
         if not find_cli(CLI[provider][0]):
-            print(f"\nSTOPPED: resumes are set to be written by '{provider}', but its program "
+            print(f"\nSTOPPED: resumes/essays are set to be written by '{provider}', but its program "
                   f"'{CLI[provider][0]}' is not installed on this PC.\n"
                   f"Choose another platform in the app's AI tab (Claude Code works here). "
                   f"No job was touched.")
             notify("AutoBid: not started", f"'{provider}' is not installed - change it in the AI tab.")
             return
-    problem = ai_settings.api_key_problem(provider) if TAILORED_RESUME else None
+    problem = ai_settings.api_key_problem(provider) if need_ai else None
     if problem:
-        print(f"\nSTOPPED: resumes are set to be written by '{provider}', but {problem}.\n"
+        print(f"\nSTOPPED: resumes/essays are set to be written by '{provider}', but {problem}.\n"
               f"No job was touched.")
         notify("AutoBid: not started", f"{provider}: {problem}")
         return
 
     with sync_playwright() as pw:
         ctx = open_browser(pw)
-        ai = ai_settings.make_ai("resume", ctx, args.ai, args.model) if TAILORED_RESUME else None
+        ai = ai_settings.make_ai("resume", ctx, args.ai, args.model) if need_ai else None
         if ai:
-            print(f"Resumes are written by {ai.label}")
+            print(f"Resumes and essays are written by {ai.label}")
         keep_open = []      # tabs you should look at: errors, unclear, dry runs, unsolved bot checks
+        watch = {}          # tabs you finish by hand: when one goes through it is marked applied
         try:
-            for start in range(0, len(queue), args.batch):
-                if stop_requested():
-                    break
-                batch = queue[start:start + args.batch]
-                print(f"\n=== Batch {start // args.batch + 1}: {len(batch)} jobs ===")
-                pending = {}
-                for job, items in batch:
+            try:
+                for start in range(0, len(queue), args.batch):
                     if stop_requested():
-                        print("\n⏸ Stopped after the current job, as you asked. "
-                              "Jobs not started yet stay 'ready'.")
                         break
-                    page = None
-                    try:
-                        page, state = prepare(ctx, conn, ai, job, items, args.dry_run)
-                    except PWTimeout:
-                        db.set_status(conn, job["id"], "failed", "form did not load")
-                        print("    failed: form did not load")
-                        continue
-                    if state == "needs_you":
-                        pending[job["id"]] = (job, page)
-                    elif page is not None and state in ("failed", "unclear", "dry"):
-                        keep_open.append(page)
-                wait_for_you(conn, pending)
-                keep_open += [p for _, p in pending.values()]
-                keep_open += [p for p in ctx.pages if p not in keep_open and _has_banner(p)]
-            wait_until_closed(ctx, keep_open, args.dry_run)
+                    batch = queue[start:start + args.batch]
+                    print(f"\n=== Batch {start // args.batch + 1}: {len(batch)} jobs ===")
+                    pending = {}
+                    for job, items in batch:
+                        if stop_requested():
+                            print("\n⏸ Stopped after the current job, as you asked. "
+                                  "Jobs not started yet stay 'ready'.")
+                            break
+                        if not args.dry_run and job["org"] in load_blocks():
+                            print(f"\n- {job['title']}: skipped, {job['org']} reached its application limit")
+                            continue
+                        page, state = None, None
+                        tabs_before = list(ctx.pages)
+                        try:
+                            page, state = prepare(ctx, conn, ai, job, items, args.dry_run)
+                        except Exception as e:
+                            # whatever went wrong with this job, never close the browser
+                            # over it: the tab stays open for you
+                            if not ctx.pages:
+                                raise            # the browser window was closed by hand
+                            msg = ("form did not load" if isinstance(e, PWTimeout)
+                                   else f"bot error: {str(e).splitlines()[0][:200]}")
+                            db.set_status(conn, job["id"], "failed", msg)
+                            print(f"    failed: {msg}")
+                            if not isinstance(e, PWTimeout):
+                                traceback.print_exc()
+                            for p in ctx.pages:
+                                if p not in tabs_before:
+                                    banner(p, "NOT applied - the bot hit an error", msg)
+                                    keep_open.append(p)
+                            continue
+                        if state == "needs_you":
+                            pending[job["id"]] = (job, page)
+                        elif page is not None and state in ("failed", "unclear", "dry", "retry"):
+                            keep_open.append(page)
+                            if state in ("unclear", "retry"):
+                                watch[job["id"]] = (job, page)
+                    wait_for_you(conn, pending, watch)
+                    keep_open += [p for _, p in pending.values()]
+                    keep_open += [p for p in ctx.pages if p not in keep_open and _has_banner(p)]
+            except Exception as e:
+                print(f"\n! The run ended early: {e}")
+                traceback.print_exc()
+            keep_open += [p for p in ctx.pages if p not in keep_open and _has_banner(p)]
+            wait_until_closed(ctx, keep_open, args.dry_run, conn, watch)
         finally:
             try:
                 ctx.close()

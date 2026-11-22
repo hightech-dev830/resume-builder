@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import ashby_api
 import db
+import skip_orgs
 from config import WORKERS, stop_requested
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -23,6 +24,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 def scrape_details(conn, refresh=False, orgs=None, since=None):
     todo = db.jobs_needing_details(conn, refresh=refresh, orgs=orgs, since=since)
+    if not orgs:       # automatic run: companies whose collection failed are skipped (skip_orgs.py)
+        skipped = {org for org, _ in todo if skip_orgs.is_skipped(org)}
+        if skipped:
+            print(f"Stage 2: skipping {len(skipped)} companies whose collection failed before")
+            todo = [t for t in todo if t[0] not in skipped]
     if not todo:
         print("Stage 2: all relevant jobs already have their details.")
         return

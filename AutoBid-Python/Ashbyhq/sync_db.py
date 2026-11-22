@@ -13,8 +13,8 @@ jobs.sync_hash is the fingerprint at the last sync, so
   - our content hash != sync_hash -> the job was changed here                -> push it
   - both changed                  -> keep this computer's job data, and the NEWEST status
                                      (status_at) from either side
-Not synced: description_html and the raw Ashby field JSON (large and unused), resume
-file paths (they point into this computer's disk) and last_seen_at (changes on every collect).
+Not synced into autobid_jobs: description_html, raw Ashby field JSON, last_seen_at.
+Resume PDF paths go to the shared `resumes` table (pdf_path / resume_dir, source='ashby').
 
 Needs supabase/migrations/005_autobid_jobs.sql run once in the Supabase SQL editor.
 """
@@ -220,6 +220,15 @@ def sync(conn=None, quiet=False, pull=True, push=True):
             for r in rows:
                 conn.execute("UPDATE jobs SET sync_hash=? WHERE id=?", (r["hash"], r["id"]))
             conn.commit()
+    # ---- also push tailored resume paths into public.resumes (pdf_path / resume_dir)
+    if push:
+        try:
+            import resume_cloud
+            say("  uploading resume paths to resumes table ...")
+            resume_cloud.push_all(conn, say=say)
+        except Exception as e:
+            say(f"  ! resumes table upload skipped: {str(e)[:160]}")
+
     parts = []
     if pull:
         parts.append(f"{new} new + {upd} updated from Supabase")

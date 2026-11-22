@@ -34,7 +34,7 @@ ALTER TABLE public.resumes ADD COLUMN IF NOT EXISTS ai_model    TEXT NOT NULL DE
 ALTER TABLE public.resumes ADD COLUMN IF NOT EXISTS prompt_used TEXT NOT NULL DEFAULT '';
 
 -- auto-bid extension (same as migrations/002_auto_bid.sql)
-ALTER TABLE public.resumes ADD COLUMN IF NOT EXISTS source     TEXT NOT NULL DEFAULT 'manual'; -- 'manual' | 'jobright'
+ALTER TABLE public.resumes ADD COLUMN IF NOT EXISTS source     TEXT NOT NULL DEFAULT 'manual'; -- 'manual' | 'jobright' | 'ashby'
 ALTER TABLE public.resumes ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT '';       -- job-board page (jobright.ai/jobs/info/…)
 ALTER TABLE public.resumes ADD COLUMN IF NOT EXISTS apply_url  TEXT NOT NULL DEFAULT '';       -- company application page the bot filled
 ALTER TABLE public.resumes ADD COLUMN IF NOT EXISTS bot_status TEXT NOT NULL DEFAULT '';       -- preparing | applying | applied | needs_attention | failed | skipped

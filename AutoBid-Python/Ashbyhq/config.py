@@ -62,7 +62,12 @@ BATCH_WAIT_MIN = 20
 
 # Company application limits by board slug, e.g. Ashby: "max 3 applications in any 60 days".
 # org -> (max applications, days). The bot never goes over these.
-APPLY_LIMITS = {"ashby": (3, 60)}
+APPLY_LIMITS = {
+    "ashby": (3, 60),
+    "elevenlabs": (2, 90),    # "90 days cooling time after two applications"
+    "temporal": (5, 30),      # "limited to 5 applications within a rolling 30 day period"
+}
+# Limits the bot meets on its own (the page says so) are remembered in data/org_blocks.json.
 
 import notify as _notify  # noqa: E402  (after sys.path is set)
 _notify.NOTIFY_SOUND = NOTIFY_SOUND
