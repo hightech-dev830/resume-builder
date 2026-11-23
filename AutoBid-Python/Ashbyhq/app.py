@@ -1441,16 +1441,33 @@ class App(tk.Tk):
         return f"{len(ids)} selected jobs"
 
     def open_bot_browser(self):
-        """Open AutoBid Chrome (.browser-profile) so you can sign in to AI sites before the bot runs."""
+        """Open the bot's own Chrome (.browser-profile) so you can sign in and prepare
+        ChatGPT / Claude / DeepSeek before Apply or Make resume.
+
+        Launches real Chrome (not Playwright). Close that window before starting the bot —
+        the profile can only be open in one place."""
         if self.proc and self.proc.poll() is None:
             messagebox.showwarning(
                 "Busy",
-                "Something is already running. Stop it first — the bot Chrome profile "
-                "can only be open in one place at a time.")
+                "Something is already running and may be using the bot Chrome profile.\n"
+                "Stop it first, then open the bot browser to prepare logins.")
             return
-        self.run_script(
-            ["open_browser_login.py"],
-            "Bot Chrome — sign in to ChatGPT / Claude / DeepSeek")
+        try:
+            from browser import PROFILE_DIR, PREP_URLS, open_bot_chrome
+            open_bot_chrome()
+        except Exception as e:
+            messagebox.showerror("Open bot browser", str(e))
+            return
+        self.log(
+            f"Opened bot Chrome ({PROFILE_DIR})\n"
+            f"  Prepare / sign in: " + ", ".join(PREP_URLS) + "\n"
+            f"  Close that Chrome window before Apply or Make resume.\n")
+        messagebox.showinfo(
+            "Bot browser opened",
+            "This is the bot's own Chrome (not your everyday browser).\n\n"
+            "Sign in to ChatGPT, Claude.ai and DeepSeek in the tabs that opened.\n"
+            "You can open more tabs and prepare anything else you need.\n\n"
+            "Close that Chrome window before Apply / Make resume.")
 
     def _flush_ai_settings(self):
         """Write the AI tab (including an unsaved Platform change) to disk before any AI task.
@@ -1726,9 +1743,10 @@ class App(tk.Tk):
         ttk.Button(browser_bar, text="Open bot browser", style="Accent.TButton",
                    command=self.open_bot_browser).pack(side="left")
         ttk.Label(browser_bar, style="Stat.TLabel", wraplength=780, text=(
-            "  Opens the bot's own Chrome (.browser-profile) with ChatGPT, Claude.ai and DeepSeek. "
-            "Sign in there before Apply / Make resume — your normal Chrome login does not count. "
-            "Close that window before starting the bot.")).pack(side="left", padx=(8, 0))
+            "  Opens the bot's own Chrome window (.browser-profile) with ChatGPT, Claude.ai and "
+            "DeepSeek tabs so you can sign in and prepare everything. Your everyday Chrome login "
+            "does not count. Close that window before Apply / Make resume.")).pack(
+            side="left", padx=(8, 0))
         ttk.Button(tab, text="Save AI settings", style="Accent.TButton", command=self.save_ai).pack(
             anchor="e", pady=(8, 4))
 
