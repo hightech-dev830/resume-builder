@@ -303,6 +303,8 @@ class App(tk.Tk):
         top.pack(fill="x")
         ttk.Label(top, text="AutoBid · Ashbyhq", style="Title.TLabel").pack(side="left")
         ttk.Label(top, text="  ashbyhq.com/careers · Remote", style="Stat.TLabel").pack(side="left")
+        ttk.Button(top, text="Open bot browser", command=self.open_bot_browser).pack(
+            side="left", padx=(16, 0))
         self.stats = ttk.Label(top, text="", style="Stat.TLabel")
         self.stats.pack(side="right")
         self.auto_hdr = ttk.Label(top, text="", style="Stat.TLabel", foreground="#1a7f37")
@@ -1438,6 +1440,18 @@ class App(tk.Tk):
             return self.jobs.set(ids[0], "title")
         return f"{len(ids)} selected jobs"
 
+    def open_bot_browser(self):
+        """Open AutoBid Chrome (.browser-profile) so you can sign in to AI sites before the bot runs."""
+        if self.proc and self.proc.poll() is None:
+            messagebox.showwarning(
+                "Busy",
+                "Something is already running. Stop it first — the bot Chrome profile "
+                "can only be open in one place at a time.")
+            return
+        self.run_script(
+            ["open_browser_login.py"],
+            "Bot Chrome — sign in to ChatGPT / Claude / DeepSeek")
+
     def _flush_ai_settings(self):
         """Write the AI tab (including an unsaved Platform change) to disk before any AI task.
         Prevents bid.py from still using claude_api after you switched to ChatGPT web."""
@@ -1707,6 +1721,14 @@ class App(tk.Tk):
         self.k_status.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.after(200, self.load_keys)
 
+        browser_bar = ttk.Frame(tab)
+        browser_bar.pack(fill="x", pady=(10, 0))
+        ttk.Button(browser_bar, text="Open bot browser", style="Accent.TButton",
+                   command=self.open_bot_browser).pack(side="left")
+        ttk.Label(browser_bar, style="Stat.TLabel", wraplength=780, text=(
+            "  Opens the bot's own Chrome (.browser-profile) with ChatGPT, Claude.ai and DeepSeek. "
+            "Sign in there before Apply / Make resume — your normal Chrome login does not count. "
+            "Close that window before starting the bot.")).pack(side="left", padx=(8, 0))
         ttk.Button(tab, text="Save AI settings", style="Accent.TButton", command=self.save_ai).pack(
             anchor="e", pady=(8, 4))
 
@@ -2083,8 +2105,7 @@ class App(tk.Tk):
         """Move Data Analyst / IT Specialist / Solutions Engineer etc. out of 'not relevant'
         when the current rules say YES (fixes older AI/rule rejections).
 
-        Those jobs never had stage-2 details - queue a details fetch so they leave
-        “no details yet” / status=new and become Apply-ready."""
+        Does not auto-start Fetch missing details — use that Jobs-tab button when you want."""
         try:
             from relevance import RelevanceFilter
             n = RelevanceFilter(ai=None, log=lambda *a: None).reopen_false_negatives(self.conn)
@@ -2096,9 +2117,8 @@ class App(tk.Tk):
                 "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND relevant=1 AND details_at IS NULL"
             ).fetchone()["c"]
             if missing:
-                self.log(f"{missing} relevant job(s) still have no details (cannot Apply yet) - "
-                         f"fetching questions now …\n")
-                self.fetch_missing_details(auto=True)
+                self.log(f"{missing} relevant job(s) still have no details (cannot Apply yet) — "
+                         f"use “Fetch missing details” when ready.\n")
         except Exception as e:
             self.log(f"! Could not reopen relevance false-negatives: {str(e)[:150]}\n")
 
