@@ -189,13 +189,15 @@ def jobs_needing_relevance(conn):
 
 def jobs_needing_details(conn, refresh=False, orgs=None, since=None):
     """Relevant, active jobs whose details (description + questions) are not loaded yet.
-    since: only jobs first seen at/after this time (db.now() format)."""
+
+    since: optional hint for logging / callers; missing-details jobs are always included
+    even if first_seen is older (e.g. reopened from not-relevant via rule-reopen).
+    """
     sql, params = "SELECT id, org FROM jobs WHERE is_active=1 AND relevant=1", []
     if not refresh:
         sql += " AND details_at IS NULL"
-    if since:
-        sql += " AND first_seen_at >= ?"
-        params.append(since)
+    # Do not filter by `since` here: any relevant job without details must be fetched
+    # or Apply stays blocked on "no details yet" / status=new.
     rows = conn.execute(sql, params).fetchall()
     return [(r["org"], r["id"]) for r in rows if not orgs or r["org"] in orgs]
 

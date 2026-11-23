@@ -1,5 +1,6 @@
 """Settings for the Ashbyhq auto-bid bot."""
 import sys
+import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -77,6 +78,33 @@ COLLECT_LOCK = DATA_DIR / "collect.lock"
 # jobs / companies and stops cleanly. ("Stop now" ends the process tree at once.)
 STOP_FLAG = DATA_DIR / "stop.flag"
 
+# "Pause" in the app creates this file; scripts finish the current step, then wait until
+# the file is removed ("Continue") or Stop is pressed.
+PAUSE_FLAG = DATA_DIR / "pause.flag"
+
 
 def stop_requested():
     return STOP_FLAG.exists()
+
+
+def pause_requested():
+    return PAUSE_FLAG.exists()
+
+
+def wait_while_paused():
+    """Block while Pause is on. Returns True if Stop was requested (caller should exit).
+
+    Pause does not kill the current AI call / browser step - it waits at the next
+    safe checkpoint (between jobs, companies, resumes).
+    """
+    if not PAUSE_FLAG.exists():
+        return stop_requested()
+    print("  ⏸ Paused - press Continue in AutoBid to resume (or Stop to end) ...")
+    while PAUSE_FLAG.exists():
+        if stop_requested():
+            return True
+        time.sleep(0.4)
+    if stop_requested():
+        return True
+    print("  ▶ Continued")
+    return False

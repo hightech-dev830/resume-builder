@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import ashby_api
 import db
 import skip_orgs
-from config import WORKERS, stop_requested
+from config import WORKERS, stop_requested, wait_while_paused
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -37,7 +37,7 @@ def scrape_details(conn, refresh=False, orgs=None, since=None):
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         futures = {pool.submit(ashby_api.fetch_job_details, org, jid): jid for org, jid in todo}
         for i, fut in enumerate(as_completed(futures), 1):
-            if stop_requested():
+            if wait_while_paused() or stop_requested():
                 for f in futures:
                     f.cancel()                     # not started yet -> dropped
                 print("\n⏸ Stop requested - finishing the requests already running, then stopping.")

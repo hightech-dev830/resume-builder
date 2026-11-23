@@ -1,16 +1,18 @@
-"""Collect = stage 1 (job scraping) + stage 2 (job details scraping), one after the other.
+"""Collect = scrape every Ashby board, refresh the local job list, sync Supabase.
+
+Roadmap (always the same, whether you click Collect / Collect today's jobs / auto-collect):
+    1. Collect jobs (all boards / focus on new+today) from company career lists in companies.csv
+    2. Auto-update the local job list (Jobs tab reads data/ashbyhq.db)
+    3. Auto-update Supabase (sync_db.py)
 
     python collect.py                  # all companies in companies.csv
     python collect.py --org openai     # one company (repeatable)
     python collect.py --no-ai          # relevance by rules only
     python collect.py --refresh        # also re-download details of known relevant jobs
-    python collect.py --today          # only jobs new on the boards since the last collection:
-                                       # details for those only, then lists the ones posted today
+    python collect.py --today          # still lists every board (how new jobs are found);
+                                       # then details for new/missing, and lists today's postings
 
-Ashby's job lists carry no posted date, so every board is still listed in both modes (that is
-how new jobs are found); --today skips everything else and reports today's postings.
-At the end the jobs are synced with Supabase (sync_db.py).
-
+Ashby's job lists carry no posted date, so every board is still listed in both modes.
 Each stage can also run on its own: scrape_jobs.py / scrape_details.py.
 """
 import argparse
@@ -48,13 +50,15 @@ def main():
             stage1.append("--no-ai")
         scrape_jobs.main(stage1)
         print()
-        from config import stop_requested
-        if stop_requested():
+        from config import stop_requested, wait_while_paused
+        if wait_while_paused() or stop_requested():
             print("⏸ Stopped after stage 1, as you asked. "
                   "Scraped jobs stay in the local DB and will be synced to Supabase now.")
         else:
-            scrape_details.scrape_details(conn, refresh=args.refresh, orgs=args.org,
-                                          since=started if args.today else None)
+            # Stage 2: EVERY relevant job still missing details - not only ones first-seen
+            # in this run. Needed for jobs reopened from "not relevant" (rule-reopen) that
+            # never got questions, so they can move new → ready and be biddable.
+            scrape_details.scrape_details(conn, refresh=args.refresh, orgs=args.org, since=None)
             if args.today:
                 print_today(conn, started)
 

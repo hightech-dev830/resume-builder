@@ -13,6 +13,9 @@ local file, so the same answers are used on every computer.
 Usage:
     python answers.py              # add new questions from the DB to the bank, show coverage
     python answers.py <job-id>     # preview how one job's form would be autofilled
+    python answers.py --import-backup path/to/autobid_questions.json
+                                   # fill EMPTY answers on this Supabase from a backup
+                                   # (match by key or same question text + type; never overwrite)
 
 Workflow:
     1. python collect.py
@@ -20,10 +23,12 @@ Workflow:
     3. in the desktop app's Answers tab, fill "My profile" and answer the questions
     4. python answers.py           -> shows how many jobs can now be filled fully
 """
+import csv
 import json
 import re
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import db
 from config import BASE_DIR, TAILORED_RESUME
@@ -215,6 +220,118 @@ def set_answer(key, answer, bank=None):
         if q["key"] == key:
             q["answer"] = rows[0]["answer"]
     return bank
+
+
+def _parse_backup_answer(raw):
+    """Normalize a backup cell into a bank answer (str / list / bool / None)."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, (dict, list, bool, int, float)):
+        return raw
+    text = str(raw).strip()
+    if not text or text.lower() in ("null", "none"):
+        return None
+    if text[0] in "[{":
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+    return text
+
+
+def _backup_rows_from_file(path):
+    """Load a Supabase table export (JSON or CSV) into a list of row dicts."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(str(path))
+    text = path.read_text(encoding="utf-8-sig")
+    if path.suffix.lower() == ".csv" or (not text.lstrip().startswith(("[", "{")) and "," in text[:200]):
+        rows = list(csv.DictReader(text.splitlines()))
+        return rows
+    data = json.loads(text)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in ("autobid_questions", "questions", "data", "rows"):
+            if isinstance(data.get(k), list):
+                return data[k]
+        # single-row object accidentally exported
+        if data.get("key") or data.get("question"):
+            return [data]
+    raise ValueError("backup must be a JSON array/object of autobid_questions rows, or a CSV export")
+
+
+def _backup_lookup(rows):
+    """Index backup answers by bank key and by (type, normalized question text)."""
+    by_key, by_text = {}, {}
+    for r in rows:
+        ans = _parse_backup_answer(r.get("answer"))
+        if _is_empty(ans):
+            continue
+        key = (r.get("key") or "").strip()
+        qtext = (r.get("question") or "").strip()
+        qtype = (r.get("type") or "").strip()
+        if key:
+            by_key[key] = {"answer": ans, "question": qtext, "type": qtype, "key": key}
+        if qtext and qtype:
+            # same matching as db.bank_key / Ashby field matching
+            nk = db.bank_key(qtext, qtype)
+            by_text[nk] = {"answer": ans, "question": qtext, "type": qtype, "key": key or nk}
+            by_key.setdefault(nk, by_text[nk])
+    return by_key, by_text
+
+
+def import_matched_answers_from_backup(path, bank=None, dry_run=False):
+    """Fill EMPTY answers on THIS Supabase from a backup file of autobid_questions.
+
+    Match order:
+      1. exact `key` (type:normalized question)
+      2. same question text + type (rebuilt key)
+    Never overwrites an answer that is already set.
+    Returns (bank, stats) where stats has filled / skipped_has_answer / no_match / backup_answered.
+    """
+    rows = _backup_rows_from_file(path)
+    by_key, by_text = _backup_lookup(rows)
+    if bank is None:
+        bank = load_bank()
+    stats = {"filled": 0, "skipped_has_answer": 0, "no_match": 0, "backup_answered": len(by_key),
+             "examples": []}
+    updates = []
+    for q in bank["questions"]:
+        if not _is_empty(q.get("answer")):
+            # already answered on this board - leave alone
+            if q["key"] in by_key or db.bank_key(q.get("question") or "", q.get("type") or "") in by_text:
+                stats["skipped_has_answer"] += 1
+            continue
+        hit = by_key.get(q["key"]) or by_text.get(db.bank_key(q.get("question") or "", q.get("type") or ""))
+        if not hit or _is_empty(hit.get("answer")):
+            stats["no_match"] += 1
+            continue
+        q["answer"] = hit["answer"]
+        updates.append({"platform": PLATFORM, "key": q["key"], "answer": hit["answer"],
+                        "updated_at": _now()})
+        stats["filled"] += 1
+        if len(stats["examples"]) < 8:
+            stats["examples"].append(q.get("question") or q["key"])
+    if updates and not dry_run:
+        # PATCH one key at a time would be slow; upsert answer column via full row merge
+        remote = {r["key"]: r for r in _fetch_questions()}
+        payload = []
+        for u in updates:
+            r = remote.get(u["key"])
+            if not r:
+                continue
+            payload.append({
+                "platform": PLATFORM, "key": u["key"],
+                "question": r.get("question") or "", "type": r.get("type") or "",
+                "form": r.get("form") or "", "note": r.get("note"),
+                "choices": r.get("choices"), "asked_in_jobs": int(r.get("asked_in_jobs") or 0),
+                "answer": u["answer"], "updated_at": u["updated_at"],
+            })
+        if payload:
+            for i in range(0, len(payload), 200):
+                supa.upsert("autobid_questions", payload[i:i + 200], "platform,key")
+    return bank, stats
 
 
 def set_profile(values, bank=None):
@@ -441,14 +558,36 @@ def print_job(conn, job_id, bank):
 
 
 def main():
+    args = sys.argv[1:]
+    if args and args[0] in ("--import-backup", "--import"):
+        if len(args) < 2:
+            sys.exit("Usage: python answers.py --import-backup path/to/autobid_questions.json|.csv")
+        path = args[1]
+        dry = "--dry-run" in args
+        conn = db.connect()
+        bank = load_bank()
+        sync_bank(conn, bank)   # ensure this board's questions exist before matching
+        save_bank(bank)
+        bank, stats = import_matched_answers_from_backup(path, bank, dry_run=dry)
+        print(f"Backup answers available: {stats['backup_answered']}")
+        print(f"Filled empty matches:     {stats['filled']}"
+              + (" (dry-run, not saved)" if dry else " → saved to this Supabase"))
+        print(f"Skipped (already had answer): {stats['skipped_has_answer']}")
+        print(f"No match in backup:      {stats['no_match']}")
+        if stats["examples"]:
+            print("Examples filled:")
+            for t in stats["examples"]:
+                print(f"  · {t[:90]}")
+        return
+
     conn = db.connect()
     bank = load_bank()
     added = sync_bank(conn, bank)
     save_bank(bank)
     if added:
         print(f"Added {added} new questions to the answer bank\n")
-    if len(sys.argv) > 1:
-        print_job(conn, sys.argv[1], bank)
+    if args:
+        print_job(conn, args[0], bank)
     else:
         print_coverage(conn, bank)
 

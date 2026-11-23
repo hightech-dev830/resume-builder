@@ -20,7 +20,7 @@ from browser import open_browser
 from notify import notify
 from resume import make_resume, settings
 import ai_settings
-from config import stop_requested
+from config import stop_requested, wait_while_paused
 from web_ai import PROVIDERS
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -88,7 +88,7 @@ def main():
         made = 0
         try:
             for job in jobs:
-                if stop_requested():
+                if wait_while_paused() or stop_requested():
                     print("\n⏸ Stopped after the current resume, as you asked.")
                     break
                 print(f"\n- {job['title']} ({job['id']})  [{ai.label}]")

@@ -20,7 +20,8 @@ Double-click **`AutoBid-Ashbyhq.bat`**, or run `python app.py`.
   - **Test** asks the chosen model a one-line question.
 
   The **Resume JSON prompt** editor can save either to Resume Builder (shared with the extension and web app) or as a local prompt used only by AutoBid (`AutoBid-Python/resume_prompt.txt`). The JSON output rules are always added after it. Settings are saved in `AutoBid-Python/ai_settings.json` and used by every bot.
-- **Auto-collection** (Run tab): **Collect all companies now**, or tick *Collect all companies automatically every N hours*. While the app is open, it collects every company again when that time comes, or as soon as the bot is free if it's busy bidding. The header shows the next time.
+- **Auto-collection** (Run tab): runs at fixed **US Eastern** times while the app is open: **1:00, 4:00, 8:00, 10:00, 12:00, 14:00, 16:00, 18:00, 20:00**. Choose *today's jobs* or *all companies*. If Apply is running, Collect is **queued** and starts when Apply finishes (you are not blocked). The header shows the next Eastern slot (it does not drift when a run finishes).
+- **Collection roadmap** (Collect jobs / Collect today's jobs / auto): **1)** scrape boards from `companies.csv` → **2)** update the Jobs list → **3)** sync Supabase. Jobs tab defaults to **Posted: today**; use **Today's jobs** to jump back to that view.
 
 Only one collection runs at a time (`data/collect.lock`). A second one, from the app, the auto timer or the command line, stops with a message instead of doubling the load. If Ashby answers "429 Too Many Requests", the bot waits and retries.
 
@@ -70,9 +71,15 @@ Both directions also run by themselves (`sync_db.py` without options) after ever
 
 Not synced: the resume PDF path (it points into one computer's disk), `description_html` and the raw Ashby field JSON (large and unused).
 
-### Collect today's jobs (`collect.py --today`)
+### Collect / Collect today's jobs
 
-Ashby's job lists carry no posted date, so this still lists every board (that is how new jobs are found, about 20 minutes). It then downloads details only for the jobs that are new since the last collection, prints the relevant ones posted today and switches the Jobs list to **Posted: today**.
+Roadmap every time:
+
+1. **Scrape** company career boards listed in `companies.csv` (stage 1 + stage 2).
+2. **Update** the local job list (`data/ashbyhq.db` → Jobs tab).
+3. **Sync** Supabase (`sync_db.py`).
+
+`collect.py --today` still lists every board (Ashby lists have no posted date — that is how new jobs are found). It then focuses details on new/missing jobs, prints today's haul, and the app switches the Jobs list to **Posted: today**. If you click Collect while Apply is running, the collect is queued and starts when Apply finishes.
 
 ## Settings (`config.py`)
 
@@ -99,7 +106,19 @@ An old local `answers.json` is imported automatically on the first start, then r
 ```
 python answers.py            # add new questions to the bank + show coverage
 python answers.py <job-id>   # preview how one job's form will be autofilled
+python answers.py --import-backup path/to/autobid_questions.json   # fill empty matches
+python answers.py --import-backup path/to/export.csv --dry-run     # preview only
 ```
+
+### Import answers from another Supabase (backup file)
+
+If you backed up `autobid_questions` from one Supabase project and point this bot at another (via `.env` / `.env.local`), you can copy over matching answers **without overwriting** anything already filled:
+
+1. Point `SUPABASE_URL` / `SUPABASE_SECRET_KEY` at the **destination** account (this board).
+2. Export `autobid_questions` from the old project (Supabase Table Editor → Download as CSV/JSON, or SQL dump as JSON array).
+3. In the app **Answers** tab click **Import from backup…**, or run the CLI above.
+
+Matching: same bank `key`, or same question text + type. Only empty answers on this board are updated; answers already set stay as they are.
 
 Answer questions in the desktop app's **Answers** tab:
 

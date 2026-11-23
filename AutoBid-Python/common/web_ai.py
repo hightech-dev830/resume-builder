@@ -12,8 +12,10 @@ Providers:
         Cloudflare "Just a moment..." check) and their terms forbid automated use,
         so your account can be limited. The bot never tries to get around that.
 
-Each question goes to a NEW chat, so jobs never mix. The browser profile is shared with
-the bots (common/browser.py), so you log in to the AI sites only once.
+Web chat reuses ONE browser tab: each ask deletes the previous thread (so the sidebar
+does not fill with "Resume Generation" chats), then opens a blank chat. Follow-up
+retries in the same ask stay in that thread. The browser profile is shared with the
+bots (common/browser.py), so you log in to the AI sites only once.
 """
 import json
 import os
@@ -58,6 +60,26 @@ PROVIDERS = {
             "[aria-label='New chat']",
             "nav a[href='/']",
         ],
+        # Delete the open thread so AutoBid does not leave dozens of sidebar chats
+        "chat_menu": [
+            "button[data-testid='conversation-options-button']",
+            "button[aria-label*='Open conversation options']",
+            "button[aria-label*='Conversation options']",
+            "button[aria-label*='More actions']",
+            "button[aria-label*='More options']",
+        ],
+        "delete_item": [
+            "div[role='menuitem']:has-text('Delete')",
+            "[data-testid='delete-chat-menu-item']",
+            "button:has-text('Delete chat')",
+            "text=Delete chat",
+            "text=Delete",
+        ],
+        "delete_confirm": [
+            "button[data-testid='delete-conversation-confirm-button']",
+            "button:has-text('Delete')",
+            "[role='dialog'] button:has-text('Delete')",
+        ],
         "send": ["button[data-testid='send-button']", "#composer-submit-button",
                  "button[aria-label*='Send message']", "button[aria-label*='Send']"],
         "busy": ["button[data-testid='stop-button']", "button[aria-label='Stop streaming']",
@@ -79,6 +101,25 @@ PROVIDERS = {
     "claude": {
         "url": "https://claude.ai/new",
         "input": ["div[contenteditable='true'].ProseMirror", "div[contenteditable='true']"],
+        "new_chat": [
+            "a[href='/new']",
+            "button:has-text('New chat')",
+            "[aria-label='New chat']",
+        ],
+        "chat_menu": [
+            "button[aria-label*='Chat options']",
+            "button[aria-label*='More']",
+            "button:has-text('⋯')",
+        ],
+        "delete_item": [
+            "div[role='menuitem']:has-text('Delete')",
+            "button:has-text('Delete')",
+            "text=Delete",
+        ],
+        "delete_confirm": [
+            "button:has-text('Delete')",
+            "[role='dialog'] button:has-text('Delete')",
+        ],
         "send": ["button[aria-label='Send message']", "button[aria-label*='Send']"],
         "busy": ["[data-is-streaming='true']", "button[aria-label='Stop response']"],
         "answer": ["div.font-claude-response", "[data-testid='ai-message']",
@@ -92,6 +133,21 @@ PROVIDERS = {
             "button:has-text('New chat')",
             "a:has-text('New chat')",
             "[class*='new-chat']",
+        ],
+        "chat_menu": [
+            "div[class*='chat'] button:has(svg)",
+            "[class*='more']",
+            "button[aria-label*='More']",
+        ],
+        "delete_item": [
+            "div:has-text('Delete')",
+            "button:has-text('Delete')",
+            "text=Delete",
+        ],
+        "delete_confirm": [
+            "button:has-text('Confirm')",
+            "button:has-text('Delete')",
+            "[role='dialog'] button:has-text('Delete')",
         ],
         "send": [
             "div[role='button'][aria-disabled='false']:has(svg)",
@@ -186,6 +242,7 @@ class WebAI:
         self.task = task
         self.page = None
         self.last_model = None     # API: the model that actually answered
+        self._have_chat = False    # web: True after a prompt was sent in the current thread
 
     @property
     def label(self):
@@ -598,7 +655,7 @@ class WebAI:
             pass
 
     def _click_new_chat(self):
-        """Start a blank ChatGPT thread so jobs do not mix."""
+        """Open a blank composer in the same tab (does not leave an old filled thread)."""
         for sel in PROVIDERS[self.provider].get("new_chat") or []:
             try:
                 loc = self.page.locator(sel)
@@ -611,7 +668,7 @@ class WebAI:
                     return True
             except Exception:
                 continue
-        # fallback: go home (ChatGPT opens a fresh composer there)
+        # fallback: go home (sites open a fresh composer there)
         try:
             self.page.goto(PROVIDERS[self.provider]["url"], wait_until="domcontentloaded",
                            timeout=60000)
@@ -620,10 +677,73 @@ class WebAI:
         except Exception:
             return False
 
-    def _open_new_chat(self):
+    def _in_saved_conversation(self):
+        """True when the URL looks like an existing chat thread (safe to delete)."""
+        url = self._page_url()
+        if self.provider == "chatgpt":
+            return bool(re.search(r"chatgpt\.com/(c|g)/[^\s/?#]+", url, re.I))
+        if self.provider == "claude":
+            return bool(re.search(r"claude\.ai/chat/[^\s/?#]+", url, re.I))
+        if self.provider == "deepseek":
+            return bool(re.search(r"chat\.deepseek\.com/(a|chat)/", url, re.I)) \
+                or bool(self._count(self._answers()) or self._count(self._users()))
+        return False
+
+    def _click_first(self, selectors, timeout=1500):
+        for sel in selectors or []:
+            try:
+                loc = self.page.locator(sel)
+                if not loc.count():
+                    continue
+                el = loc.first
+                if el.is_visible():
+                    el.click(timeout=timeout, force=True)
+                    time.sleep(0.35)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _delete_current_chat(self):
+        """Delete the open conversation so the sidebar does not fill with resume threads.
+
+        Best-effort: if the site UI changed, we still open a New chat afterward.
+        """
+        if self.page is None or self.page.is_closed():
+            return False
+        if not self._in_saved_conversation() and not self._have_chat:
+            return False
         cfg = PROVIDERS[self.provider]
-        # Prefer an existing bot-Chrome tab that already has the saved ChatGPT session
-        # (avoids about:blank + false "please log in" while another tab is already in).
+        self._dismiss_overlays()
+        # 1) open the ⋯ / options menu on the current chat
+        if not self._click_first(cfg.get("chat_menu"), timeout=2000):
+            # DeepSeek / some UIs: options only on the sidebar row - try the first history item menu
+            for sel in [
+                "nav [class*='conversation'] button",
+                "[class*='history'] button:has(svg)",
+                "aside button:has(svg)",
+            ]:
+                try:
+                    loc = self.page.locator(sel)
+                    if loc.count() and loc.first.is_visible():
+                        loc.first.click(timeout=1200, force=True)
+                        time.sleep(0.3)
+                        break
+                except Exception:
+                    continue
+        # 2) choose Delete
+        if not self._click_first(cfg.get("delete_item"), timeout=2000):
+            return False
+        # 3) confirm
+        self._click_first(cfg.get("delete_confirm"), timeout=2000)
+        time.sleep(0.6)
+        self._have_chat = False
+        self._dismiss_overlays()
+        return True
+
+    def _ensure_web_page(self):
+        """Reuse one bot-Chrome tab for this provider (login session stays)."""
+        cfg = PROVIDERS[self.provider]
         if not self._adopt_ai_page():
             if self.page is None or self.page.is_closed():
                 self.page = self.context.new_page()
@@ -636,7 +756,6 @@ class WebAI:
         self._dismiss_overlays()
         box = self._chat_ready()
         if box is None and (self._login_wall() or not (self._logged_in_composer() or self._has_session_markers())):
-            # not logged in yet: wait for you (will not refresh a saved session homepage)
             box = self._wait_until_logged_in()
             try:
                 self.page.goto(cfg["url"], wait_until="domcontentloaded", timeout=60000)
@@ -645,7 +764,6 @@ class WebAI:
             self._dismiss_overlays()
             box = self._chat_ready() or self._first(cfg["input"], timeout=20)
         if box is None:
-            # Session markers present but composer slow to paint - wait longer (SPA)
             box = self._first(cfg["input"], timeout=25)
         if box is None and self.provider == "chatgpt":
             box = self._chatgpt_composer_by_role()
@@ -655,22 +773,35 @@ class WebAI:
             raise RuntimeError(
                 f"logged in to {self.provider}, but the chat box did not appear "
                 f"(ChatGPT Free is fine - the page DOM likely changed; see composer debug above)")
-        if self.provider == "chatgpt":
-            self._click_new_chat()
-            self._dismiss_overlays()
-            box = (self._chat_ready() or self._first(cfg["input"], timeout=15)
-                   or self._chatgpt_composer_by_role() or box)
-        elif self.provider == "deepseek":
-            # Always start a blank DeepSeek thread so resume JSON is not mixed into essays
-            try:
-                self.page.goto(cfg["url"], wait_until="domcontentloaded", timeout=60000)
-            except Exception:
-                pass
-            self._dismiss_overlays()
-            self._click_new_chat()
-            self._dismiss_overlays()
-            box = self._chat_ready() or self._first(cfg["input"], timeout=15) or box
         return box
+
+    def _recycle_chat(self):
+        """Same tab: delete the previous AutoBid thread (if any), then open one blank chat.
+
+        Keeps the sidebar from accumulating dozens of resume/essay chats.
+        """
+        cfg = PROVIDERS[self.provider]
+        self._ensure_web_page()
+        if self._have_chat or self._in_saved_conversation():
+            try:
+                if self._delete_current_chat():
+                    print(f"    {self.provider}: deleted previous chat thread (reusing one tab)")
+            except Exception as e:
+                print(f"    ! {self.provider}: could not delete previous chat ({e}) - opening New chat")
+        self._dismiss_overlays()
+        self._click_new_chat()
+        self._dismiss_overlays()
+        box = self._chat_ready() or self._first(cfg["input"], timeout=15)
+        if box is None and self.provider == "chatgpt":
+            box = self._chatgpt_composer_by_role()
+        if box is None:
+            raise RuntimeError(f"{self.provider} new chat box did not appear after recycle")
+        self._have_chat = False
+        return box
+
+    def _open_new_chat(self):
+        """Back-compat name: recycle = delete previous + one fresh chat in the same tab."""
+        return self._recycle_chat()
 
     def _locate_any(self, selectors):
         """First matching locator on the page or any iframe (ChatGPT sometimes nests the thread)."""
@@ -937,6 +1068,8 @@ class WebAI:
                 sent = True
                 break
             time.sleep(0.5)
+        if sent:
+            self._have_chat = True   # so the next ask() deletes this thread first
         if not sent:
             # one more Enter attempt
             try:
@@ -984,16 +1117,18 @@ class WebAI:
         raise RuntimeError(f"{self.provider} answer did not finish in {ANSWER_TIMEOUT_MIN} min")
 
     def _ask_web(self, prompt):
-        box = self._open_new_chat()
+        # New independent ask: delete previous AutoBid thread, reuse the same tab
+        box = self._recycle_chat()
         try:
             return self._send_and_wait(prompt, box)
         except Exception as e:
             msg = str(e).splitlines()[0][:180]
             # Playwright actionability errors used to surface as bare Locator.click timeouts
             if "Locator.click" in msg or "Timeout" in msg or "composer" in msg.lower():
-                print(f"    ! {self.provider} UI glitch ({msg}) - opening a fresh chat and retrying once ...")
+                print(f"    ! {self.provider} UI glitch ({msg}) - recycling chat and retrying once ...")
                 self._dismiss_overlays()
-                box = self._open_new_chat()
+                self._have_chat = True
+                box = self._recycle_chat()
                 return self._send_and_wait(prompt, box)
             raise
 

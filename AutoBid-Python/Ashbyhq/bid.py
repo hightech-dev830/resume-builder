@@ -32,7 +32,8 @@ except ImportError:
 
 import answers as bank_mod
 import db
-from config import APPLY_LIMITS, BATCH_SIZE, BATCH_WAIT_MIN, TAILORED_RESUME, stop_requested
+from config import (APPLY_LIMITS, BATCH_SIZE, BATCH_WAIT_MIN, TAILORED_RESUME,
+                    stop_requested, wait_while_paused)
 # shared modules (AutoBid-Python/common, put on sys.path by config)
 from browser import open_browser
 from captcha import detect_captcha, captcha_solved
@@ -683,7 +684,7 @@ def wait_for_you(conn, pending, watch=None):
     resubmitted = set()
     while pending and time.time() < deadline:
         time.sleep(1.5)
-        if stop_requested():
+        if wait_while_paused() or stop_requested():
             print("  stop requested - not waiting for the bot checks any longer")
             break
         if watch:
@@ -747,7 +748,7 @@ def wait_until_closed(ctx, pages, dry_run, conn=None, watch=None):
         try:
             if all(p.is_closed() for p in pages) or not ctx.pages:
                 break
-            if stop_requested():
+            if wait_while_paused() or stop_requested():
                 print("Stop requested - closing the browser.")
                 break
             ctx.pages[0].wait_for_timeout(1000)   # keeps the browser responsive
@@ -829,13 +830,13 @@ def main():
         try:
             try:
                 for start in range(0, len(queue), args.batch):
-                    if stop_requested():
+                    if wait_while_paused() or stop_requested():
                         break
                     batch = queue[start:start + args.batch]
                     print(f"\n=== Batch {start // args.batch + 1}: {len(batch)} jobs ===")
                     pending = {}
                     for job, items in batch:
-                        if stop_requested():
+                        if wait_while_paused() or stop_requested():
                             print("\n⏸ Stopped after the current job, as you asked. "
                                   "Jobs not started yet stay 'ready'.")
                             break

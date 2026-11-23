@@ -22,7 +22,7 @@ import ashby_api
 import db
 import ai_settings
 import skip_orgs
-from config import stop_requested
+from config import stop_requested, wait_while_paused
 from config import (BOARD_WORKERS, COMPANIES_FILE, LOCATION_FILTER, ONLY_ORGS,
                     WORKPLACE_TYPES)
 from relevance import RelevanceFilter
@@ -90,6 +90,10 @@ def scrape_boards(conn, companies):
             if i % 10 == 0 or i == len(companies):
                 print(f"  {i}/{len(companies)} companies | {kept} remote US jobs so far | "
                       f"{time.time() - started:.0f}s")
+            if wait_while_paused():
+                stopped = True
+                print(f"\n⏸ Stop requested while paused - {kept} jobs scraped so far are saved.")
+                break
             if stop_requested():
                 stopped = True
                 print(f"\n⏸ Stop requested - {kept} jobs scraped so far are saved.")
@@ -104,12 +108,9 @@ def scrape_boards(conn, companies):
 
 def classify(conn, use_ai):
     todo = db.jobs_needing_relevance(conn)
-    if not todo:
-        print("Relevance: nothing new to sort.")
-        return
     ai = None
     provider, _ = ai_settings.get("relevance")
-    if use_ai and provider:
+    if use_ai and provider and todo:
         problem = ai_settings.api_key_problem(provider)
         if provider not in ai_settings.NO_BROWSER:
             print(f"  ({provider} is a web chat page; job sorting uses rules only - pick a CLI "
@@ -119,16 +120,22 @@ def classify(conn, use_ai):
         else:
             ai = ai_settings.make_ai("relevance")
             print(f"  unclear titles are sorted by {ai.label}")
-    print(f"Relevance: sorting {len(todo)} jobs (software/hardware development + eng management) ...")
-    decisions = RelevanceFilter(ai=ai).classify([(r["id"], r["title"], r["dept"]) for r in todo])
-    counts = {}
-    for jid, (relevant, method) in decisions.items():
-        db.set_relevance(conn, jid, relevant, method)
-        counts[(relevant, method)] = counts.get((relevant, method), 0) + 1
-    conn.commit()
-    yes = sum(n for (r, _), n in counts.items() if r)
-    print(f"Relevance: {yes} relevant, {len(decisions) - yes} not  "
-          f"({', '.join(f'{m}:{n}' for (r, m), n in sorted(counts.items(), key=str) if r)} relevant)")
+    rf = RelevanceFilter(ai=ai, log=print)
+    if not todo:
+        print("Relevance: nothing new to sort.")
+    else:
+        print(f"Relevance: sorting {len(todo)} jobs (software/hardware development + eng management) ...")
+        decisions = rf.classify([(r["id"], r["title"], r["dept"]) for r in todo])
+        counts = {}
+        for jid, (relevant, method) in decisions.items():
+            db.set_relevance(conn, jid, relevant, method)
+            counts[(relevant, method)] = counts.get((relevant, method), 0) + 1
+        conn.commit()
+        yes = sum(n for (r, _), n in counts.items() if r)
+        print(f"Relevance: {yes} relevant, {len(decisions) - yes} not  "
+              f"({', '.join(f'{m}:{n}' for (r, m), n in sorted(counts.items(), key=str) if r)} relevant)")
+    # Re-open Data Analyst / IT Specialist / Solutions Engineer etc. wrongly marked NO before
+    rf.reopen_false_negatives(conn)
 
 
 def main(argv=None):

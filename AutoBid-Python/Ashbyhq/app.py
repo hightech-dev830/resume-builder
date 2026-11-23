@@ -20,11 +20,12 @@ import sys
 import threading
 import tkinter as tk
 import webbrowser
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from config import BASE_DIR, BATCH_SIZE, STOP_FLAG   # first: puts AutoBid-Python/common on sys.path
+from config import BASE_DIR, BATCH_SIZE, STOP_FLAG, PAUSE_FLAG  # first: puts AutoBid-Python/common on sys.path
 import ai_settings
 import answers as bank_mod
 import db
@@ -38,6 +39,15 @@ SETTINGS_PATH = BASE_DIR / "data" / "app_settings.json"   # also read by bid.py 
 
 # "Posted" filter: label -> maximum age in days (None = no limit)
 POSTED_WITHIN = {"all": None, "today": 0, "3d ago": 3, "1w ago": 7, "1m ago": 30}
+
+# Auto-collect clock (US Eastern). Fixed times so "next" does not drift with run length.
+AUTO_COLLECT_HOURS_ET = (1, 4, 8, 10, 12, 14, 16, 18, 20)
+AUTO_SLOTS_LABEL = "1:00 · 4:00 · 8:00 · 10:00 · 12:00 · 14:00 · 16:00 · 18:00 · 20:00 ET"
+try:
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+except Exception:
+    ET = timezone(timedelta(hours=-5))  # EST fallback if tzdata missing
 
 
 def posted_date(value):
@@ -76,6 +86,61 @@ def posted_label(d, today):
     return f"{days // 365}y ago"
 
 
+def _now_et():
+    return datetime.now(ET)
+
+
+def _slot_at(day, hour):
+    """Eastern datetime for a schedule hour on the given Eastern calendar day."""
+    return datetime(day.year, day.month, day.day, hour, 0, 0, tzinfo=ET)
+
+
+def next_auto_slot(after=None):
+    """Next fixed Eastern slot strictly after `after` (default: now)."""
+    after = after or _now_et()
+    if after.tzinfo is None:
+        after = after.replace(tzinfo=ET)
+    else:
+        after = after.astimezone(ET)
+    day = after.date()
+    for _ in range(3):  # today / tomorrow / day after
+        for h in AUTO_COLLECT_HOURS_ET:
+            slot = _slot_at(day, h)
+            if slot > after:
+                return slot
+        day += timedelta(days=1)
+    return _slot_at(day, AUTO_COLLECT_HOURS_ET[0])
+
+
+def latest_passed_slot(now=None):
+    """Most recent schedule slot that is already due (≤ now Eastern)."""
+    now = now or _now_et()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=ET)
+    else:
+        now = now.astimezone(ET)
+    day = now.date()
+    for h in reversed(AUTO_COLLECT_HOURS_ET):
+        slot = _slot_at(day, h)
+        if slot <= now:
+            return slot
+    # before today's first slot → yesterday's last
+    yday = day - timedelta(days=1)
+    return _slot_at(yday, AUTO_COLLECT_HOURS_ET[-1])
+
+
+def parse_slot(iso):
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=ET)
+    return dt.astimezone(ET)
+
+
 def load_settings():
     try:
         s = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
@@ -83,14 +148,19 @@ def load_settings():
         s = {}
     s.setdefault("companies", [])          # selected companies; empty = all
     s.setdefault("auto_collect", False)
-    s.setdefault("auto_hours", 6)
     s.setdefault("last_collect", None)     # ISO time of the last finished collection
+    s.setdefault("auto_last_slot", None)   # ISO of the Eastern slot last started/covered
     if "auto_kind" not in s:
-        # Auto-collection = "Collect today's jobs" every 2 hours, on from the first start of
-        # this version (you can change or switch it off in the Run tab).
-        s.update(auto_collect=True, auto_hours=2, auto_kind="today", auto_started=None)
+        # Auto-collection on by default: today's jobs at the fixed Eastern clock times.
+        s.update(auto_collect=True, auto_kind="today", auto_last_slot=None)
         save_settings(s)
-    s.setdefault("auto_started", None)     # ISO time the last AUTO collection started (2 h counted from it)
+    s.setdefault("auto_kind", "today")
+    # Migrate old "every N hours from last start" → fixed Eastern slots (one-time).
+    if s.get("auto_started") and not s.get("auto_last_slot"):
+        started = parse_slot(s["auto_started"])
+        if started:
+            s["auto_last_slot"] = latest_passed_slot(started).isoformat()
+            save_settings(s)
     return s
 
 
@@ -188,6 +258,7 @@ class App(tk.Tk):
             raise SystemExit(1)
         self.proc = None
         self.proc_label = ""
+        self._pending_collect = None   # "today" | "all" queued while Apply/etc. is running
         self.settings = load_settings()
         self.resolved = {}
         self.out_q = queue.Queue()
@@ -208,7 +279,9 @@ class App(tk.Tk):
         body.add(self._log_panel(), weight=1)
 
         self.refresh_all()
+        self._auto_info()
         self.after(150, self._drain_output)
+        self.after(400, self._reopen_false_negatives)  # Data/IT/Solutions wrongly marked no
         self.after(10_000, self._auto_tick)       # first auto-collect check 10 s after start
 
     # ------------------------------------------------------------ look
@@ -251,14 +324,19 @@ class App(tk.Tk):
         self.run_ok.pack(side="left", padx=(16, 4), pady=6)
         self.run_fail.pack(side="left", padx=(4, 4), pady=6)
         self.run_need.pack(side="left", padx=(4, 4), pady=6)
-        # spacer so Stop buttons stay on the right
+        # spacer so control buttons stay on the right
         tk.Label(self.run_bar, text="", bg="#fff4e5").pack(side="left", fill="x", expand=True)
+        # pack order with side=right: first = rightmost
         self.b_stop_now = tk.Button(self.run_bar, text="■  Stop now", command=self.stop,
                                     bg="#c62828", fg="white", activebackground="#a51f1f",
                                     activeforeground="white", relief="flat", padx=14, pady=3,
                                     font=("Segoe UI Semibold", 10), cursor="hand2")
         self.b_stop_now.pack(side="right", padx=(6, 10), pady=4)
-        self.b_stop_after = tk.Button(self.run_bar, text="⏸  Stop after this job", command=self.stop_after,
+        self.b_pause = tk.Button(self.run_bar, text="⏸  Pause", command=self.toggle_pause,
+                                 bg="#ffffff", fg="#7a4a00", relief="solid", bd=1, padx=12, pady=2,
+                                 font=("Segoe UI Semibold", 10), cursor="hand2")
+        self.b_pause.pack(side="right", padx=(6, 0), pady=4)
+        self.b_stop_after = tk.Button(self.run_bar, text="Stop after this job", command=self.stop_after,
                                       bg="#ffffff", fg="#7a4a00", relief="solid", bd=1, padx=12, pady=2,
                                       font=("Segoe UI", 10), cursor="hand2")
         self.b_stop_after.pack(side="right", pady=4)
@@ -287,9 +365,11 @@ class App(tk.Tk):
         self.company_btn.pack(side="left", padx=(0, 12))
         ttk.Label(bar, text="Posted").pack(side="left")
         self.f_posted = ttk.Combobox(bar, width=9, state="readonly", values=list(POSTED_WITHIN))
-        self.f_posted.set("all")
-        self.f_posted.pack(side="left", padx=(4, 12))
+        self.f_posted.set("today")   # default: today's jobs are easy to find
+        self.f_posted.pack(side="left", padx=(4, 6))
         self.f_posted.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
+        ttk.Button(bar, text="Today's jobs", style="Accent.TButton",
+                   command=self.show_todays_jobs).pack(side="left", padx=(0, 12))
 
         bar = ttk.Frame(tab)                       # second filter row
         bar.pack(fill="x", pady=(0, 6))
@@ -313,6 +393,7 @@ class App(tk.Tk):
         self.job_count.pack(side="left", padx=12)
         ttk.Button(bar, text="⬆ Sync to DB", command=self.sync_to_db).pack(side="right")
         ttk.Button(bar, text="⬇ Sync from DB", command=self.sync_from_db).pack(side="right", padx=(4, 4))
+        ttk.Button(bar, text="Fetch missing details", command=self.fetch_missing_details).pack(side="right", padx=4)
         ttk.Button(bar, text="Collect today's jobs", command=self.collect_today).pack(side="right", padx=4)
         ttk.Button(bar, text="⟳ Collect jobs", command=self.collect).pack(side="right")
 
@@ -379,6 +460,9 @@ class App(tk.Tk):
         self.b_dry.pack(side="left", padx=4)
         self.b_apply = ttk.Button(btns, text="Apply", style="Accent.TButton", command=self.apply_selected)
         self.b_apply.pack(side="left")
+        self.b_answers_sel = ttk.Button(btns, text="Answers for selected",
+                                        command=self.show_answers_for_selected)
+        self.b_answers_sel.pack(side="left", padx=4)
         stbar = ttk.Frame(right)
         stbar.pack(fill="x", pady=(0, 6))
         ttk.Label(stbar, text="Status").pack(side="left")
@@ -486,7 +570,13 @@ class App(tk.Tk):
                 r["team"] or r["department"], r["location"], r["compensation"], ready, has_resume, rel))
         if self.sort_col:
             self.sort_jobs(self.sort_col)
-        self.job_count.config(text=f"{len(self.jobs.get_children()):,} jobs shown")
+        shown = len(self.jobs.get_children())
+        today_n = sum(1 for d in self.posted_dates.values() if d == today)
+        # When Posted≠today, still hint how many "today" exist in the unfiltered relevant set
+        if self.f_posted.get() == "today":
+            self.job_count.config(text=f"{shown:,} today's jobs shown")
+        else:
+            self.job_count.config(text=f"{shown:,} shown · {today_n:,} today in this list")
         self._checked = set()
         still_there = [i for i in keep if self.jobs.exists(i)]   # keep the ticks
         if still_there:
@@ -618,6 +708,7 @@ class App(tk.Tk):
         self.b_make.config(text=f"Make resume{suffix}")
         self.b_dry.config(text=f"Dry run{suffix}")
         self.b_apply.config(text=f"Apply{suffix}")
+        self.b_answers_sel.config(text=f"Answers for selected{suffix}")
         self.sel_info.config(text=f"☑ {n} job{'s' if n != 1 else ''} ticked - the buttons work on "
                                   f"{'them' if n != 1 else 'it'}" if n else
                              "Tick ☐ jobs to work on several at once (header ☐ = all shown)")
@@ -782,11 +873,21 @@ class App(tk.Tk):
         self.q_only_open = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="only unanswered", variable=self.q_only_open,
                         command=self.load_bank_list).pack(side="right")
+        ttk.Button(top, text="Import from backup…",
+                   command=self.import_answers_backup).pack(side="right", padx=(0, 8))
         self.q_kind = ttk.Combobox(top, state="readonly", width=24,
                                    values=["You answer", "AI writes (text / essays)", "All required"])
         self.q_kind.set("You answer")
         self.q_kind.bind("<<ComboboxSelected>>", lambda e: self.load_bank_list())
         self.q_kind.pack(side="right", padx=(0, 12))
+        # Shown when opened from Jobs → "Answers for selected"
+        self.answers_filter_ids = None          # set of job ids, or None = all jobs
+        self.answers_filter_keys = None         # bank_key -> count among selected jobs
+        self.q_filter_bar = ttk.Frame(right)
+        self.q_filter_lbl = ttk.Label(self.q_filter_bar, text="", foreground="#1f4fbf")
+        self.q_filter_lbl.pack(side="left")
+        ttk.Button(self.q_filter_bar, text="Show all answers",
+                   command=self.clear_answers_job_filter).pack(side="right")
         self.q_count = ttk.Label(right, text="", style="Stat.TLabel")
         self.q_count.pack(anchor="w")
         cols = ("jobs", "type", "question", "answer")
@@ -840,14 +941,96 @@ class App(tk.Tk):
         self.refresh_all()
         self.p_saved.config(text=f"✓ Saved  {datetime.now().strftime('%H:%M:%S')}")
 
+    def show_answers_for_selected(self):
+        """Jobs tab → Answers tab, listing only questions required by the ticked jobs."""
+        ids = self.selected_ids()
+        if not ids:
+            messagebox.showinfo("Answers for selected",
+                                "Tick one or more jobs first (or select a job on the right).")
+            return
+        # Keep bank in sync so every selected job's required questions are listed
+        try:
+            bank_mod.sync_bank(self.conn, self.bank)
+            bank_mod.save_bank(self.bank)
+        except Exception as e:
+            self.log(f"! Answer bank sync: {e}\n")
+        placeholders = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT bank_key, COUNT(DISTINCT job_id) n FROM questions "
+            f"WHERE required=1 AND job_id IN ({placeholders}) "
+            f"AND bank_key IS NOT NULL AND bank_key != '' "
+            f"GROUP BY bank_key", ids).fetchall()
+        self.answers_filter_ids = list(ids)
+        self.answers_filter_keys = {r["bank_key"]: r["n"] for r in rows}
+        titles = []
+        for jid in ids[:3]:
+            row = self.conn.execute("SELECT title, company FROM jobs WHERE id=?", (jid,)).fetchone()
+            if row:
+                titles.append(f"{row['company'] or '?'}: {row['title'][:40]}")
+        more = f" (+{len(ids) - 3} more)" if len(ids) > 3 else ""
+        self.q_filter_lbl.config(
+            text=f"Answers for {len(ids)} selected job{'s' if len(ids) != 1 else ''}: "
+                 + "; ".join(titles) + more)
+        self.q_filter_bar.pack(fill="x", pady=(4, 0), before=self.q_count)
+        self.q_only_open.set(False)
+        self.q_kind.set("All required")
+        self.tabs.select(self.answers_tab)
+        self.load_bank_list()
+        self.log(f"Answers tab: {len(self.answers_filter_keys)} required question(s) "
+                 f"for {len(ids)} selected job(s).\n")
+
+    def clear_answers_job_filter(self):
+        """Answers tab: leave the selected-jobs filter and show the full bank again."""
+        self.answers_filter_ids = None
+        self.answers_filter_keys = None
+        self.q_filter_bar.pack_forget()
+        self.load_bank_list()
+
+    def import_answers_backup(self):
+        """Fill EMPTY answers on this Supabase from a backup of autobid_questions (JSON/CSV).
+
+        Matches by question key or same question text + type. Never overwrites answers
+        already set on this board."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Choose autobid_questions backup (JSON or CSV from Supabase)",
+            filetypes=[("Backup", "*.json;*.csv"), ("JSON", "*.json"), ("CSV", "*.csv"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            bank_mod.sync_bank(self.conn, self.bank)
+            bank_mod.save_bank(self.bank)
+            self.bank, stats = bank_mod.import_matched_answers_from_backup(path, self.bank)
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+            return
+        self.load_bank_list()
+        self.refresh_all()
+        examples = "\n".join(f"  · {t}" for t in stats.get("examples") or [])
+        messagebox.showinfo(
+            "Import from backup",
+            f"Backup answers available: {stats['backup_answered']}\n"
+            f"Filled empty matches: {stats['filled']}\n"
+            f"Skipped (already answered here): {stats['skipped_has_answer']}\n"
+            f"No match in backup: {stats['no_match']}"
+            + (f"\n\nExamples:\n{examples}" if examples else ""))
+        self.log(f"✓ Imported {stats['filled']} answer(s) from backup "
+                 f"({Path(path).name}); skipped {stats['skipped_has_answer']} already filled.\n")
+
     def load_bank_list(self):
         """Only REQUIRED questions are in the bank. 'You answer' = yes/no, choices, numbers...;
-        'AI writes' = text/essay questions the AI answers per job (you may still answer them)."""
+        'AI writes' = text/essay questions the AI answers per job (you may still answer them).
+        With a selected-jobs filter, only questions those jobs ask are listed."""
         kind = self.q_kind.get()
+        filt = self.answers_filter_keys
         self.qlist.delete(*self.qlist.get_children())
         shown = open_n = 0
         for i, q in enumerate(self.bank["questions"]):
-            if not q.get("asked_in_jobs"):          # not required by any relevant job now
+            if filt is not None:
+                if q["key"] not in filt:
+                    continue
+            elif not q.get("asked_in_jobs"):          # not required by any relevant job now
                 continue
             is_text = q["type"] in bank_mod.TEXT_TYPES
             if (kind == "You answer" and is_text) or (kind.startswith("AI") and not is_text):
@@ -859,12 +1042,24 @@ class App(tk.Tk):
             ans = "" if empty else (", ".join(q["answer"]) if isinstance(q["answer"], list) else str(q["answer"]))
             if empty and is_text:
                 ans = "(AI writes per job)"
-            n = q["asked_in_jobs"]
+            if filt is not None:
+                n_sel = filt.get(q["key"], 0)
+                n_jobs = len(self.answers_filter_ids or [])
+                jobs_col = f"{n_sel}/{n_jobs} selected"
+            else:
+                n = q["asked_in_jobs"]
+                jobs_col = f"{n} job{'s' if n != 1 else ''}"
             self.qlist.insert("", "end", iid=str(i), tags=("open",) if empty else (),
-                              values=(f"{n} job{'s' if n != 1 else ''}", q["type"], q["question"], ans[:80]))
+                              values=(jobs_col, q["type"], q["question"], ans[:80]))
             shown += 1
-        self.q_count.config(text=f"{shown} questions shown  ·  {open_n} of them still unanswered  ·  "
-                                 f"optional questions are never listed or saved")
+        if filt is not None:
+            n_jobs = len(self.answers_filter_ids or [])
+            self.q_count.config(
+                text=f"{shown} questions for {n_jobs} selected job{'s' if n_jobs != 1 else ''}  ·  "
+                     f"{open_n} still unanswered  ·  click “Show all answers” to clear the filter")
+        else:
+            self.q_count.config(text=f"{shown} questions shown  ·  {open_n} of them still unanswered  ·  "
+                                     f"optional questions are never listed or saved")
 
     def edit_question(self):
         sel = self.qlist.selection()
@@ -974,7 +1169,7 @@ class App(tk.Tk):
         ttk.Checkbutton(opts, text="Bid only on the companies selected in the Jobs tab",
                         variable=self.r_only_sel).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
-        auto = ttk.LabelFrame(tab, text="  Auto-collection  ", padding=10)
+        auto = ttk.LabelFrame(tab, text="  Auto-collection (US Eastern)  ", padding=10)
         auto.pack(fill="x", pady=(12, 0))
         self.a_on = tk.BooleanVar(value=self.settings["auto_collect"])
         ttk.Checkbutton(auto, text="Automatically run", variable=self.a_on,
@@ -985,16 +1180,17 @@ class App(tk.Tk):
                         else "Collect today's jobs")
         self.a_kind.bind("<<ComboboxSelected>>", lambda e: self.save_auto())
         self.a_kind.grid(row=0, column=1, padx=6)
-        ttk.Label(auto, text="every").grid(row=0, column=2, sticky="w")
-        self.a_hours = ttk.Spinbox(auto, from_=1, to=48, width=4, command=self.save_auto)
-        self.a_hours.set(self.settings["auto_hours"])
-        self.a_hours.bind("<FocusOut>", lambda e: self.save_auto())
-        self.a_hours.grid(row=0, column=3, padx=6)
-        ttk.Label(auto, text="hours  (while this app is open)").grid(row=0, column=4, sticky="w")
+        ttk.Label(auto, text=f"at {AUTO_SLOTS_LABEL}  (while this app is open)").grid(
+            row=0, column=2, columnspan=2, sticky="w", padx=(6, 0))
         ttk.Button(auto, text="⟳ Collect all companies now", style="Accent.TButton",
-                   command=self.collect).grid(row=0, column=5, padx=(24, 0))
-        self.a_info = ttk.Label(auto, text="", style="Stat.TLabel")
-        self.a_info.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
+                   command=self.collect).grid(row=0, column=4, padx=(24, 0))
+        self.a_info = ttk.Label(auto, text="", style="Stat.TLabel", justify="left")
+        self.a_info.grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        ttk.Label(auto, text=("Roadmap each run:  1) scrape company boards from companies.csv  →  "
+                              "2) update this Jobs list  →  3) sync Supabase.  "
+                              "If Apply is running, Collect is queued and starts when Apply finishes."),
+                  style="Stat.TLabel", wraplength=900, justify="left").grid(
+            row=2, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
         acts = ttk.Frame(tab, padding=(0, 14, 0, 0))
         acts.pack(fill="x")
@@ -1041,14 +1237,92 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ actions
 
+    def show_todays_jobs(self):
+        """One click: relevant + Posted=today so today's haul is easy to see."""
+        self.f_relevant.set("relevant")
+        self.f_status.set("all")
+        self.f_answers.set("any")
+        self.f_resume.set("any")
+        self.f_posted.set("today")
+        self.load_jobs()
+        self.tabs.select(0)
+
     def collect(self, auto=False):
-        """Stage 1 + stage 2 for every company in companies.csv."""
-        return self.run_script(["collect.py"], "Collecting all companies" + (" (auto)" if auto else ""),
-                               quiet=auto)
+        """Stage 1 + stage 2 for every company in companies.csv (queued if Apply is running)."""
+        return self._start_or_queue_collect("all", auto=auto)
 
     def collect_today(self, auto=False):
-        """Jobs new on the boards since the last collection; then shows the ones posted today."""
-        return self.run_script(["collect.py", "--today"], "Collecting today's jobs" + (" (auto)" if auto else ""),
+        """Jobs new on the boards since the last collection; then shows the ones posted today.
+        Queued if Apply / another task is running — starts as soon as that finishes."""
+        return self._start_or_queue_collect("today", auto=auto)
+
+    def _start_or_queue_collect(self, kind, auto=False):
+        """Start a collection now, or queue it if the bot is busy (e.g. Apply)."""
+        busy = self.proc and self.proc.poll() is None
+        if busy:
+            # Prefer an explicit "all" over a queued "today" if both were requested
+            if self._pending_collect != "all":
+                self._pending_collect = kind
+            label = "today's jobs" if kind == "today" else "all companies"
+            if not auto or not getattr(self, "_auto_busy_logged", False):
+                self.log(f"(collection queued: {label} — starts when the current task finishes; "
+                         f"1 companies.csv → 2 Jobs list → 3 Supabase)\n")
+            if auto:
+                self._auto_busy_logged = True
+            self._show_queue_hint()
+            return True
+        return self._run_collect(kind, auto=auto)
+
+    def _run_collect(self, kind, auto=False):
+        self._pending_collect = None
+        self._auto_busy_logged = False
+        if kind == "today":
+            ok = self.run_script(["collect.py", "--today"],
+                                 "Collecting today's jobs" + (" (auto)" if auto else ""), quiet=auto)
+        else:
+            ok = self.run_script(["collect.py"],
+                                 "Collecting all companies" + (" (auto)" if auto else ""), quiet=auto)
+        if ok:
+            self._mark_auto_slot_covered()
+            self.log("Collection roadmap: 1) scrape companies.csv boards → "
+                     "2) update Jobs list → 3) sync Supabase\n")
+        return ok
+
+    def _show_queue_hint(self):
+        kind = self._pending_collect
+        if not kind:
+            return
+        label = "Collect today's jobs" if kind == "today" else "Collect all companies"
+        try:
+            self.run_label.config(text=f"{self.run_label.cget('text').split(' · queued')[0]} · queued: {label}")
+        except Exception:
+            pass
+
+    def _mark_auto_slot_covered(self):
+        """After any collection starts, mark the current Eastern slot so 'next' stays fixed."""
+        slot = latest_passed_slot()
+        self.settings["auto_last_slot"] = slot.isoformat()
+        save_settings(self.settings)
+        self._auto_info()
+
+    def fetch_missing_details(self, auto=False):
+        """Stage 2 only: download description + questions for relevant jobs still on
+        'no details yet' / status=new (e.g. reopened from not-relevant). Makes them biddable."""
+        n = self.conn.execute(
+            "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND relevant=1 AND details_at IS NULL"
+        ).fetchone()["c"]
+        if not n:
+            if not auto:
+                messagebox.showinfo("Fetch missing details",
+                                    "Every relevant job already has details. Nothing to fetch.")
+            return False
+        if not auto and not messagebox.askyesno(
+                "Fetch missing details",
+                f"{n} relevant job(s) still show “no details yet” (often reopened from "
+                f"not-relevant). Download their questions now so you can Apply?"):
+            return False
+        return self.run_script(["scrape_details.py"],
+                               f"Fetching details for {n} job(s)" + (" (auto)" if auto else ""),
                                quiet=auto)
 
     def sync_from_db(self):
@@ -1088,66 +1362,72 @@ class App(tk.Tk):
     # ---------------- auto-collection
 
     def save_auto(self):
-        try:
-            hours = max(1, min(48, int(float(self.a_hours.get()))))
-        except ValueError:
-            hours = self.settings["auto_hours"]
         turned_on = bool(self.a_on.get()) and not self.settings["auto_collect"]
         self.settings["auto_collect"] = bool(self.a_on.get())
-        self.settings["auto_hours"] = hours
         self.settings["auto_kind"] = "all" if self.a_kind.get() == "Collect all companies" else "today"
         if turned_on:
-            self.settings["auto_started"] = None     # switched on now: first run right away
+            # Just enabled: run the current Eastern slot once (do not wait for the next clock time).
+            self.settings["auto_last_slot"] = None
         save_settings(self.settings)
         self._auto_info()
 
+    def _due_slot(self):
+        """Eastern slot that should run now, or None if already covered / not yet time."""
+        last = parse_slot(self.settings.get("auto_last_slot"))
+        passed = latest_passed_slot()
+        if last is None or passed > last:
+            return passed
+        return None
+
     def _next_due(self):
-        """Every N hours counted from the START of the last automatic run (so 2 h = 2 h,
-        however long a collection takes). Never started yet -> now."""
-        last = self.settings.get("auto_started")
-        if not last:
-            return datetime.now()
-        return datetime.fromisoformat(last) + timedelta(hours=self.settings["auto_hours"])
+        """Next fixed Eastern clock time (stable — does not move when a run finishes)."""
+        last = parse_slot(self.settings.get("auto_last_slot"))
+        after = last if last and last > _now_et() else _now_et()
+        # If a slot is currently due, "next" for display is that slot; else the upcoming one.
+        due = self._due_slot()
+        return due if due else next_auto_slot(after)
 
     def _auto_info(self):
         last = self.settings.get("last_collect")
         last_txt = datetime.fromisoformat(last).strftime("%b %d %H:%M") if last else "never"
         what = "today's jobs" if self.settings.get("auto_kind") != "all" else "all companies"
         if self.settings["auto_collect"]:
-            nxt = max(self._next_due(), datetime.now())
-            txt = (f"Last collection: {last_txt}   ·   auto: {what} every {self.settings['auto_hours']} h   ·   "
-                   f"next: {nxt.strftime('%b %d %H:%M')}")
-            self.auto_hdr.config(text=f"auto-collect ({what}) on · next {nxt.strftime('%H:%M')}")
+            nxt = self._next_due()
+            nxt_et = nxt.astimezone(ET)
+            local = nxt.astimezone()  # machine local, for the header clock people glance at
+            due_now = self._due_slot() is not None
+            nxt_txt = ("due now" if due_now else
+                       f"{nxt_et.strftime('%b %d %H:%M')} ET"
+                       + ("" if local.tzinfo == ET else f" ({local.strftime('%H:%M')} local)"))
+            queued = f"   ·   queued after current task" if self._pending_collect else ""
+            txt = (f"Last collection: {last_txt}   ·   auto: {what} at fixed ET times   ·   "
+                   f"next: {nxt_txt}{queued}\nSlots: {AUTO_SLOTS_LABEL}")
+            self.auto_hdr.config(
+                text=f"auto-collect ({what}) · next {nxt_et.strftime('%H:%M')} ET"
+                     + (" · due" if due_now else "")
+                     + (" · queued" if self._pending_collect else ""))
         else:
             txt = f"Last collection: {last_txt}   ·   auto-collection is off"
             self.auto_hdr.config(text="")
         self.a_info.config(text=txt)
 
     def _auto_tick(self, reschedule=True):
-        """Start a collection when auto-collection is on and it is due.
+        """Start a collection when a fixed Eastern slot is due.
         Called every minute, and also right after another task finishes if overdue.
-        If the bot is busy (bidding, a resume, ...) it waits until free."""
+        If Apply is running, Collect is queued and starts when Apply finishes."""
         try:
-            # Reload from disk so a Save on the Run tab is always honored
             try:
                 self.settings = load_settings()
             except Exception:
                 pass
-            if self.settings.get("auto_collect") and datetime.now() >= self._next_due():
-                busy = self.proc and self.proc.poll() is None
-                today = self.settings.get("auto_kind") != "all"
-                if busy:
-                    if not getattr(self, "_auto_busy_logged", False):
-                        self.log("(auto-collection due - waiting until the current task finishes; "
-                                 "new jobs will land on the Jobs board and sync to Supabase after)\n")
-                        self._auto_busy_logged = True
-                elif self.collect_today(auto=True) if today else self.collect(auto=True):
-                    self._auto_busy_logged = False
-                    self.settings["auto_started"] = datetime.now().isoformat(timespec="seconds")
-                    save_settings(self.settings)
-                    self.log(f"(auto-collection started: {'today' if today else 'all companies'}; "
-                             f"scrapes every board, saves new jobs to the local DB + Jobs board, "
-                             f"syncs to Supabase; next in {self.settings['auto_hours']} h)\n")
+            due = self._due_slot() if self.settings.get("auto_collect") else None
+            if due is not None:
+                kind = "all" if self.settings.get("auto_kind") == "all" else "today"
+                if self._start_or_queue_collect(kind, auto=True):
+                    if not (self.proc and self.proc.poll() is None and self._pending_collect):
+                        self.log(f"(auto-collection @ {due.strftime('%H:%M')} ET: {kind}; "
+                                 f"1 companies.csv → 2 Jobs list → 3 Supabase; "
+                                 f"next slot {next_auto_slot(due).strftime('%H:%M')} ET)\n")
             self._auto_info()
         finally:
             if reschedule:
@@ -1180,17 +1460,45 @@ class App(tk.Tk):
         self._flush_ai_settings()
         self.run_script(["make_resume.py", "--all"], "Making missing resumes")
 
+    def _selected_missing_details(self, ids):
+        """Job ids among `ids` that are still “no details yet” (cannot Apply)."""
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT id, title, company FROM jobs WHERE id IN ({placeholders}) "
+            f"AND (details_at IS NULL OR details_at='')", ids).fetchall()
+        return list(rows)
+
     def dry_run_selected(self):
         ids = self.selected_ids()
-        if ids:
-            self._flush_ai_settings()
-            self.run_script(["bid.py", "--dry-run", "--batch", self.r_batch.get(),
-                             "--jobs-file", self._write_selection(ids)],
-                            f"Dry run: {self._selection_label(ids)}")
+        if not ids:
+            return
+        missing = self._selected_missing_details(ids)
+        if missing:
+            if messagebox.askyesno(
+                    "No details yet",
+                    f"{len(missing)} of {len(ids)} selected job(s) still have no questions "
+                    f"(Answers: “no details yet”). Fetch details first?"):
+                self.fetch_missing_details()
+            return
+        self._flush_ai_settings()
+        self.run_script(["bid.py", "--dry-run", "--batch", self.r_batch.get(),
+                         "--jobs-file", self._write_selection(ids)],
+                        f"Dry run: {self._selection_label(ids)}")
 
     def apply_selected(self):
         ids = self.selected_ids()
         if not ids:
+            return
+        missing = self._selected_missing_details(ids)
+        if missing:
+            if messagebox.askyesno(
+                    "No details yet",
+                    f"{len(missing)} of {len(ids)} selected job(s) still have no questions "
+                    f"(often reopened from not-relevant). You cannot Apply until details are "
+                    f"fetched.\n\nFetch missing details now?"):
+                self.fetch_missing_details()
             return
         titles = [f"• {self.jobs.set(i, 'title')}  ({self.jobs.set(i, 'company')})" for i in ids[:12]]
         more = f"\n... and {len(ids) - 12} more" if len(ids) > 12 else ""
@@ -1223,6 +1531,7 @@ class App(tk.Tk):
         """Stop now: end the task AND everything it started (browser, AI call, uploads)."""
         if not (self.proc and self.proc.poll() is None):
             return
+        PAUSE_FLAG.unlink(missing_ok=True)   # unblock any wait_while_paused before kill
         pid = self.proc.pid
         try:
             if sys.platform == "win32":
@@ -1233,6 +1542,7 @@ class App(tk.Tk):
                 self.proc.kill()
         except Exception:
             self.proc.kill()
+        self._set_pause_button(paused=False)
         self.log("\n■ Stopped now (the task, its browser and its AI call were ended). "
                  "A job in progress keeps its old status.\n")
 
@@ -1240,19 +1550,51 @@ class App(tk.Tk):
         """Stop after this job: the script finishes the current job cleanly, then stops."""
         if not (self.proc and self.proc.poll() is None):
             return
+        # If paused, leave pause on - stop.flag is checked after wait_while_paused returns
         STOP_FLAG.parent.mkdir(parents=True, exist_ok=True)
         STOP_FLAG.write_text("stop", encoding="utf-8")
-        self.b_stop_after.config(text="⏸  stopping after this job …", state="disabled")
-        self.log("\n⏸ Will stop after the current job (press 'Stop now' to end at once).\n")
+        self.b_stop_after.config(text="stopping after this job …", state="disabled")
+        self.log("\nWill stop after the current job (press 'Stop now' to end at once).\n")
+
+    def toggle_pause(self):
+        """Pause: finish the current job/step, then wait. Continue: resume the queue."""
+        if not (self.proc and self.proc.poll() is None):
+            return
+        if PAUSE_FLAG.exists():
+            PAUSE_FLAG.unlink(missing_ok=True)
+            self._set_pause_button(paused=False)
+            self.run_label.config(text=f"●  Running: {self.proc_label}")
+            self.run_bar.config(bg="#fff4e5")
+            self.run_label.config(bg="#fff4e5", fg="#7a4a00")
+            self.log("\n▶ Continued.\n")
+        else:
+            PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+            PAUSE_FLAG.write_text("pause", encoding="utf-8")
+            self._set_pause_button(paused=True)
+            self.run_label.config(text=f"⏸  Paused: {self.proc_label}  (finishes current step, then waits)")
+            self.log("\n⏸ Paused - finishes the current step, then waits. "
+                     "Press ▶ Continue to resume, or Stop to end.\n")
+
+    def _set_pause_button(self, paused):
+        if paused:
+            self.b_pause.config(text="▶  Continue", bg="#1a7f37", fg="white",
+                                activebackground="#14622a", activeforeground="white")
+        else:
+            self.b_pause.config(text="⏸  Pause", bg="#ffffff", fg="#7a4a00",
+                                activebackground="#f5f5f5", activeforeground="#7a4a00")
 
     def _show_run_bar(self, label):
         self.run_stats = {"ok": 0, "fail": 0, "need": 0}
         self.run_label.config(text=f"●  Running: {label}")
         self._update_run_stats()
-        self.b_stop_after.config(text="⏸  Stop after this job", state="normal")
+        self.b_stop_after.config(text="Stop after this job", state="normal")
+        self._set_pause_button(paused=False)
+        self.b_pause.config(state="normal")
         self.run_bar.pack(fill="x", padx=10, pady=(0, 6), after=self._header_frame)
 
     def _hide_run_bar(self):
+        PAUSE_FLAG.unlink(missing_ok=True)
+        self._set_pause_button(paused=False)
         self.run_bar.pack_forget()
 
     def _update_run_stats(self):
@@ -1611,6 +1953,7 @@ class App(tk.Tk):
             return False
         self.proc_label = label
         STOP_FLAG.unlink(missing_ok=True)     # an old "stop after this job" must not stop the new task
+        PAUSE_FLAG.unlink(missing_ok=True)    # an old Pause must not block the new task
         self.log(f"\n━━ {label} ━━\n")
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
         self.proc = subprocess.Popen(
@@ -1659,6 +2002,11 @@ class App(tk.Tk):
                         self.f_status.set("all")
                         self.f_answers.set("any")
                         self.f_posted.set("today")
+                    if finished_label.startswith("Fetching details"):
+                        # Reopened / previously skipped jobs now have questions → show ready ones
+                        self.f_relevant.set("relevant")
+                        self.f_status.set("ready")
+                        self.f_answers.set("any")
                     try:
                         self.bank = bank_mod.load_bank()
                         bank_mod.sync_bank(self.conn, self.bank)
@@ -1671,9 +2019,23 @@ class App(tk.Tk):
                         # Safety net: even if collect.py was killed mid-run ("Stop now"),
                         # push whatever is already in the local DB to Supabase, then refresh again.
                         self._sync_after_collect()
-                    # Apply/resume/etc. just freed the bot: if auto-collect is overdue, run it now
-                    # (do not wait up to 60 s for the next minute tick).
-                    elif self.settings.get("auto_collect") and datetime.now() >= self._next_due():
+                    elif finished_label.startswith("Fetching details"):
+                        missing = self.conn.execute(
+                            "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND relevant=1 "
+                            "AND details_at IS NULL").fetchone()["c"]
+                        ready = self.conn.execute(
+                            "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND relevant=1 "
+                            "AND status='ready'").fetchone()["c"]
+                        self.log(f"Details fetch done → {ready} ready to apply"
+                                 + (f", {missing} still missing (retry Fetch missing details)\n"
+                                    if missing else ".\n"))
+                        self._sync_after_collect()
+                    # Apply/resume/etc. just freed the bot: run a queued Collect first, else
+                    # start auto-collect if an Eastern slot is due (don't wait for the minute tick).
+                    pending = self._pending_collect
+                    if pending:
+                        self.after(500, lambda k=pending: self._run_collect(k, auto=False))
+                    elif self.settings.get("auto_collect") and self._due_slot() is not None:
                         self.after(500, lambda: self._auto_tick(reschedule=False))
                 else:
                     self.log(line)
@@ -1682,8 +2044,7 @@ class App(tk.Tk):
         self.after(150, self._drain_output)
 
     def _log_collect_result(self):
-        """After a scrape: say where the jobs live and how many are new today (so the Jobs
-        tab filter switch to Posted=today is not a mystery)."""
+        """After a scrape: confirm the 3-step roadmap and how many today's jobs are on the board."""
         try:
             today = date.today().isoformat()
             row = self.conn.execute(
@@ -1692,10 +2053,11 @@ class App(tk.Tk):
                 (today,)).fetchone()
             shown = len(self.jobs.get_children())
             self.log(
-                f"1) Scraped → local DB:  {db.DB_PATH}\n"
-                f"2) Jobs board: {shown} shown (Posted=today) · "
+                f"✓ Collection roadmap done:\n"
+                f"  1) Scraped company boards (companies.csv) → local DB {db.DB_PATH}\n"
+                f"  2) Jobs list updated: {shown} shown (Posted=today) · "
                 f"{row['n']} first seen today ({row['rel'] or 0} relevant)\n"
-                f"3) Syncing to Supabase …\n")
+                f"  3) Syncing to Supabase …\n")
         except Exception as e:
             self.log(f"! Could not summarise the collection: {str(e)[:120]}\n")
 
@@ -1717,6 +2079,29 @@ class App(tk.Tk):
                     f"! Supabase sync failed ({msg}) - click 'Sync to DB' to retry.\n"))
         threading.Thread(target=work, daemon=True).start()
 
+    def _reopen_false_negatives(self):
+        """Move Data Analyst / IT Specialist / Solutions Engineer etc. out of 'not relevant'
+        when the current rules say YES (fixes older AI/rule rejections).
+
+        Those jobs never had stage-2 details - queue a details fetch so they leave
+        “no details yet” / status=new and become Apply-ready."""
+        try:
+            from relevance import RelevanceFilter
+            n = RelevanceFilter(ai=None, log=lambda *a: None).reopen_false_negatives(self.conn)
+            if n:
+                self.log(f"Relevance: reopened {n} job(s) now marked relevant "
+                         f"(Data/IT/Solutions/Analyst titles).\n")
+                self.refresh_all()
+            missing = self.conn.execute(
+                "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND relevant=1 AND details_at IS NULL"
+            ).fetchone()["c"]
+            if missing:
+                self.log(f"{missing} relevant job(s) still have no details (cannot Apply yet) - "
+                         f"fetching questions now …\n")
+                self.fetch_missing_details(auto=True)
+        except Exception as e:
+            self.log(f"! Could not reopen relevance false-negatives: {str(e)[:150]}\n")
+
     def _sort_unsorted(self):
         """A collection that was stopped ("Stop now" ends it at once) leaves scraped jobs that
         are not sorted yet, and the Jobs tab only lists relevant ones. Sort them by rules
@@ -1727,16 +2112,17 @@ class App(tk.Tk):
             todo = db.jobs_needing_relevance(self.conn)
             todo = [r for r in todo if self.conn.execute(
                 "SELECT relevant FROM jobs WHERE id=?", (r["id"],)).fetchone()["relevant"] is None]
-            if not todo:
-                return
-            decisions = RelevanceFilter(ai=None, log=lambda *a: None).classify(
-                [(r["id"], r["title"], r["dept"]) for r in todo])
-            for jid, (relevant, method) in decisions.items():
-                db.set_relevance(self.conn, jid, relevant, method)
-            self.conn.commit()
-            yes = sum(1 for r, _ in decisions.values() if r)
-            self.log(f"Sorted {len(decisions)} scraped jobs by rules: {yes} relevant "
-                     f"(unclear titles are kept; the AI sorts them at the next collection).\n")
+            rf = RelevanceFilter(ai=None, log=lambda *a: None)
+            if todo:
+                decisions = rf.classify(
+                    [(r["id"], r["title"], r["dept"]) for r in todo])
+                for jid, (relevant, method) in decisions.items():
+                    db.set_relevance(self.conn, jid, relevant, method)
+                self.conn.commit()
+                yes = sum(1 for r, _ in decisions.values() if r)
+                self.log(f"Sorted {len(decisions)} scraped jobs by rules: {yes} relevant "
+                         f"(unclear titles are kept; the AI sorts them at the next collection).\n")
+            rf.reopen_false_negatives(self.conn)
         except Exception as e:
             self.log(f"! Could not sort the scraped jobs: {str(e)[:150]}\n")
 

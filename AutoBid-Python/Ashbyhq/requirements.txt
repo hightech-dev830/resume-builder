@@ -1,3 +1,4 @@
 # collect.py / answers.py / show.py need nothing extra.
 # bid.py drives your installed Google Chrome:
 playwright>=1.45
+tzdata>=2024.1          # America/New_York for auto-collect schedule (Windows)
