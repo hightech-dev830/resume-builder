@@ -1,0 +1,11 @@
+{
+  "resume": {
+    "provider": "deepseek",
+    "model": ""
+  },
+  "relevance": {
+    "provider": "deepseek",
+    "model": ""
+  },
+  "prompt_source": "resume_builder"
+}

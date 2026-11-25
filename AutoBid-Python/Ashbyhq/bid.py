@@ -47,6 +47,28 @@ if hasattr(sys.stdout, "reconfigure"):
 FORM_READY = "#_systemfield_name, .ashby-application-form-field-entry"
 SUBMIT_BTN = "button[class*='submitButton'], button.ashby-application-form-submit-button"
 
+# Ashby's Application tab when they will not take applications for this posting
+_UNAVAILABLE_RE = re.compile(
+    r"application submission is unavailable|submission is unavailable at this time|"
+    r"no longer accepting applications|this job is no longer|applications (are|have been) closed",
+    re.I)
+
+
+def page_says_submission_unavailable(page) -> bool:
+    """True when Ashby shows the red 'Application submission is unavailable…' box (no form)."""
+    try:
+        text = page.locator("body").inner_text(timeout=3000) or ""
+    except Exception:
+        return False
+    if _UNAVAILABLE_RE.search(text):
+        return True
+    try:
+        if page.locator("text=/Application submission is unavailable/i").count():
+            return True
+    except Exception:
+        pass
+    return False
+
 _OUTCOME_JS = r"""() => {
   const text = document.body.innerText || '';
   const form = document.querySelector('#_systemfield_name, .ashby-application-form-field-entry');
@@ -606,7 +628,37 @@ def prepare(ctx, conn, ai, job, items, dry_run):
         return None, "skipped"
     page = ctx.new_page()
     page.goto(job["apply_url"], wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_selector(FORM_READY, timeout=45000)
+    page.wait_for_timeout(600)
+    # Ashby shows a red Error box and no form when the company paused / closed applications
+    unavailable = page_says_submission_unavailable(page)
+    if unavailable:
+        note = "Ashby: application submission unavailable (job closed applications or temporarily disabled)"
+        print(f"    SKIPPED — {note}")
+        db.set_status(conn, job["id"], "skipped", note)
+        try:
+            page.close()
+        except Exception:
+            pass
+        return None, "skipped"
+    try:
+        page.wait_for_selector(FORM_READY, timeout=45000)
+    except PWTimeout:
+        # Form never appeared — often the same “unavailable” banner (slow SPA) or a dead posting
+        unavailable = page_says_submission_unavailable(page)
+        if unavailable:
+            note = "Ashby: application submission unavailable (closed / paused — not a bot bug)"
+            print(f"    SKIPPED — {note}")
+            db.set_status(conn, job["id"], "skipped", note)
+            try:
+                page.close()
+            except Exception:
+                pass
+            return None, "skipped"
+        note = "form did not load (no application fields)"
+        print(f"    failed: {note}")
+        db.set_status(conn, job["id"], "failed", note)
+        banner(page, "NOT applied - form did not load", note)
+        return page, "failed"
     page.wait_for_timeout(800)
 
     problems = fill_form(page, items)
@@ -852,16 +904,29 @@ def main():
                             # over it: the tab stays open for you
                             if not ctx.pages:
                                 raise            # the browser window was closed by hand
+                            # Prefer “skipped” when Ashby itself disabled the form
+                            new_pages = [p for p in ctx.pages if p not in tabs_before]
+                            unavailable = any(page_says_submission_unavailable(p) for p in new_pages)
+                            if unavailable:
+                                msg = ("Ashby: application submission unavailable "
+                                       "(closed / paused — not a bot bug)")
+                                db.set_status(conn, job["id"], "skipped", msg)
+                                print(f"    SKIPPED — {msg}")
+                                for p in new_pages:
+                                    try:
+                                        p.close()
+                                    except Exception:
+                                        pass
+                                continue
                             msg = ("form did not load" if isinstance(e, PWTimeout)
                                    else f"bot error: {str(e).splitlines()[0][:200]}")
                             db.set_status(conn, job["id"], "failed", msg)
                             print(f"    failed: {msg}")
                             if not isinstance(e, PWTimeout):
                                 traceback.print_exc()
-                            for p in ctx.pages:
-                                if p not in tabs_before:
-                                    banner(p, "NOT applied - the bot hit an error", msg)
-                                    keep_open.append(p)
+                            for p in new_pages:
+                                banner(p, "NOT applied - the bot hit an error", msg)
+                                keep_open.append(p)
                             continue
                         if state == "needs_you":
                             pending[job["id"]] = (job, page)

@@ -1,14 +1,31 @@
-"""The one Chrome window all AutoBid bots use (Playwright + your installed Google Chrome).
+"""Chrome profiles for AutoBid bots (Playwright + installed Google Chrome).
 
-It keeps its own profile in AutoBid-Python/.browser-profile, shared by every bot and by
-the web AIs, so you log in to ChatGPT / Claude / DeepSeek only once and the job sites
-see a returning browser (fewer bot checks).
+Each platform bot uses its OWN profile so Ashby and Greenhouse can bid at the same time:
+
+  AutoBid-Python/.browser-profile-ashby
+  AutoBid-Python/.browser-profile-greenhouse
+  AutoBid-Python/.browser-profile-wellfound
+
+Set AUTOBID_BOT in that bot's config.py (ashby / greenhouse / wellfound) before
+importing this module (or call open_browser(..., bot=\"ashby\")).
+
+If a per-bot profile is empty, it is seeded once from the legacy shared
+`.browser-profile` (so existing logins carry over).
 """
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
-PROFILE_DIR = Path(__file__).resolve().parent.parent / ".browser-profile"
+_ROOT = Path(__file__).resolve().parent.parent
+_SHARED = _ROOT / ".browser-profile"
+
+_BOT_DIRS = {
+    "ashby": ".browser-profile-ashby",
+    "ashbyhq": ".browser-profile-ashby",
+    "greenhouse": ".browser-profile-greenhouse",
+    "wellfound": ".browser-profile-wellfound",
+}
 
 # Sites to open when preparing logins before the bot runs
 PREP_URLS = (
@@ -16,6 +33,36 @@ PREP_URLS = (
     "https://claude.ai/new",
     "https://chat.deepseek.com/",
 )
+
+
+def get_profile_dir(bot=None):
+    """Profile folder for this bot (or AUTOBID_BOT / shared legacy)."""
+    name = (bot or os.environ.get("AUTOBID_BOT") or "").strip().lower()
+    folder = _BOT_DIRS.get(name)
+    path = _ROOT / folder if folder else _SHARED
+    path.mkdir(parents=True, exist_ok=True)
+    _seed_from_shared(path)
+    return path
+
+
+def _seed_from_shared(dest: Path):
+    """One-time copy of legacy shared profile into an empty per-bot profile."""
+    if dest.resolve() == _SHARED.resolve():
+        return
+    try:
+        if any(dest.iterdir()):
+            return
+    except Exception:
+        return
+    if not _SHARED.is_dir():
+        return
+    try:
+        ignore = shutil.ignore_patterns(
+            "Singleton*", "lockfile*", "RunningChrome*", "*.lock", "Crashpad")
+        shutil.copytree(_SHARED, dest, dirs_exist_ok=True, ignore=ignore)
+        print(f"  Seeded Chrome profile {dest.name} from .browser-profile (logins copied)")
+    except Exception as e:
+        print(f"  ! could not seed {dest.name} from shared profile: {e}")
 
 
 def find_chrome():
@@ -32,42 +79,110 @@ def find_chrome():
         "Google Chrome not found. Install Chrome (the bot drives your installed Chrome).")
 
 
-def open_bot_chrome(urls=None):
-    """Open the bot's own Chrome window (normal Chrome, bot profile) for manual prep.
+def profile_busy(bot=None) -> bool:
+    """True if Chrome is already using this bot's profile (Open bot browser / another run)."""
+    profile = get_profile_dir(bot)
+    # SingletonLock exists while Chrome holds the profile (symlink/file on Windows)
+    for name in ("SingletonLock", "lockfile", "SingletonCookie", "SingletonSocket"):
+        if (profile / name).exists():
+            return True
+    # Also scan running chrome.exe command lines for this user-data-dir
+    try:
+        needle = str(profile).replace("'", "''")
+        ps = (
+            f"$n='{needle}'; "
+            "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($n) } | "
+            "Select-Object -First 1"
+        )
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=8,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if (r.stdout or "").strip():
+            return True
+    except Exception:
+        pass
+    return False
 
-    Uses AutoBid-Python/.browser-profile — the same profile bid.py / make_resume.py use.
-    This is real Chrome (not Playwright automation). Close it before Apply / Make resume.
-    Returns the Popen handle.
+
+def close_bot_chrome(bot=None) -> int:
+    """Force-close Chrome processes that use this bot's profile. Returns how many were killed."""
+    profile = get_profile_dir(bot)
+    needle = str(profile).replace("'", "''")
+    killed = 0
+    try:
+        ps = (
+            f"$n='{needle}'; $ids=@(); "
+            "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($n) } | "
+            "ForEach-Object { $ids += $_.ProcessId; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; "
+            "$ids.Count"
+        )
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            killed = int((r.stdout or "0").strip().splitlines()[-1] or 0)
+        except Exception:
+            killed = 0
+    except Exception:
+        pass
+    # Drop stale lock files if Chrome died uncleanly
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
+        try:
+            p = profile / name
+            if p.exists() or p.is_symlink():
+                p.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return killed
+
+
+def open_bot_chrome(urls=None, bot=None):
+    """Open this bot's Chrome window (normal Chrome, per-bot profile) for manual prep.
+
+    Close it before Apply / Make resume for that same bot (only one process per profile).
+    Other bots can keep their own Chrome open. Returns the Popen handle.
     """
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    profile = get_profile_dir(bot)
     chrome = find_chrome()
     tabs = list(urls) if urls is not None else list(PREP_URLS)
     args = [
         chrome,
-        f"--user-data-dir={PROFILE_DIR}",
+        f"--user-data-dir={profile}",
         "--profile-directory=Default",
         "--start-maximized",
         "--no-first-run",
         "--no-default-browser-check",
         *tabs,
     ]
-    # Do not wait — Chrome stays open so you can prepare; close it before the bot runs.
-    return subprocess.Popen(args, cwd=str(PROFILE_DIR.parent))
+    return subprocess.Popen(args, cwd=str(_ROOT))
 
 
-def open_browser(playwright, headless=False):
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+def open_browser(playwright, headless=False, bot=None):
+    """Playwright persistent context for this bot's Chrome profile."""
+    profile = get_profile_dir(bot)
     try:
         return playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR), channel="chrome", headless=headless,
+            str(profile), channel="chrome", headless=headless,
             no_viewport=True,
-            # Playwright's defaults mark the browser as automated (navigator.webdriver = true,
-            # the "controlled by automated software" flag). reCAPTCHA Enterprise scores that
-            # as a bot -> "There was a problem verifying this submission with CAPTCHA".
             ignore_default_args=["--enable-automation"],
             args=["--start-maximized", "--disable-blink-features=AutomationControlled"])
     except Exception as e:
         if "ProcessSingleton" in str(e) or "in use" in str(e).lower():
-            raise SystemExit("The bot's Chrome window is already open (another bot running?). "
-                             "Close it and run again.")
+            raise SystemExit(
+                f"This bot's Chrome profile is already open ({profile.name}).\n"
+                f"Close that Chrome window (Open bot browser) and run again.\n"
+                f"(Ashby / Greenhouse / Wellfound each have their own profile — "
+                f"other bots can keep running.)"
+            ) from e
         raise
+
+
+def __getattr__(name):
+    # `from browser import PROFILE_DIR` always resolves to the current bot's folder
+    if name == "PROFILE_DIR":
+        return get_profile_dir()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

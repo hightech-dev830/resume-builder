@@ -97,16 +97,29 @@ def main():
                     pdf = make_resume(ai, db.job_for_ai(job), source="ashby")
                 except Exception as e:
                     print(f"  ! {e}")
+                    try:
+                        ai.finish_web_chat()
+                    except Exception:
+                        pass
                     continue
                 model = (getattr(ai, "last_model", None) or ai.model or "")
                 db.set_resume(conn, job["id"], pdf, ai_provider=ai.provider, ai_model=model)
                 made += 1
                 print(f"  done in {time.time() - started:.0f}s -> {pdf}")
+                # ask_json already deletes the web thread; call again as a safety net
+                try:
+                    ai.finish_web_chat()
+                except Exception:
+                    pass
             if made:
                 notify("AutoBid: resumes ready", f"{made} of {len(jobs)} resume(s) written with {ai.label}.")
             else:
                 notify("AutoBid: no resume written", "See the console for the reason.")
         finally:
+            try:
+                ai.finish_web_chat()
+            except Exception:
+                pass
             if ctx:
                 ctx.close()
 

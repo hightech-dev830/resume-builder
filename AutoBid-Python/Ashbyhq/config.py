@@ -1,4 +1,5 @@
 """Settings for the Ashbyhq auto-bid bot."""
+import os
 import sys
 import time
 from pathlib import Path
@@ -9,6 +10,9 @@ DB_PATH = DATA_DIR / "ashbyhq.db"
 
 # Shared code for all AutoBid bots (browser AI, resume, notifications, bot checks).
 sys.path.insert(0, str(BASE_DIR.parent / "common"))
+
+# Own Chrome profile (.browser-profile-ashby) so Greenhouse/Wellfound can bid in parallel.
+os.environ["AUTOBID_BOT"] = "ashby"
 
 # ---------------------------------------------------------------- collecting
 
@@ -23,15 +27,25 @@ ONLY_ORGS = None
 # How many company boards to download in parallel. Ashby answers "429 Too Many
 # Requests" when this is too high (the bot then waits and retries).
 
-BOARD_WORKERS = 6
+# Keep this modest — Ashby 429s wipe out boards mid-run when workers are too high.
+BOARD_WORKERS = 4
+
+# Skip a board when its newest known job (published_at, else first_seen_at) is older
+# than this many days (~6 months). Saves requests on dead boards. Untouched boards
+# (never scraped) are always fetched. Stale boards are re-checked every
+# STALE_BOARD_RECHECK_DAYS in case they start posting again.
+STALE_BOARD_DAYS = 180
+STALE_BOARD_RECHECK_DAYS = 14
 
 # Only keep jobs whose workplace type is in this set ("Remote", "Hybrid", "OnSite").
-WORKPLACE_TYPES = {"Remote"}
+# Hybrid is included: many Ashby boards (Notion, etc.) list almost everything as Hybrid
+# even when the role is US-based / remote-friendly.
+WORKPLACE_TYPES = {"Remote", "Hybrid"}
 
-# Only keep jobs where one of the locations matches (regex). Default: US only.
-# "Remote - US; Remote - Canada" is kept (US is one of them); "Remote - European Union" is not.
-# Set to None for every country.
-LOCATION_FILTER = r"\b(US|USA|U\.S\.|United States)\b"
+# Location matching is implemented in scrape_jobs.location_ok (US states/cities,
+# "North America", bare "Remote", …). LOCATION_FILTER=None keeps every country;
+# a custom regex string still works as an override.
+LOCATION_FILTER = "US"  # built-in US matcher (not a bare regex — see location_ok)
 
 # How many job-detail requests (stage 2) run in parallel. Higher => Ashby answers 429.
 WORKERS = 4

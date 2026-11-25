@@ -1,7 +1,8 @@
 """Stage 1 - JOB SCRAPING: list the jobs of every company and keep the relevant ones.
 
 For each company board (companies.csv) it downloads only the job LIST (title, department,
-locations, pay summary - no descriptions), keeps Remote + US jobs, then marks each job
+locations, pay summary - no descriptions), keeps Remote/Hybrid + US jobs (city/state
+names count — not only the literal words "United States"), then marks each job
 relevant / not relevant: software/hardware development or engineering management
 (common/relevance.py: rules first, the AI only for unclear titles).
 
@@ -24,7 +25,7 @@ import ai_settings
 import skip_orgs
 from config import stop_requested, wait_while_paused
 from config import (BOARD_WORKERS, COMPANIES_FILE, LOCATION_FILTER, ONLY_ORGS,
-                    WORKPLACE_TYPES)
+                    STALE_BOARD_DAYS, STALE_BOARD_RECHECK_DAYS, WORKPLACE_TYPES)
 from relevance import RelevanceFilter
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -44,10 +45,86 @@ def load_companies():
     return companies
 
 
+# US state abbreviations — only match after a comma ("Chicago, IL") so "in" / "or" / "me"
+# inside normal English do not false-positive.
+_US_STATE_ABBR = (
+    r"AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|"
+    r"NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC"
+)
+_US_STATE_NAME = (
+    r"Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|"
+    r"Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|"
+    r"Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|"
+    r"Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|"
+    r"Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|"
+    r"Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|"
+    r"District of Columbia"
+)
+_US_CITY = (
+    r"New York|NYC|Los Angeles|San Francisco|SF Bay|Bay Area|Seattle|Austin|Denver|"
+    r"Boston|Chicago|Miami|Dallas|Atlanta|Portland|Phoenix|San Diego|San Jose|"
+    r"Washington,? D\.?C\.?|Salt Lake|Raleigh|Durham|Nashville|Minneapolis|Detroit|"
+    r"Philadelphia|Pittsburgh|Charlotte|Tampa|Orlando|Las Vegas|Remote[- ]?US|"
+    r"United States|USA\b|U\.S\.A?\.?"
+)
+
+# Positive: looks like a US / North-America posting
+_US_LOC = re.compile(
+    rf"(?i)\b(US|USA|U\.S\.A?\.?|United States(?: of America)?)\b|"
+    rf"\bNorth America\b|\bAmericas\b|"
+    rf",\s*(?:{_US_STATE_ABBR})\b|"
+    rf"\b(?:{_US_STATE_NAME})\b|"
+    rf"\b(?:{_US_CITY})\b"
+)
+
+# Negative: clearly abroad (used when nothing US-looking matched)
+_NON_US_LOC = re.compile(
+    r"(?i)\b(UK|U\.K\.|United Kingdom|England|Scotland|Wales|London|Europe|"
+    r"European Union|\bEU\b|EMEA|APAC|Asia[- ]?Pacific|Australia|Sydney|Melbourne|"
+    r"Canada|Toronto|Vancouver|Montreal|Germany|Berlin|Munich|Ireland|Dublin|"
+    r"France|Paris|Netherlands|Amsterdam|Spain|Madrid|Barcelona|Italy|Milan|"
+    r"Sweden|Stockholm|India|Bangalore|Bengaluru|Hyderabad|Singapore|Japan|Tokyo|"
+    r"Korea|Seoul|Brazil|Mexico|Israel|Tel Aviv|Switzerland|Zurich|Poland|Warsaw|"
+    r"Portugal|Lisbon|Belgium|Denmark|Norway|Finland|New Zealand|Philippines|"
+    r"Indonesia|Malaysia|Thailand|Vietnam|Taiwan|Hong Kong|China|Shanghai|Beijing|"
+    r"UAE|Dubai|Saudi|Africa|LATAM|Latin America|South America)\b"
+)
+
+_BARE_REMOTE = re.compile(r"(?i)^Remote( only|[- ]worldwide|[- ]global)?$")
+
+
+def location_ok(locations):
+    """True if this posting should count as US-eligible.
+
+    Ashby often writes "Chicago, IL (Remote)" or "Atlanta, Georgia" instead of
+    "United States" — the old US|USA regex dropped most of those.
+    Bare "Remote" / empty location on a Remote/Hybrid role is kept (country omitted).
+    """
+    if not LOCATION_FILTER:
+        return True
+    # Custom regex override (legacy): any non-"US" string is treated as a regex
+    if LOCATION_FILTER != "US":
+        return any(re.search(LOCATION_FILTER, l) for l in locations if l)
+
+    locs = [l.strip() for l in (locations or []) if l and str(l).strip()]
+    if not locs:
+        return True
+    if any(_US_LOC.search(l) for l in locs):
+        return True
+    # Every line is just "Remote" / "Remote only" → country not specified → keep
+    if all(_BARE_REMOTE.match(l) for l in locs):
+        return True
+    # Clearly abroad and nothing US-looking → drop
+    if any(_NON_US_LOC.search(l) for l in locs):
+        return False
+    # Ambiguous (e.g. "Worldwide", "Multiple locations") → keep; relevance filters later
+    return True
+
+
 def wanted(job):
     if job["workplace_type"] not in WORKPLACE_TYPES:
         return False
-    return not LOCATION_FILTER or any(re.search(LOCATION_FILTER, l) for l in job["locations"] if l)
+    return location_ok(job.get("locations") or [])
 
 
 def fetch_board(slug):
@@ -62,10 +139,32 @@ def fetch_board(slug):
             time.sleep(2)
 
 
+def filter_stale_boards(conn, companies):
+    """Drop boards whose newest known job is older than STALE_BOARD_DAYS (~4 months).
+
+    Ashby's stage-1 GraphQL list has no publish date, so this uses the local DB
+    (published_at from stage 2, else first_seen_at). Never-scraped boards stay.
+    """
+    keep, stale = {}, []
+    for slug, name in companies.items():
+        if db.is_stale_board(conn, slug, STALE_BOARD_DAYS, STALE_BOARD_RECHECK_DAYS):
+            newest, _ = db.board_newest_posting(conn, slug)
+            stale.append((slug, name, newest))
+        else:
+            keep[slug] = name
+    if stale:
+        print(f"Skipping {len(stale)} companies whose last posting is older than "
+              f"{STALE_BOARD_DAYS} days"
+              f" (re-check every {STALE_BOARD_RECHECK_DAYS}d): "
+              + ", ".join(f"{n} ({s})" for s, n, _ in stale[:8])
+              + (" ..." if len(stale) > 8 else ""))
+    return keep
+
+
 def scrape_boards(conn, companies):
     print(f"Stage 1: listing jobs at {len(companies)} companies ({BOARD_WORKERS} at a time) ...")
     started, seen_at = time.time(), db.now()
-    kept = listed = new = failed = 0
+    kept = listed = new = failed = rate_limited = 0
     pool = ThreadPoolExecutor(max_workers=BOARD_WORKERS)
     stopped = False
     try:
@@ -76,8 +175,15 @@ def scrape_boards(conn, companies):
                 jobs, total = fut.result()
             except Exception as e:
                 failed += 1
-                skip_orgs.mark_failed(slug, companies[slug], e)   # skipped from now on
-                print(f"  ! {companies[slug]} ({slug}): {str(e)[:80]}  -> skipped from now on")
+                if skip_orgs.is_rate_limit_error(e):
+                    # Do NOT permanent-skip on 429 — that filled skipped_orgs and hid
+                    # hundreds of boards. Retry on the next collect instead.
+                    rate_limited += 1
+                    print(f"  ! {companies[slug]} ({slug}): {str(e)[:80]}  "
+                          f"-> this run only (will retry next collect)")
+                else:
+                    skip_orgs.mark_failed(slug, companies[slug], e)
+                    print(f"  ! {companies[slug]} ({slug}): {str(e)[:80]}  -> skipped from now on")
             else:
                 if skip_orgs.is_skipped(slug):      # it works again (explicitly asked for)
                     skip_orgs.clear(slug)
@@ -88,7 +194,7 @@ def scrape_boards(conn, companies):
                 # (and the write lock is short, so the app stays usable)
                 conn.commit()
             if i % 10 == 0 or i == len(companies):
-                print(f"  {i}/{len(companies)} companies | {kept} remote US jobs so far | "
+                print(f"  {i}/{len(companies)} companies | {kept} Remote/Hybrid US jobs so far | "
                       f"{time.time() - started:.0f}s")
             if wait_while_paused():
                 stopped = True
@@ -102,8 +208,9 @@ def scrape_boards(conn, companies):
         # on stop do not wait for the requests still running (a 429 backoff can take minutes)
         pool.shutdown(wait=not stopped, cancel_futures=True)
     conn.commit()
-    print(f"Listed {listed} jobs; {kept} are remote US ({new} new); {failed} boards failed; "
-          f"{time.time() - started:.0f}s")
+    extra = f"; {rate_limited} hit 429 this run" if rate_limited else ""
+    print(f"Listed {listed} jobs; {kept} are Remote/Hybrid US ({new} new); {failed} boards failed"
+          f"{extra}; {time.time() - started:.0f}s")
 
 
 def classify(conn, use_ai):
@@ -149,6 +256,10 @@ def main(argv=None):
     only = args.org or ONLY_ORGS
     if only:
         companies = {s: companies.get(s) or ashby_api.fetch_company_name(s) for s in only}
+    # Old runs permanent-skipped every 429; clear those so collect can try again.
+    cleared_429 = skip_orgs.clear_rate_limits()
+    if cleared_429:
+        print(f"Cleared {cleared_429} old HTTP 429 skip(s) — those boards will be tried again.")
     if not args.org:
         # automatic run: companies whose collection failed before are skipped (skip_orgs.py)
         skipped = [s for s in companies if skip_orgs.is_skipped(s)]
@@ -158,6 +269,8 @@ def main(argv=None):
                   + (" ..." if len(skipped) > 8 else ""))
             companies = {s: n for s, n in companies.items() if s not in skipped}
     conn = db.connect()
+    if not args.org:
+        companies = filter_stale_boards(conn, companies)
     scrape_boards(conn, companies)
     if stop_requested():
         # sort what was scraped by rules now (fast, no AI), so the jobs show up in the app;

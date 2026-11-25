@@ -138,6 +138,54 @@ def set_resume(conn, job_id, path, ai_provider="", ai_model=""):
 
 # ---------------------------------------------------------------- stage 1: job list
 
+def parse_job_time(value):
+    """ISO timestamp / date string → aware UTC datetime, or None."""
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        try:
+            dt = datetime.strptime(text[:10], "%Y-%m-%d")
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def board_newest_posting(conn, org):
+    """Newest known posting time for a board: max(published_at, first_seen_at), or None."""
+    row = conn.execute(
+        "SELECT MAX(COALESCE(NULLIF(published_at, ''), first_seen_at)) AS newest, "
+        "MAX(last_seen_at) AS last_listed FROM jobs WHERE org=?",
+        (org,)).fetchone()
+    if not row:
+        return None, None
+    return parse_job_time(row["newest"]), parse_job_time(row["last_listed"])
+
+
+def is_stale_board(conn, org, stale_days, recheck_days):
+    """True → skip this board's job search (newest posting older than stale_days).
+
+    Never-scraped boards are not stale. After we skip a stale board, we still
+    re-list it every `recheck_days` so a quiet company that starts hiring again
+    is not ignored forever.
+    """
+    newest, last_listed = board_newest_posting(conn, org)
+    if not newest:
+        return False
+    now = datetime.now(timezone.utc)
+    if (now - newest).days <= stale_days:
+        return False
+    if last_listed and (now - last_listed).days >= recheck_days:
+        return False  # due for a monthly peek
+    return True
+
+
 def upsert_listing(conn, org, company, job, seen_at):
     """Stage 1: save a job from the board list (no description yet). True if it is new.
     Never touches the details saved by stage 2."""
@@ -148,7 +196,7 @@ def upsert_listing(conn, org, company, job, seen_at):
         "location": job["location"],
         "locations_all": json.dumps([l for l in job["locations"] if l]),
         "workplace_type": job["workplace_type"],
-        "is_remote": int(job["workplace_type"] == "Remote"),
+        "is_remote": int(job["workplace_type"] in ("Remote", "Hybrid")),
         "job_url": job["job_url"], "apply_url": job["apply_url"],
         "compensation": job["compensation"], "seen": seen_at,
     }

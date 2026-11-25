@@ -8,3 +8,4 @@ answers.json*
 resumes/
 .cache/
 .browser-profile/
+.browser-profile-*/

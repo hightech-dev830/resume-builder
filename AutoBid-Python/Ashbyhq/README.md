@@ -23,7 +23,7 @@ Double-click **`AutoBid-Ashbyhq.bat`**, or run `python app.py`.
 - **Auto-collection** (Run tab): runs at fixed **US Eastern** times while the app is open: **1:00, 4:00, 8:00, 10:00, 12:00, 14:00, 16:00, 18:00, 20:00**. Choose *today's jobs* or *all companies*. If Apply is running, Collect is **queued** and starts when Apply finishes (you are not blocked). The header shows the next Eastern slot (it does not drift when a run finishes).
 - **Collection roadmap** (Collect jobs / Collect today's jobs / auto): **1)** scrape boards from `companies.csv` → **2)** update the Jobs list → **3)** sync Supabase. Jobs tab defaults to **Posted: today**; use **Today's jobs** to jump back to that view.
 
-Only one collection runs at a time (`data/collect.lock`). A second one, from the app, the auto timer or the command line, stops with a message instead of doubling the load. If Ashby answers "429 Too Many Requests", the bot waits and retries.
+Only one collection runs at a time (`data/collect.lock`). A second one, from the app, the auto timer or the command line, stops with a message instead of doubling the load. If Ashby answers "429 Too Many Requests", the bot waits and retries that run (it is **not** permanent-skipped). Boards whose newest known job is older than **~4 months** (`STALE_BOARD_DAYS` in `config.py`) are skipped on automatic collects and re-checked about monthly.
 
 ## How it works
 
@@ -34,7 +34,7 @@ It does not open a browser to scrape the page. It calls Ashby's own public endpo
 | Job list, links, description, salary | `api.ashbyhq.com/posting-api/job-board/<slug>` |
 | Application questions (type, required, options) | `jobs.ashbyhq.com/api/non-user-graphql` (`ApiJobPosting`) |
 
-It needs no login, no API key, and no extra packages (standard library only). Only jobs that are Remote and list a US location are kept (`LOCATION_FILTER`).
+It needs no login, no API key, and no extra packages (standard library only). Only Remote/Hybrid jobs with a US-eligible location are kept (city/state names like "Chicago, IL (Remote)" count — not only the words "United States").
 
 ## Run
 
@@ -84,7 +84,7 @@ Roadmap every time:
 ## Settings (`config.py`)
 
 - `COMPANIES_FILE` / `ONLY_ORGS`: which companies to collect. `ONLY_ORGS = ["openai", "notion"]` limits collection to those.
-- `WORKPLACE_TYPES` (default `{"Remote"}`) and `LOCATION_FILTER` (default: US).
+- `WORKPLACE_TYPES` (default `{"Remote", "Hybrid"}`) and `LOCATION_FILTER` (default `"US"` = built-in US city/state matcher; set `None` for every country).
 - `BOARD_WORKERS` / `WORKERS`: how many boards and question requests run in parallel.
 - `APPLY_LIMITS`: per-company application limits, for example `{"ashby": (3, 60)}`.
 

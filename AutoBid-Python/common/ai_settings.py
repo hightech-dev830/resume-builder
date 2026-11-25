@@ -1,36 +1,44 @@
-"""AI settings shared by every AutoBid bot (edited in the desktop app's AI tab).
+"""AI settings per AutoBid bot (edited in each desktop app's AI tab).
 
-AutoBid-Python/ai_settings.json:
-    {
-      # provider: claude_code | claude_api | openai_api | cursor | cursor_auto |
-      #           chatgpt | claude | deepseek
-      "resume":    {"provider": "claude_code", "model": "opus"},    # writes tailored resumes
-      "relevance": {"provider": "claude_code", "model": "haiku"},   # sorts unclear job titles
-      "prompt_source": "resume_builder"   # or "local"
-    }
+Each bot has its own file (Ashby / Greenhouse / Wellfound are independent):
 
-Resume prompt:
-  "resume_builder" - the prompt saved in Resume Builder Settings (Supabase), the same one the
-                     Chrome extension uses
-  "local"          - AutoBid-Python/resume_prompt.txt (AutoBid only)
-The JSON output rules (schema, fixed company name, ...) are always added after the prompt.
+    AutoBid-Python/ai_settings-ashby.json
+    AutoBid-Python/ai_settings-greenhouse.json
+    AutoBid-Python/ai_settings-wellfound.json
+
+AUTOBID_BOT (set in that bot's config.py) picks the file. If missing, it is seeded
+once from the legacy shared `ai_settings.json`.
+
+Local resume prompt (when prompt_source=local):
+
+    AutoBid-Python/resume_prompt-ashby.txt  (etc.), seeded from resume_prompt.txt
 """
 import json
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SETTINGS_PATH = ROOT / "ai_settings.json"
-LOCAL_PROMPT_PATH = ROOT / "resume_prompt.txt"
+_SHARED_SETTINGS = ROOT / "ai_settings.json"
+_SHARED_PROMPT = ROOT / "resume_prompt.txt"
+
+_BOT_SUFFIX = {
+    "ashby": "ashby",
+    "ashbyhq": "ashby",
+    "greenhouse": "greenhouse",
+    "wellfound": "wellfound",
+}
 
 PROVIDERS = {
-    "claude_code": "Claude Code (CLI, your Claude login) - recommended",
-    "claude_api": "Claude API (your Anthropic API key)",
-    "openai_api": "OpenAI API (your OpenAI API key)",
+    # Safer: no browser automation against a free chat site
+    "claude_code": "Claude Code (CLI, your Claude login) - safest / recommended",
+    "claude_api": "Claude API (your Anthropic API key) - safest paid",
+    "openai_api": "OpenAI API (your OpenAI API key) - safest paid",
     "cursor_auto": "Cursor Agent Auto (desktop CLI, your Cursor login) - Auto model",
     "cursor": "Cursor Agent (desktop CLI, pick a model)",
-    "chatgpt": "ChatGPT web page (not recommended: blocks bots)",
-    "claude": "Claude.ai web page (not recommended: blocks bots)",
-    "deepseek": "DeepSeek web page (not recommended: blocks bots)",
+    # Risky: free web UIs ban automated bulk use (accounts can die)
+    "chatgpt": "ChatGPT web (RISKY: rate limits / bans — prefer Claude Code or API)",
+    "claude": "Claude.ai web (RISKY: rate limits / bans — prefer Claude Code or API)",
+    "deepseek": "DeepSeek web (RISKY: free accounts often banned — prefer Claude Code or API)",
 }
 CLI_PROVIDERS = {"claude_code", "cursor", "cursor_auto"}
 # Paid API with your own key. The keys are Resume Builder's settings in Supabase
@@ -62,9 +70,47 @@ DEFAULTS = {
 }
 
 
+def _bot_key():
+    return _BOT_SUFFIX.get((os.environ.get("AUTOBID_BOT") or "").strip().lower())
+
+
+def settings_path():
+    """Per-bot ai_settings-*.json, or legacy shared file if AUTOBID_BOT is unset."""
+    bot = _bot_key()
+    if not bot:
+        return _SHARED_SETTINGS
+    path = ROOT / f"ai_settings-{bot}.json"
+    if not path.is_file() and _SHARED_SETTINGS.is_file():
+        try:
+            path.write_text(_SHARED_SETTINGS.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"  Seeded {path.name} from ai_settings.json")
+        except Exception:
+            pass
+    return path
+
+
+def local_prompt_path():
+    bot = _bot_key()
+    if not bot:
+        return _SHARED_PROMPT
+    path = ROOT / f"resume_prompt-{bot}.txt"
+    if not path.is_file() and _SHARED_PROMPT.is_file():
+        try:
+            path.write_text(_SHARED_PROMPT.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            pass
+    return path
+
+
+# Back-compat aliases (resolved at call time via functions above)
+SETTINGS_PATH = _SHARED_SETTINGS
+LOCAL_PROMPT_PATH = _SHARED_PROMPT
+
+
 def load():
+    path = settings_path()
     try:
-        s = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        s = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         s = {}
     for k, v in DEFAULTS.items():
@@ -76,7 +122,8 @@ def load():
 
 
 def save(s):
-    SETTINGS_PATH.write_text(json.dumps(s, indent=2), encoding="utf-8")
+    path = settings_path()
+    path.write_text(json.dumps(s, indent=2), encoding="utf-8")
 
 
 def get(task):
@@ -128,10 +175,10 @@ def api_key_problem(provider):
 
 def local_prompt():
     try:
-        return LOCAL_PROMPT_PATH.read_text(encoding="utf-8").strip()
+        return local_prompt_path().read_text(encoding="utf-8").strip()
     except Exception:
         return ""
 
 
 def save_local_prompt(text):
-    LOCAL_PROMPT_PATH.write_text(text.strip() + "\n", encoding="utf-8")
+    local_prompt_path().write_text(text.strip() + "\n", encoding="utf-8")

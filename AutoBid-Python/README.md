@@ -5,6 +5,8 @@ Fast Python auto-bid bots. Each job site has its own folder, and shared code liv
 | Bot | Site | Status |
 |---|---|---|
 | [Ashbyhq](Ashbyhq/) | ~2,165 companies on Ashby (`jobs.ashbyhq.com/<company>`), remote US | Scraping, answer bank, tailored resumes, batch bidding, desktop app |
+| [Wellfound](Wellfound/) | ~4,089 companies on Wellfound (`wellfound.com/company/<slug>`), remote | Collect + apply form fill + email-verify pause, desktop app |
+| [Greenhouse](Greenhouse/) | MyGreenhouse + ~3,400 company boards (`job-boards.greenhouse.io/<token>`) | Wait-login, scrape + Apply links, replace base resume with AI PDF, submit |
 
 Requires Python 3.9+. The Ashbyhq bot also needs `pip install playwright` (it drives your installed Chrome) and Node.js (it reuses Resume Builder's resume template).
 
@@ -37,5 +39,5 @@ A new platform bot needs only two functions: `list jobs` (stage 1) and `job deta
 | `supabase_db.py` | Small Supabase client (answer bank, jobs sync, settings) |
 
 **API platforms** (`claude_api`, `openai_api`) call the API through `resume_bridge.js ai-complete`, i.e. Resume Builder's own `lib/shared/ai.js` (official SDKs, the proxy from Settings, Claude server-side fallbacks). A resume is the same request as the extension's (system prompt + base profile + job, JSON schema enforced). Tokens of every call are saved in the `ai_usage` table (task `autobid-resume` / `autobid-relevance`). An empty model box means the model chosen in Resume Builder Settings.
-| `browser.py` | The bot's own Chrome profile (Playwright) |
+| `browser.py` | Per-bot Chrome profiles (`.browser-profile-ashby` / `-greenhouse` / `-wellfound`) so platforms can bid in parallel |
 | `captcha.py`, `notify.py` | Bot-check detection and Windows notifications |

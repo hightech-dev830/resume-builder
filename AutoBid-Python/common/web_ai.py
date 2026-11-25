@@ -133,21 +133,30 @@ PROVIDERS = {
             "button:has-text('New chat')",
             "a:has-text('New chat')",
             "[class*='new-chat']",
+            "[aria-label*='New chat' i]",
         ],
+        # DeepSeek: ⋯ on the active sidebar row, then Delete → Confirm
         "chat_menu": [
+            "[class*='ds-dropdown'] button",
+            "aside [class*='active'] button:has(svg)",
+            "[class*='conversation'][class*='active'] button:has(svg)",
             "div[class*='chat'] button:has(svg)",
+            "button[aria-label*='More' i]",
+            "button[aria-haspopup='menu']",
             "[class*='more']",
-            "button[aria-label*='More']",
         ],
         "delete_item": [
-            "div:has-text('Delete')",
+            "[role='menuitem']:has-text('Delete')",
+            "div[role='menu'] >> text=Delete",
             "button:has-text('Delete')",
+            "div:has-text('Delete'):not(:has(div:has-text('Delete')))",
             "text=Delete",
         ],
         "delete_confirm": [
+            "[role='dialog'] button:has-text('Confirm')",
+            "[role='dialog'] button:has-text('Delete')",
             "button:has-text('Confirm')",
             "button:has-text('Delete')",
-            "[role='dialog'] button:has-text('Delete')",
         ],
         "send": [
             "div[role='button'][aria-disabled='false']:has(svg)",
@@ -164,6 +173,9 @@ PROVIDERS = {
         "user": [],
     },
 }
+
+# Pause between web-chat asks so free sites (DeepSeek especially) are less likely to ban.
+WEB_ASK_GAP_SEC = {"deepseek": 25, "chatgpt": 12, "claude": 12}
 
 CLI = {
     # --tools "": text answers only, Claude Code never runs tools (faster, nothing touched)
@@ -262,32 +274,64 @@ class WebAI:
     def ask_json(self, prompt, required_keys=(), **api_opts):
         """ask() and parse a JSON object from the answer (one retry in the same chat).
         API platforms: pass schema=... for a guaranteed-valid JSON answer (structured output).
-        required_keys: string keys that must exist (essay answers use \"0\",\"1\",...)."""
+        required_keys: string keys that must exist (essay answers use \"0\",\"1\",...).
+
+        Web chat (DeepSeek/ChatGPT/Claude): after a successful answer the thread is deleted
+        so the sidebar does not fill and free accounts are less likely to trip abuse filters.
+        """
         keys = [str(k) for k in required_keys]
-        text = self.ask(prompt, **api_opts)
-        data = coerce_keyed_json(text, keys)
-        if data is None or any(k not in data for k in keys):
-            need = ", ".join(repr(k) for k in keys) or "(any object)"
-            example = "{" + ", ".join(f'"{k}": "answer {k}"' for k in keys) + "}"
-            fix = (
-                f"Your reply was missing required keys [{need}]. "
-                f"Reply with ONLY one JSON object inside a ```json code block, exactly like:\n"
-                f"{example}\n"
-                "Keys must be those strings. No nesting, no arrays, no question titles as keys."
-            )
-            if self.provider in API:
-                text = self.ask(prompt + "\n\n" + fix, **api_opts)
-            elif self.provider in CLI:
-                text = self.ask(prompt + "\n\n" + fix)
-            else:
-                text = self._send_and_wait(fix)
+        try:
+            text = self.ask(prompt, **api_opts)
             data = coerce_keyed_json(text, keys)
-        if data is None:
-            raise RuntimeError(f"{self.provider} did not return valid JSON")
-        missing = [k for k in keys if k not in data or not str(data.get(k) or "").strip()]
-        if missing:
-            raise RuntimeError(f"{self.provider} answer is missing {missing}")
-        return data
+            if data is None or any(k not in data for k in keys):
+                need = ", ".join(repr(k) for k in keys) or "(any object)"
+                example = "{" + ", ".join(f'"{k}": "answer {k}"' for k in keys) + "}"
+                fix = (
+                    f"Your reply was missing required keys [{need}]. "
+                    f"Reply with ONLY one JSON object inside a ```json code block, exactly like:\n"
+                    f"{example}\n"
+                    "Keys must be those strings. No nesting, no arrays, no question titles as keys."
+                )
+                if self.provider in API:
+                    text = self.ask(prompt + "\n\n" + fix, **api_opts)
+                elif self.provider in CLI:
+                    text = self.ask(prompt + "\n\n" + fix)
+                else:
+                    text = self._send_and_wait(fix)
+                data = coerce_keyed_json(text, keys)
+            if data is None:
+                raise RuntimeError(f"{self.provider} did not return valid JSON")
+            missing = [k for k in keys if k not in data or not str(data.get(k) or "").strip()]
+            if missing:
+                raise RuntimeError(f"{self.provider} answer is missing {missing}")
+            return data
+        finally:
+            # Always try to delete the web thread when this ask finishes (success or fail).
+            self.finish_web_chat()
+
+    def finish_web_chat(self):
+        """Delete the current DeepSeek/ChatGPT/Claude thread after a resume/essay ask.
+
+        Free web accounts ban automated bulk use more often when hundreds of chat
+        threads pile up. Best-effort — UI changes should not break the bot.
+        """
+        if self.provider not in PROVIDERS:
+            return False
+        if self.page is None:
+            return False
+        try:
+            if self._have_chat or self._in_saved_conversation():
+                if self._delete_current_chat():
+                    print(f"    {self.provider}: closed chat thread after this ask")
+                    return True
+                # Fallback: at least leave a blank composer so the used thread is not active
+                self._click_new_chat()
+                self._have_chat = False
+                print(f"    {self.provider}: opened New chat (delete menu not found)")
+                return False
+        except Exception as e:
+            print(f"    ! {self.provider}: could not close chat thread ({e})")
+        return False
 
     # ------------------------------------------------------------ API (your key)
 
@@ -1116,11 +1160,24 @@ class WebAI:
             return last
         raise RuntimeError(f"{self.provider} answer did not finish in {ANSWER_TIMEOUT_MIN} min")
 
+    def _pace_web_asks(self):
+        """Slow down free web AIs (DeepSeek especially) between resumes/essays."""
+        gap = WEB_ASK_GAP_SEC.get(self.provider, 10)
+        last = getattr(self, "_last_web_ask_at", 0) or 0
+        wait = gap - (time.time() - last)
+        if wait > 1:
+            print(f"    pacing {self.provider}: waiting {wait:.0f}s before next web ask "
+                  f"(safer for free accounts) ...")
+            time.sleep(wait)
+
     def _ask_web(self, prompt):
-        # New independent ask: delete previous AutoBid thread, reuse the same tab
+        # Pace free sites, then delete previous AutoBid thread and reuse the same tab
+        self._pace_web_asks()
         box = self._recycle_chat()
         try:
-            return self._send_and_wait(prompt, box)
+            text = self._send_and_wait(prompt, box)
+            self._last_web_ask_at = time.time()
+            return text
         except Exception as e:
             msg = str(e).splitlines()[0][:180]
             # Playwright actionability errors used to surface as bare Locator.click timeouts
@@ -1129,7 +1186,9 @@ class WebAI:
                 self._dismiss_overlays()
                 self._have_chat = True
                 box = self._recycle_chat()
-                return self._send_and_wait(prompt, box)
+                text = self._send_and_wait(prompt, box)
+                self._last_web_ask_at = time.time()
+                return text
             raise
 
 

@@ -41,8 +41,8 @@ SETTINGS_PATH = BASE_DIR / "data" / "app_settings.json"   # also read by bid.py 
 POSTED_WITHIN = {"all": None, "today": 0, "3d ago": 3, "1w ago": 7, "1m ago": 30}
 
 # Auto-collect clock (US Eastern). Fixed times so "next" does not drift with run length.
-AUTO_COLLECT_HOURS_ET = (1, 4, 8, 10, 12, 14, 16, 18, 20)
-AUTO_SLOTS_LABEL = "1:00 · 4:00 · 8:00 · 10:00 · 12:00 · 14:00 · 16:00 · 18:00 · 20:00 ET"
+AUTO_COLLECT_HOURS_ET = (4, 8, 10, 12, 14, 16, 18, 20)
+AUTO_SLOTS_LABEL = "4:00 · 8:00 · 10:00 · 12:00 · 14:00 · 16:00 · 18:00 · 20:00 ET"
 try:
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("America/New_York")
@@ -265,6 +265,7 @@ class App(tk.Tk):
         self.ui_q = queue.Queue()      # work from background threads -> main thread
         self.selected_job = None
         self.selected_q = None
+        self.pending_answers = {}   # key -> answer; flushed to Supabase on tab change / Sync to DB
 
         self._style()
         self._header()
@@ -277,6 +278,7 @@ class App(tk.Tk):
         self._run_tab()
         self._ai_tab()
         body.add(self._log_panel(), weight=1)
+        self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self.refresh_all()
         self._auto_info()
@@ -890,15 +892,40 @@ class App(tk.Tk):
         self.q_filter_lbl.pack(side="left")
         ttk.Button(self.q_filter_bar, text="Show all answers",
                    command=self.clear_answers_job_filter).pack(side="right")
+        sortbar = ttk.Frame(right)
+        sortbar.pack(fill="x", pady=(2, 0))
+        ttk.Label(sortbar, text="Sort by", style="Stat.TLabel").pack(side="left")
+        self.q_sort_pick = ttk.Combobox(
+            sortbar, width=14, state="readonly",
+            values=["Required in", "Type", "Question", "Answer"])
+        self.q_sort_pick.set("Required in")
+        self.q_sort_pick.pack(side="left", padx=4)
+        self.q_sort_pick.bind("<<ComboboxSelected>>", lambda e: self._sort_from_picker())
+        self.q_sort_dir_btn = ttk.Button(sortbar, text="▼ High→Low", width=12,
+                                         command=self._toggle_sort_dir)
+        self.q_sort_dir_btn.pack(side="left", padx=4)
+        ttk.Label(sortbar, text="Search", style="Stat.TLabel").pack(side="left", padx=(16, 0))
+        self.q_search = ttk.Entry(sortbar, width=28)
+        self.q_search.pack(side="left", padx=4)
+        self.q_search.bind("<KeyRelease>", self._on_q_search)
+        self.q_search.bind("<Escape>", lambda e: self._clear_q_search())
+        self._q_search_after = None
+        ttk.Label(sortbar, text="(question or answer)", style="Stat.TLabel").pack(side="left")
+
         self.q_count = ttk.Label(right, text="", style="Stat.TLabel")
         self.q_count.pack(anchor="w")
         cols = ("jobs", "type", "question", "answer")
         qframe = ttk.Frame(right)   # packed below, after the Answer box (so the box always fits)
         self.qlist = ttk.Treeview(qframe, columns=cols, show="headings", selectmode="browse", height=12)
+        self.q_headings = {
+            "jobs": "Required in", "type": "Type", "question": "Question", "answer": "Answer"}
+        self.q_sort_col, self.q_sort_desc = "jobs", True   # default: most-required first
+        self._q_row_meta = {}
         for c, label, w in [("jobs", "Required in", 80), ("type", "Type", 110),
                             ("question", "Question", 420), ("answer", "Answer", 200)]:
-            self.qlist.heading(c, text=label)
+            self.qlist.heading(c, text=label, command=lambda c=c: self.sort_questions(c, toggle=True))
             self.qlist.column(c, width=w, anchor="w", stretch=c == "question")
+        self._update_q_headings()
         self.qlist.tag_configure("open", foreground="#c62828")
         qsb = ttk.Scrollbar(qframe, orient="vertical", command=self.qlist.yview)
         self.qlist.configure(yscrollcommand=qsb.set)
@@ -907,12 +934,11 @@ class App(tk.Tk):
         self.qlist.bind("<<TreeviewSelect>>", lambda e: self.edit_question())
 
         # Answer box docked at the bottom; the question list above takes the space left over.
-        ed = ttk.LabelFrame(right, text="  Answer  ", padding=8)
+        # Changes update the local board immediately; Supabase is multi-saved on tab change / Sync to DB.
+        ed = ttk.LabelFrame(right, text="  Answer (local until Sync / tab change)  ", padding=8)
         ed.pack(side="bottom", fill="x")
-        eb = ttk.Frame(ed)                      # buttons first, so they are never pushed out
+        eb = ttk.Frame(ed)
         eb.pack(side="bottom", fill="x")
-        ttk.Button(eb, text="Save answer", style="Accent.TButton", command=self.save_answer).pack(side="right")
-        ttk.Button(eb, text="Clear", command=lambda: self.save_answer(clear=True)).pack(side="right", padx=4)
         self.e_saved = ttk.Label(eb, text="", foreground="#1a7f37")
         self.e_saved.pack(side="right", padx=10)
         # shown only after coming here by double-clicking a question in Jobs > Application
@@ -923,6 +949,8 @@ class App(tk.Tk):
         self.e_note.pack(anchor="w")
         self.e_holder = ttk.Frame(ed)
         self.e_holder.pack(fill="x", pady=6)
+        self._answer_ignore = False
+        self._answer_save_after = None
         qframe.pack(fill="both", expand=True, pady=(6, 6))
         split.add(right, weight=3)
 
@@ -1020,14 +1048,82 @@ class App(tk.Tk):
         self.log(f"✓ Imported {stats['filled']} answer(s) from backup "
                  f"({Path(path).name}); skipped {stats['skipped_has_answer']} already filled.\n")
 
+    def _update_q_headings(self):
+        for c, label in self.q_headings.items():
+            if self.q_sort_col == c:
+                arrow = " ▼" if self.q_sort_desc else " ▲"
+            else:
+                arrow = " ⇅"
+            self.qlist.heading(c, text=label + arrow)
+        # keep the Sort by picker in sync
+        label = self.q_headings.get(self.q_sort_col or "jobs", "Required in")
+        if getattr(self, "q_sort_pick", None):
+            try:
+                self.q_sort_pick.set(label)
+            except Exception:
+                pass
+        if getattr(self, "q_sort_dir_btn", None):
+            self.q_sort_dir_btn.config(
+                text="▼ High→Low" if self.q_sort_desc else "▲ Low→High")
+
+    def _sort_from_picker(self):
+        name = self.q_sort_pick.get()
+        col = next((c for c, lab in self.q_headings.items() if lab == name), "jobs")
+        # changing column via picker: keep current direction
+        self.q_sort_col = col
+        self.load_bank_list()
+
+    def _toggle_sort_dir(self):
+        self.q_sort_desc = not self.q_sort_desc
+        self.load_bank_list()
+
+    def sort_questions(self, col, toggle=False):
+        """Click a column header to sort Required in / Type / Question / Answer; click again to reverse."""
+        if toggle:
+            self.q_sort_desc = (not self.q_sort_desc) if self.q_sort_col == col else False
+            self.q_sort_col = col
+        self.load_bank_list()
+
+    def _q_sort_key(self, row):
+        col = self.q_sort_col
+        if col == "jobs":
+            return row["jobs_n"]
+        if col == "type":
+            return (row["type"] or "").lower()
+        if col == "question":
+            return (row["question"] or "").lower()
+        if col == "answer":
+            # unanswered first when ascending; then by answer text
+            return (0 if row["empty"] else 1, (row["answer"] or "").lower())
+        return 0
+
+    def _on_q_search(self, _event=None):
+        """Debounce so typing through thousands of questions stays responsive."""
+        if self._q_search_after:
+            try:
+                self.after_cancel(self._q_search_after)
+            except Exception:
+                pass
+        self._q_search_after = self.after(180, self.load_bank_list)
+
+    def _clear_q_search(self):
+        self.q_search.delete(0, "end")
+        self.load_bank_list()
+        return "break"
+
     def load_bank_list(self):
         """Only REQUIRED questions are in the bank. 'You answer' = yes/no, choices, numbers...;
         'AI writes' = text/essay questions the AI answers per job (you may still answer them).
         With a selected-jobs filter, only questions those jobs ask are listed."""
         kind = self.q_kind.get()
         filt = self.answers_filter_keys
+        needle = (self.q_search.get() if getattr(self, "q_search", None) else "") or ""
+        needle = needle.strip().lower()
+        prev = self.qlist.selection()
         self.qlist.delete(*self.qlist.get_children())
+        self._q_row_meta = {}
         shown = open_n = 0
+        rows = []
         for i, q in enumerate(self.bank["questions"]):
             if filt is not None:
                 if q["key"] not in filt:
@@ -1038,30 +1134,56 @@ class App(tk.Tk):
             if (kind == "You answer" and is_text) or (kind.startswith("AI") and not is_text):
                 continue
             empty = bank_mod._is_empty(q["answer"])
-            open_n += empty
-            if self.q_only_open.get() and not empty:
-                continue
             ans = "" if empty else (", ".join(q["answer"]) if isinstance(q["answer"], list) else str(q["answer"]))
             if empty and is_text:
                 ans = "(AI writes per job)"
+            if needle:
+                blob = f"{q.get('question') or ''} {ans} {q.get('type') or ''}".lower()
+                if needle not in blob:
+                    continue
+            open_n += empty
+            if self.q_only_open.get() and not empty:
+                continue
             if filt is not None:
                 n_sel = filt.get(q["key"], 0)
                 n_jobs = len(self.answers_filter_ids or [])
-                jobs_col = f"{n_sel}/{n_jobs} selected"
+                jobs_col = f"{n_sel}/{n_jobs}"
+                jobs_n = n_sel
             else:
                 n = q["asked_in_jobs"]
                 jobs_col = f"{n} job{'s' if n != 1 else ''}"
-            self.qlist.insert("", "end", iid=str(i), tags=("open",) if empty else (),
-                              values=(jobs_col, q["type"], q["question"], ans[:80]))
+                jobs_n = int(n or 0)
+            rows.append({
+                "iid": str(i),
+                "tags": ("open",) if empty else (),
+                "values": (jobs_col, q["type"], q["question"], ans[:80]),
+                "jobs_n": jobs_n,
+                "type": q["type"] or "",
+                "question": q["question"] or "",
+                "answer": ans or "",
+                "empty": empty,
+            })
             shown += 1
+        if self.q_sort_col:
+            rows.sort(key=self._q_sort_key, reverse=self.q_sort_desc)
+        for r in rows:
+            self.qlist.insert("", "end", iid=r["iid"], tags=r["tags"], values=r["values"])
+            self._q_row_meta[r["iid"]] = r
+        self._update_q_headings()
+        if prev:
+            keep = [i for i in prev if self.qlist.exists(i)]
+            if keep:
+                self.qlist.selection_set(keep)
+                self.qlist.see(keep[0])
+        search_bit = f"  ·  search “{needle}”" if needle else ""
         if filt is not None:
             n_jobs = len(self.answers_filter_ids or [])
             self.q_count.config(
                 text=f"{shown} questions for {n_jobs} selected job{'s' if n_jobs != 1 else ''}  ·  "
-                     f"{open_n} still unanswered  ·  click “Show all answers” to clear the filter")
+                     f"{open_n} still unanswered{search_bit}  ·  click “Show all answers” to clear the filter")
         else:
-            self.q_count.config(text=f"{shown} questions shown  ·  {open_n} of them still unanswered  ·  "
-                                     f"optional questions are never listed or saved")
+            self.q_count.config(text=f"{shown} questions shown  ·  {open_n} of them still unanswered"
+                                     f"{search_bit}  ·  optional questions are never listed or saved")
 
     def edit_question(self):
         sel = self.qlist.selection()
@@ -1073,44 +1195,80 @@ class App(tk.Tk):
         self.e_note.config(text=q.get("note", ""))
         for w in self.e_holder.winfo_children():
             w.destroy()
+        if self._answer_save_after:
+            try:
+                self.after_cancel(self._answer_save_after)
+            except Exception:
+                pass
+            self._answer_save_after = None
         cur = q.get("answer")
-        if q["type"] == "Boolean":
-            self.e_widget = ttk.Combobox(self.e_holder, values=["Yes", "No"], state="readonly", width=20)
-            self.e_widget.set("" if cur is None else ("Yes" if cur in (True, "Yes", "yes") else "No"))
-            self.e_widget.pack(anchor="w")
-        elif q["type"] == "ValueSelect":
-            self.e_widget = ttk.Combobox(self.e_holder, values=q.get("choices", []), state="readonly", width=60)
-            self.e_widget.set(cur or "")
-            self.e_widget.pack(anchor="w")
-        elif q["type"] == "MultiValueSelect":
-            ttk.Label(self.e_holder, text="Click to select one or more:",
-                      style="Stat.TLabel").pack(anchor="w")
-            box = ttk.Frame(self.e_holder)
-            box.pack(anchor="w")
-            self.e_widget = tk.Listbox(box, selectmode="multiple", height=min(5, len(q.get("choices", []))),
-                                       exportselection=False, width=60, activestyle="none",
-                                       selectbackground="#1f4fbf")
-            lsb = ttk.Scrollbar(box, orient="vertical", command=self.e_widget.yview)
-            self.e_widget.configure(yscrollcommand=lsb.set)
-            for j, c in enumerate(q.get("choices", [])):
-                self.e_widget.insert("end", c)
-                if isinstance(cur, list) and c in cur:
-                    self.e_widget.selection_set(j)
-            self.e_widget.pack(side="left")
-            if len(q.get("choices", [])) > 5:
-                lsb.pack(side="left", fill="y")
-        else:
-            self.e_widget = tk.Text(self.e_holder, height=5 if q["type"] == "LongText" else 2,
-                                    wrap="word", font=("Segoe UI", 10))
-            self.e_widget.insert("1.0", cur or "")
-            self.e_widget.pack(fill="x")
-            if q["type"] in bank_mod.TEXT_TYPES:
-                ttk.Label(self.e_holder, text="Leave empty to let the AI write it for each job.",
+        self._answer_ignore = True
+        try:
+            if q["type"] == "Boolean":
+                self.e_widget = ttk.Combobox(self.e_holder, values=["Yes", "No"], state="readonly", width=20)
+                self.e_widget.set("" if cur is None else ("Yes" if cur in (True, "Yes", "yes") else "No"))
+                self.e_widget.pack(anchor="w")
+                self.e_widget.bind("<<ComboboxSelected>>", lambda e: self._auto_save_answer(advance=True))
+            elif q["type"] == "ValueSelect":
+                self.e_widget = ttk.Combobox(self.e_holder, values=q.get("choices", []), state="readonly", width=60)
+                self.e_widget.set(cur or "")
+                self.e_widget.pack(anchor="w")
+                self.e_widget.bind("<<ComboboxSelected>>", lambda e: self._auto_save_answer(advance=True))
+            elif q["type"] == "MultiValueSelect":
+                ttk.Label(self.e_holder, text="Click to select one or more (auto-saves):",
                           style="Stat.TLabel").pack(anchor="w")
+                box = ttk.Frame(self.e_holder)
+                box.pack(anchor="w")
+                self.e_widget = tk.Listbox(box, selectmode="multiple", height=min(5, len(q.get("choices", []))),
+                                           exportselection=False, width=60, activestyle="none",
+                                           selectbackground="#1f4fbf")
+                lsb = ttk.Scrollbar(box, orient="vertical", command=self.e_widget.yview)
+                self.e_widget.configure(yscrollcommand=lsb.set)
+                for j, c in enumerate(q.get("choices", [])):
+                    self.e_widget.insert("end", c)
+                    if isinstance(cur, list) and c in cur:
+                        self.e_widget.selection_set(j)
+                self.e_widget.pack(side="left")
+                if len(q.get("choices", [])) > 5:
+                    lsb.pack(side="left", fill="y")
+                self.e_widget.bind("<<ListboxSelect>>", lambda e: self._auto_save_answer(advance=False))
+            else:
+                self.e_widget = tk.Text(self.e_holder, height=5 if q["type"] == "LongText" else 2,
+                                        wrap="word", font=("Segoe UI", 10))
+                self.e_widget.insert("1.0", cur or "")
+                self.e_widget.pack(fill="x")
+                self.e_widget.bind("<KeyRelease>", self._schedule_answer_save)
+                self.e_widget.bind("<FocusOut>", lambda e: self._auto_save_answer(advance=True))
+                if q["type"] in bank_mod.TEXT_TYPES:
+                    ttk.Label(self.e_holder, text="Leave empty to let the AI write it for each job. Auto-saves as you type.",
+                              style="Stat.TLabel").pack(anchor="w")
+        finally:
+            self._answer_ignore = False
 
-    def save_answer(self, clear=False):
+    def _schedule_answer_save(self, _event=None):
+        """Debounce free-text edits so every keystroke is not a Supabase round-trip."""
+        if self._answer_ignore:
+            return
+        if self._answer_save_after:
+            try:
+                self.after_cancel(self._answer_save_after)
+            except Exception:
+                pass
+        self._answer_save_after = self.after(500, lambda: self._auto_save_answer(advance=False))
+
+    def _auto_save_answer(self, advance=True):
+        if self._answer_ignore:
+            return
+        self.save_answer(advance=advance)
+
+    def save_answer(self, clear=False, advance=True):
+        """Remember the answer in local cache + refresh the Jobs board (no Supabase yet).
+
+        Pending answers are multi-saved by flush_pending_answers() on tab change / Sync to DB.
+        advance: when True and 'only unanswered' hides this row, select the next open question.
+        """
         q = self.selected_q
-        if not q:
+        if not q or not getattr(self, "e_widget", None):
             return
         if clear:
             answer = None
@@ -1120,31 +1278,81 @@ class App(tk.Tk):
             answer = self.e_widget.get("1.0", "end").strip() or None
         else:
             answer = self.e_widget.get() or None
-        # position in the list, to continue with the next question when this one disappears
-        # from an "only unanswered" list
+        cur = q.get("answer")
+        if not clear:
+            same = (answer == cur) or (
+                isinstance(answer, list) and isinstance(cur, list)
+                and sorted(answer) == sorted(cur))
+            if same or (bank_mod._is_empty(answer) and bank_mod._is_empty(cur)):
+                return
         rows = self.qlist.get_children()
         pos = rows.index(self.qlist.selection()[0]) if self.qlist.selection() else 0
         try:
-            # saved in Supabase; changes only this question: nothing else is overwritten
-            self.bank = bank_mod.set_answer(q["key"], answer, self.bank)
+            self.bank = bank_mod.set_answer_local(q["key"], answer, self.bank)
         except Exception as e:
-            messagebox.showerror("Not saved", f"The answer could not be saved:\n{e}")
+            messagebox.showerror("Not saved", f"The answer could not be cached:\n{e}")
             return
+        self.pending_answers[q["key"]] = None if bank_mod._is_empty(answer) else answer
         shown = "(cleared)" if answer is None else (", ".join(answer) if isinstance(answer, list) else answer)
-        self.log(f"✓ Saved answer: {q['question'][:70]}  ->  {str(shown)[:60]}\n")
+        n_pend = len(self.pending_answers)
+        self.log(f"✓ Local: {q['question'][:70]}  ->  {str(shown)[:60]}  "
+                 f"({n_pend} pending sync)\n")
         self.refresh_all()
 
         idx = next((n for n, b in enumerate(self.bank["questions"]) if b["key"] == q["key"]), None)
         if idx is not None and self.qlist.exists(str(idx)):
-            target, note = str(idx), "✓ Saved"
-        else:   # answered question is hidden by "only unanswered": go on with the next one
+            target, note = str(idx), f"✓ Local ({n_pend} pending)"
+        elif advance:
             rows = self.qlist.get_children()
             target = rows[min(pos, len(rows) - 1)] if rows else None
-            note = "✓ Saved - next unanswered question"
-        if target:
-            self.qlist.selection_set(target)
-            self.qlist.see(target)
+            note = f"✓ Local - next unanswered ({n_pend} pending)"
+        else:
+            target, note = None, f"✓ Local ({n_pend} pending)"
+        if target and advance:
+            self._answer_ignore = True
+            try:
+                self.qlist.selection_set(target)
+                self.qlist.see(target)
+                if target != (str(idx) if idx is not None else None):
+                    self.edit_question()
+            finally:
+                self._answer_ignore = False
         self.e_saved.config(text=f"{note}  {datetime.now().strftime('%H:%M:%S')}")
+
+    def flush_pending_answers(self, reason=""):
+        """Push all locally cached answer changes to Supabase in one multi-save."""
+        if self._answer_save_after:
+            try:
+                self.after_cancel(self._answer_save_after)
+            except Exception:
+                pass
+            self._answer_save_after = None
+            # Capture any in-progress text edit before flush
+            if self.selected_q and getattr(self, "e_widget", None):
+                self._answer_ignore = False
+                self.save_answer(advance=False)
+        pending = dict(self.pending_answers)
+        if not pending:
+            return 0
+        try:
+            bank_mod.flush_answers(pending, self.bank)
+        except Exception as e:
+            messagebox.showerror(
+                "Answers not synced",
+                f"{len(pending)} local answer(s) could not be saved to Supabase:\n{e}\n\n"
+                "They stay on this board; try Sync to DB again.")
+            self.log(f"! Answer sync failed ({len(pending)} pending): {e}\n")
+            return 0
+        self.pending_answers.clear()
+        why = f" ({reason})" if reason else ""
+        self.log(f"✓ Synced {len(pending)} answer(s) to Supabase{why}\n")
+        if getattr(self, "e_saved", None):
+            self.e_saved.config(
+                text=f"✓ Synced {len(pending)}  {datetime.now().strftime('%H:%M:%S')}")
+        return len(pending)
+
+    def _on_tab_changed(self, _event=None):
+        self.flush_pending_answers(reason="tab change")
 
     # ------------------------------------------------------------ Run tab
 
@@ -1329,10 +1537,12 @@ class App(tk.Tk):
 
     def sync_from_db(self):
         """Download: jobs changed in Supabase (e.g. on another computer) come to this board."""
+        self.flush_pending_answers(reason="before Sync from DB")
         return self.run_script(["sync_db.py", "--pull"], "Sync from DB (Supabase → this computer)")
 
     def sync_to_db(self):
-        """Upload: jobs changed on this computer go to Supabase."""
+        """Upload: pending answers + jobs changed on this computer go to Supabase."""
+        self.flush_pending_answers(reason="Sync to DB")
         return self.run_script(["sync_db.py", "--push"], "Sync to DB (this computer → Supabase)")
 
     def set_status_selected(self):
@@ -1441,33 +1651,35 @@ class App(tk.Tk):
         return f"{len(ids)} selected jobs"
 
     def open_bot_browser(self):
-        """Open the bot's own Chrome (.browser-profile) so you can sign in and prepare
+        """Open Ashby's Chrome (.browser-profile-ashby) so you can sign in and prepare
         ChatGPT / Claude / DeepSeek before Apply or Make resume.
 
-        Launches real Chrome (not Playwright). Close that window before starting the bot —
-        the profile can only be open in one place."""
+        Launches real Chrome (not Playwright). Close that window before Ashby Apply —
+        Greenhouse/Wellfound use different profiles and can keep running."""
         if self.proc and self.proc.poll() is None:
             messagebox.showwarning(
                 "Busy",
-                "Something is already running and may be using the bot Chrome profile.\n"
+                "Something is already running and may be using the Ashby Chrome profile.\n"
                 "Stop it first, then open the bot browser to prepare logins.")
             return
         try:
-            from browser import PROFILE_DIR, PREP_URLS, open_bot_chrome
+            from browser import PREP_URLS, get_profile_dir, open_bot_chrome
             open_bot_chrome()
+            profile = get_profile_dir()
         except Exception as e:
             messagebox.showerror("Open bot browser", str(e))
             return
         self.log(
-            f"Opened bot Chrome ({PROFILE_DIR})\n"
+            f"Opened Ashby bot Chrome ({profile})\n"
             f"  Prepare / sign in: " + ", ".join(PREP_URLS) + "\n"
-            f"  Close that Chrome window before Apply or Make resume.\n")
+            f"  Close that Chrome before Ashby Apply / Make resume "
+            f"(Greenhouse uses a separate profile).\n")
         messagebox.showinfo(
             "Bot browser opened",
-            "This is the bot's own Chrome (not your everyday browser).\n\n"
-            "Sign in to ChatGPT, Claude.ai and DeepSeek in the tabs that opened.\n"
-            "You can open more tabs and prepare anything else you need.\n\n"
-            "Close that Chrome window before Apply / Make resume.")
+            "This is Ashby's bot Chrome (.browser-profile-ashby).\n\n"
+            "Sign in to ChatGPT, Claude.ai and DeepSeek in the tabs that opened.\n\n"
+            "Close that Chrome before Ashby Apply / Make resume.\n"
+            "Greenhouse can use its own Chrome at the same time.")
 
     def _flush_ai_settings(self):
         """Write the AI tab (including an unsaved Platform change) to disk before any AI task.
@@ -1678,6 +1890,9 @@ class App(tk.Tk):
         self.tabs.add(tab, text="  AI  ")
         self.ai_conf = ai_settings.load()
         self.ai_widgets = {}
+        ttk.Label(tab, text=f"Ashby AI settings → {ai_settings.settings_path().name} "
+                            f"(independent of Greenhouse)",
+                  style="Stat.TLabel").pack(anchor="w", pady=(0, 8))
 
         top = ttk.Frame(tab)
         top.pack(fill="x")
@@ -1704,8 +1919,10 @@ class App(tk.Tk):
             model_hint = ttk.Label(box, text="Empty model = the platform's default. Type any model name, e.g. "
                                              "claude-opus-5-5.", style="Stat.TLabel")
             model_hint.grid(row=3, column=0, columnspan=3, sticky="w")
-            web_hint = ttk.Label(box, text="Web chat pages use the model selected on the site "
-                                           "(no model box here).", style="Stat.TLabel")
+            web_hint = ttk.Label(box, text="Web chat (DeepSeek/ChatGPT/Claude.ai) is RISKY for bulk "
+                                           "resumes — free accounts often get banned. Prefer Claude Code "
+                                           "or an API key. Threads are deleted after each ask.",
+                                 style="Stat.TLabel", wraplength=480)
             test_lbl.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
             provider = self.ai_conf[task]["provider"]
@@ -1743,9 +1960,8 @@ class App(tk.Tk):
         ttk.Button(browser_bar, text="Open bot browser", style="Accent.TButton",
                    command=self.open_bot_browser).pack(side="left")
         ttk.Label(browser_bar, style="Stat.TLabel", wraplength=780, text=(
-            "  Opens the bot's own Chrome window (.browser-profile) with ChatGPT, Claude.ai and "
-            "DeepSeek tabs so you can sign in and prepare everything. Your everyday Chrome login "
-            "does not count. Close that window before Apply / Make resume.")).pack(
+            "  Opens Ashby's Chrome (.browser-profile-ashby) with ChatGPT, Claude.ai and "
+            "DeepSeek tabs. Independent of Greenhouse. Close it before Ashby Apply / Make resume.")).pack(
             side="left", padx=(8, 0))
         ttk.Button(tab, text="Save AI settings", style="Accent.TButton", command=self.save_ai).pack(
             anchor="e", pady=(8, 4))
@@ -2175,6 +2391,10 @@ class App(tk.Tk):
             self.show_job()
 
     def destroy(self):
+        try:
+            self.flush_pending_answers(reason="app close")
+        except Exception:
+            pass
         self.stop()
         super().destroy()
 

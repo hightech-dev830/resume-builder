@@ -1,11 +1,11 @@
 {
   "resume": {
-    "provider": "claude_code",
-    "model": "claude-opus-5-5"
+    "provider": "deepseek",
+    "model": ""
   },
   "relevance": {
-    "provider": "claude_code",
-    "model": "haiku"
+    "provider": "deepseek",
+    "model": ""
   },
   "prompt_source": "resume_builder"
 }

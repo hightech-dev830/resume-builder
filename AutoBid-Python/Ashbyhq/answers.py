@@ -86,6 +86,16 @@ def profile_key(q):
     return None
 
 
+try:
+    from start_date import is_start_date_question, start_date_answer
+except ImportError:
+    def is_start_date_question(_title):
+        return False
+
+    def start_date_answer(_q=None):
+        return None
+
+
 # ---------------------------------------------------------------- storage: Supabase
 # The bank lives in Supabase (tables autobid_questions + autobid_profile, created by
 # supabase/migrations/004_autobid_answers.sql), so every computer uses the same answers.
@@ -206,9 +216,49 @@ def save_bank(bank):
     bank["questions"] = _sort(bank["questions"])
 
 
+def set_answer_local(key, answer, bank):
+    """Update ONE answer in the in-memory bank only (no Supabase write).
+
+    The app batches these and calls flush_answers() on tab change / Sync to DB.
+    """
+    found = False
+    for q in bank["questions"]:
+        if q["key"] == key:
+            q["answer"] = None if _is_empty(answer) else answer
+            found = True
+            break
+    if not found:
+        raise KeyError(f"question not in the answer bank: {key}")
+    return bank
+
+
+def flush_answers(changes, bank=None):
+    """Multi-save pending answers to Supabase. changes: {key: answer}.
+
+    Uses upsert so only listed keys change. Returns bank (unchanged shape).
+    """
+    if not changes:
+        return bank
+    by_key = {q["key"]: q for q in (bank or {}).get("questions", [])}
+    rows = []
+    for key, answer in changes.items():
+        q = by_key.get(key)
+        if not q:
+            continue
+        row = _meta(q)
+        row["answer"] = None if _is_empty(answer) else answer
+        row["updated_at"] = _now()
+        rows.append(row)
+    for i in range(0, len(rows), 100):
+        chunk = rows[i:i + 100]
+        if chunk:
+            supa.upsert("autobid_questions", chunk, "platform,key")
+    return bank
+
+
 def set_answer(key, answer, bank=None):
-    """Save ONE answer in Supabase (only this question changes). answer=None clears it.
-    Returns `bank` with the answer updated, or a freshly loaded bank when none is given."""
+    """Save ONE answer in Supabase immediately (only this question changes). answer=None clears it.
+    Prefer set_answer_local + flush_answers from the UI for batching."""
     rows = supa.request("PATCH", "autobid_questions", {"platform": f"eq.{PLATFORM}", "key": f"eq.{key}"},
                         {"answer": None if _is_empty(answer) else answer, "updated_at": _now()},
                         prefer="return=representation")
@@ -354,7 +404,7 @@ def sync_bank(conn, bank):
         SELECT q.* FROM questions q JOIN jobs j ON j.id = q.job_id
         WHERE j.is_active = 1 AND j.relevant = 1 AND q.required = 1 ORDER BY q.position""").fetchall()
     for q in rows:
-        if profile_key(q):
+        if profile_key(q) or is_start_date_question(q["title"] or ""):
             continue
         s = stats.setdefault(q["bank_key"], {"row": q, "jobs": set()})
         s["jobs"].add(q["job_id"])
@@ -472,6 +522,19 @@ def _resolve_rows(rows, bank, by_key):
     result = []
     for q in rows:
         item = {"q": q, "value": None, "source": None, "missing": False, "error": None}
+        # “When can you start?” / available start day / … → tomorrow (or soonest choice)
+        if is_start_date_question(q["title"] or ""):
+            raw = start_date_answer(dict(q))
+            item["source"] = "auto.start_date"
+            if _is_empty(raw):
+                item["missing"] = True
+            else:
+                item["value"], item["error"] = to_form_value(q, raw)
+                # Dropdown match failed: still send the raw label/date so fill can try
+                if item["error"] and raw:
+                    item["value"], item["error"] = str(raw), None
+            result.append(item)
+            continue
         pkey = profile_key(q)
         if pkey == "resume_file" and TAILORED_RESUME:
             # made per job by bid.py (common/resume.py) right before filling the form
