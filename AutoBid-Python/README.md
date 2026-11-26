@@ -39,5 +39,6 @@ A new platform bot needs only two functions: `list jobs` (stage 1) and `job deta
 | `supabase_db.py` | Small Supabase client (answer bank, jobs sync, settings) |
 
 **API platforms** (`claude_api`, `openai_api`) call the API through `resume_bridge.js ai-complete`, i.e. Resume Builder's own `lib/shared/ai.js` (official SDKs, the proxy from Settings, Claude server-side fallbacks). A resume is the same request as the extension's (system prompt + base profile + job, JSON schema enforced). Tokens of every call are saved in the `ai_usage` table (task `autobid-resume` / `autobid-relevance`). An empty model box means the model chosen in Resume Builder Settings.
-| `browser.py` | Per-bot Chrome profiles (`.browser-profile-ashby` / `-greenhouse` / `-wellfound`) so platforms can bid in parallel |
+| `browser.py` | Per-bot Chrome profiles (`.browser-profile-ashby` / `-greenhouse` / `-wellfound` / `-mail`) so platforms can bid in parallel; mail is for Greenhouse email security codes |
+| `mail_code.py` | Read Greenhouse 8-character security codes from Gmail in `.browser-profile-mail` |
 | `captcha.py`, `notify.py` | Bot-check detection and Windows notifications |

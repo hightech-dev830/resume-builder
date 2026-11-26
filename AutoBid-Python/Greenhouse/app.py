@@ -5,7 +5,8 @@
 Flow:
   1. Collect jobs from companies.csv (public Greenhouse boards API — no login)
   2. Fill Answers / My profile
-  3. Make resume (optional) → Apply in bot Chrome (apply link per job)
+  3. Open mail browser once → sign in to Gmail used on applications
+  4. Make resume (optional) → Apply (Greenhouse Chrome + mail Chrome for security codes)
 """
 import json
 import os
@@ -29,6 +30,12 @@ import db
 PY = sys.executable.replace("pythonw.exe", "python.exe")
 SETTINGS_PATH = BASE_DIR / "data" / "app_settings.json"
 
+STATUS_COLORS = {"applied": "#1a7f37", "needs_you": "#b35900", "failed": "#c62828",
+                 "skipped": "#777777", "ready": "#1f4fbf", "new": "#555555",
+                 "1Interview": "#7b1fa2", "2Interview": "#6a1b9a", "3Interview": "#4a148c",
+                 "Offer": "#00796b", "Rejected": "#8d6e63"}
+POSTED_WITHIN = {"all": None, "today": 0, "3d ago": 3, "1w ago": 7, "1m ago": 30}
+
 # Auto-collect clock (US Eastern). Same slots as Ashby (no 1:00 AM).
 AUTO_COLLECT_HOURS_ET = (4, 8, 10, 12, 14, 16, 18, 20)
 AUTO_SLOTS_LABEL = "4:00 · 8:00 · 10:00 · 12:00 · 14:00 · 16:00 · 18:00 · 20:00 ET"
@@ -44,6 +51,35 @@ def format_posted(raw):
     t = (raw or "").strip()
     t = re.sub(r"^(posted|viewed)\s*[·•\-:]*\s*", "", t, flags=re.I).strip()
     return t[:24] if t else ""
+
+
+def posted_date(value):
+    try:
+        return date.fromisoformat(str(value)[:10]) if value else None
+    except ValueError:
+        return None
+
+
+def job_fresh_date(row):
+    dates = [d for d in (posted_date(row["published_at"]), posted_date(row["first_seen_at"])) if d]
+    return max(dates) if dates else None
+
+
+def posted_label(d, today):
+    if not d:
+        return ""
+    days = (today - d).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 14:
+        return f"{days}d ago"
+    if days < 60:
+        return f"{days // 7}w ago"
+    if days < 365:
+        return f"{days // 30}mo ago"
+    return f"{days // 365}y ago"
 
 
 def _now_et():
@@ -105,6 +141,7 @@ def load_settings():
         s = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except Exception:
         s = {}
+    s.setdefault("companies", [])          # selected companies; empty = all
     s.setdefault("auto_collect", False)
     s.setdefault("last_collect", None)
     s.setdefault("auto_last_slot", None)
@@ -121,12 +158,84 @@ def save_settings(s):
     SETTINGS_PATH.write_text(json.dumps(s, indent=2), encoding="utf-8")
 
 
+class CompanyPicker(tk.Toplevel):
+    """Multi-select list of companies with search, Select all / Clear (Ashby-style)."""
+
+    def __init__(self, master, counts, selected, on_apply):
+        super().__init__(master)
+        self.title("Companies")
+        self.geometry("460x560")
+        self.transient(master)
+        self.grab_set()
+        self.counts = counts                      # [(name, n jobs)]
+        self.chosen = set(selected) or {n for n, _ in counts}
+        self.on_apply = on_apply
+
+        top = ttk.Frame(self, padding=10)
+        top.pack(fill="x")
+        ttk.Label(top, text="Search").pack(side="left")
+        self.q = ttk.Entry(top)
+        self.q.pack(side="left", fill="x", expand=True, padx=6)
+        self.q.bind("<KeyRelease>", lambda e: self.fill())
+        self.q.focus_set()
+
+        mid = ttk.Frame(self, padding=(10, 0))
+        mid.pack(fill="both", expand=True)
+        self.lb = tk.Listbox(mid, selectmode="multiple", exportselection=False, activestyle="none",
+                             selectbackground="#1f4fbf", font=("Segoe UI", 10))
+        sb = ttk.Scrollbar(mid, orient="vertical", command=self.lb.yview)
+        self.lb.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.lb.pack(side="left", fill="both", expand=True)
+        self.lb.bind("<<ListboxSelect>>", lambda e: self.sync())
+
+        bot = ttk.Frame(self, padding=10)
+        bot.pack(fill="x")
+        ttk.Button(bot, text="Select all", command=lambda: self.set_visible(True)).pack(side="left")
+        ttk.Button(bot, text="Clear", command=lambda: self.set_visible(False)).pack(side="left", padx=6)
+        self.info = ttk.Label(bot, text="", style="Stat.TLabel")
+        self.info.pack(side="left", padx=6)
+        ttk.Button(bot, text="Apply", style="Accent.TButton", command=self.apply).pack(side="right")
+        ttk.Button(bot, text="Cancel", command=self.destroy).pack(side="right", padx=6)
+        self.fill()
+
+    def fill(self):
+        term = self.q.get().strip().lower()
+        self.visible = [n for n, _ in self.counts if term in n.lower()]
+        cnt = dict(self.counts)
+        self.lb.delete(0, "end")
+        for i, n in enumerate(self.visible):
+            self.lb.insert("end", f"{n}  ({cnt[n]})")
+            if n in self.chosen:
+                self.lb.selection_set(i)
+        self._info()
+
+    def sync(self):
+        sel = set(self.lb.curselection())
+        for i, n in enumerate(self.visible):
+            (self.chosen.add if i in sel else self.chosen.discard)(n)
+        self._info()
+
+    def set_visible(self, on):
+        for n in self.visible:
+            (self.chosen.add if on else self.chosen.discard)(n)
+        self.fill()
+
+    def _info(self):
+        self.info.config(text=f"{len(self.chosen)} of {len(self.counts)} selected")
+
+    def apply(self):
+        everything = len(self.chosen) == len(self.counts)
+        self.on_apply([] if everything else sorted(self.chosen))
+        self.destroy()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("AutoBid · Greenhouse")
-        self.geometry("1180x780")
-        self.minsize(960, 600)
+        self.geometry("1280x800")
+        self.minsize(1000, 640)
         self.conn = db.connect()
         try:
             self.bank = bank_mod.load_bank()
@@ -141,8 +250,10 @@ class App(tk.Tk):
         self.settings = load_settings()
         self.out_q = queue.Queue()
         self.ui_q = queue.Queue()
+        self.resolved = {}
         self._checked = set()
         self.current_id = None
+        self.selected_job = None
         self._pending_collect = None   # "today" | "all" queued while Apply/etc. runs
         self._auto_busy_logged = False
         self.pending_answers = {}      # key -> answer; flushed on tab change / Sync answers
@@ -166,7 +277,7 @@ class App(tk.Tk):
         self.logbox = ScrolledText(logf, height=8, font=("Consolas", 9), wrap="word")
         self.logbox.pack(fill="both", expand=True)
 
-        self.refresh()
+        self.refresh_all()
         self._auto_info()
         self.after(150, self._drain)
         self.after(10_000, self._auto_tick)  # first auto-collect check 10 s after start
@@ -176,6 +287,13 @@ class App(tk.Tk):
         s = ttk.Style(self)
         if "vista" in s.theme_names():
             s.theme_use("vista")
+        self.option_add("*Font", ("Segoe UI", 10))
+        s.configure("Treeview", rowheight=26, font=("Segoe UI", 10))
+        s.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
+        s.configure("Title.TLabel", font=("Segoe UI Semibold", 16))
+        s.configure("Stat.TLabel", font=("Segoe UI", 10), foreground="#444")
+        s.configure("H.TLabel", font=("Segoe UI Semibold", 11))
+        s.configure("Accent.TButton", font=("Segoe UI Semibold", 10))
 
     def _header(self):
         """Title row + Ashby-style orange run bar (status + Stop after / Pause / Stop now)."""
@@ -185,6 +303,8 @@ class App(tk.Tk):
         ttk.Label(top, text="  my.greenhouse.io · Remote", foreground="#666").pack(side="left")
         ttk.Button(top, text="Open bot browser", command=self.open_bot_browser).pack(
             side="left", padx=(16, 0))
+        ttk.Button(top, text="Open mail browser", command=self.open_mail_browser).pack(
+            side="left", padx=(8, 0))
         self.stats = ttk.Label(top, text="", foreground="#444")
         self.stats.pack(side="right")
         self.auto_hdr = ttk.Label(top, text="", foreground="#1a7f37")
@@ -197,6 +317,17 @@ class App(tk.Tk):
         self.run_label = tk.Label(self.run_bar, text="", bg="#fff4e5", fg="#7a4a00",
                                   font=("Segoe UI Semibold", 10), anchor="w")
         self.run_label.pack(side="left", padx=(12, 8), pady=6)
+        # Live apply counters (this run only): success / failed / need you
+        self.run_stats = {"ok": 0, "fail": 0, "need": 0}
+        self.run_ok = tk.Label(self.run_bar, text="", bg="#fff4e5", fg="#1a7f37",
+                               font=("Segoe UI Semibold", 10))
+        self.run_fail = tk.Label(self.run_bar, text="", bg="#fff4e5", fg="#c62828",
+                                 font=("Segoe UI Semibold", 10))
+        self.run_need = tk.Label(self.run_bar, text="", bg="#fff4e5", fg="#b35900",
+                                 font=("Segoe UI Semibold", 10))
+        self.run_ok.pack(side="left", padx=(16, 4), pady=6)
+        self.run_fail.pack(side="left", padx=(4, 4), pady=6)
+        self.run_need.pack(side="left", padx=(4, 4), pady=6)
         tk.Label(self.run_bar, text="", bg="#fff4e5").pack(side="left", fill="x", expand=True)
         self.b_stop_now = tk.Button(
             self.run_bar, text="■  Stop now", command=self.stop,
@@ -220,77 +351,167 @@ class App(tk.Tk):
         bar = ttk.Frame(tab)
         bar.pack(fill="x", pady=(0, 6))
         ttk.Label(bar, text="Show").pack(side="left")
-        self.f_rel = ttk.Combobox(bar, width=12, state="readonly",
-                                  values=["relevant", "all", "not relevant"])
-        self.f_rel.set("relevant")
-        self.f_rel.pack(side="left", padx=4)
-        self.f_rel.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
-        ttk.Label(bar, text="Status").pack(side="left", padx=(10, 0))
+        self.f_relevant = ttk.Combobox(bar, width=13, state="readonly",
+                                       values=["relevant", "not relevant", "all"])
+        self.f_relevant.set("relevant")
+        self.f_relevant.pack(side="left", padx=(4, 12))
+        self.f_relevant.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
+        ttk.Label(bar, text="Status").pack(side="left")
         self.f_status = ttk.Combobox(bar, width=12, state="readonly",
-                                     values=["all"] + list(db.STATUSES))
+                                     values=["all", "applied + later"] + db.STATUSES)
         self.f_status.set("all")
-        self.f_status.pack(side="left", padx=4)
+        self.f_status.pack(side="left", padx=(4, 12))
         self.f_status.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
-        ttk.Label(bar, text="Posted").pack(side="left", padx=(10, 0))
-        self.f_posted = ttk.Combobox(bar, width=10, state="readonly",
-                                     values=["all", "today"])
+        self.company_btn = ttk.Button(bar, text="Companies: all ▾", width=24,
+                                      command=self.pick_companies)
+        self.company_btn.pack(side="left", padx=(0, 12))
+        ttk.Label(bar, text="Posted").pack(side="left")
+        self.f_posted = ttk.Combobox(bar, width=9, state="readonly", values=list(POSTED_WITHIN))
         self.f_posted.set("all")
-        self.f_posted.pack(side="left", padx=4)
+        self.f_posted.pack(side="left", padx=(4, 6))
         self.f_posted.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
-        ttk.Button(bar, text="Today's jobs", command=self.show_todays_jobs).pack(
-            side="left", padx=(0, 8))
-        self.job_count = ttk.Label(bar, text="", foreground="#666")
-        self.job_count.pack(side="left", padx=8)
+        ttk.Button(bar, text="Today's jobs", style="Accent.TButton",
+                   command=self.show_todays_jobs).pack(side="left", padx=(0, 12))
         ttk.Button(bar, text="Collect jobs", command=self.collect).pack(side="right")
         ttk.Button(bar, text="Collect today's jobs", command=self.collect_today).pack(
             side="right", padx=4)
-        ttk.Button(bar, text="Collect (limit 100)",
-                   command=lambda: self.run_script(
-                       ["collect.py", "--limit", "100", "--no-ai"],
-                       "Collect (100)")).pack(side="right", padx=4)
+        ttk.Button(bar, text="Fetch", command=self.fetch_details).pack(side="right", padx=4)
 
-        # Button bar first (bottom) so the list always keeps scrollbars
-        btns = ttk.Frame(tab)
-        btns.pack(side="bottom", fill="x", pady=(6, 0))
-        ttk.Button(btns, text="Select all shown", command=self.select_all).pack(side="left")
-        ttk.Button(btns, text="Clear", command=self.clear_sel).pack(side="left", padx=4)
-        ttk.Button(btns, text="Open job", command=self.open_job).pack(side="left", padx=4)
-        ttk.Button(btns, text="Open Apply link", command=self.open_apply).pack(side="left", padx=4)
-        ttk.Label(btns, text="Click column headers to sort", foreground="#888").pack(
-            side="left", padx=12)
-        ttk.Button(btns, text="Make resume", command=self.make_resume_selected).pack(side="right", padx=4)
-        ttk.Button(btns, text="Dry run", command=lambda: self.apply(True)).pack(side="right", padx=4)
-        ttk.Button(btns, text="Apply", command=lambda: self.apply(False)).pack(side="right")
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, text="Answers").pack(side="left")
+        self.f_answers = ttk.Combobox(bar, width=28, state="readonly", values=[
+            # "✓ all (ready to apply)" includes jobs whose only gaps AI will write (salary, essays, …)
+            "any", "✓ all (ready to apply)", "missing answers", "AI essay needed", "no details yet"])
+        self.f_answers.set("any")
+        self.f_answers.pack(side="left", padx=(4, 12))
+        self.f_answers.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
+        ttk.Label(bar, text="Resume").pack(side="left")
+        self.f_resume = ttk.Combobox(bar, width=13, state="readonly",
+                                     values=["any", "✓ ready", "not made yet"])
+        self.f_resume.set("any")
+        self.f_resume.pack(side="left", padx=(4, 12))
+        self.f_resume.bind("<<ComboboxSelected>>", lambda e: self.load_jobs())
+        ttk.Label(bar, text="Search").pack(side="left")
+        self.f_search = ttk.Entry(bar, width=30)
+        self.f_search.pack(side="left", padx=4)
+        self.f_search.bind("<KeyRelease>", lambda e: self.load_jobs())
+        self.job_count = ttk.Label(bar, text="", style="Stat.TLabel")
+        self.job_count.pack(side="left", padx=12)
 
-        listf = ttk.Frame(tab)
-        listf.pack(fill="both", expand=True)
-        cols = ("chk", "status", "company", "title", "posted", "pay", "apply", "resume")
-        self.jobs = ttk.Treeview(listf, columns=cols, show="headings", selectmode="extended")
-        self.job_headings = {}
-        self.sort_col, self.sort_desc = "posted", True
+        split = ttk.PanedWindow(tab, orient="horizontal")
+        split.pack(fill="both", expand=True)
+
+        left = ttk.Frame(split)
+        cols = ("chk", "status", "company", "title", "posted", "location", "pay", "ready",
+                "resume", "apply", "rel")
+        self.jobs = ttk.Treeview(left, columns=cols, show="headings", selectmode="extended")
+        self.jobs.bind("<Control-a>", lambda e: (self.select_all_jobs(), "break")[1])
         self.jobs.heading("chk", text="☐", command=self.toggle_all_shown)
         self.jobs.column("chk", width=34, minwidth=34, anchor="center", stretch=False)
-        for c, t, w in [("status", "Status", 80), ("company", "Company", 130),
-                        ("title", "Title", 280), ("posted", "Posted", 110),
-                        ("pay", "Pay", 120), ("apply", "Apply", 55), ("resume", "Resume", 55)]:
-            self.job_headings[c] = t
-            self.jobs.heading(c, text=t + (" ⇅" if c != self.sort_col else ""),
-                              command=lambda c=c: self.sort_jobs(c, toggle=True))
-            self.jobs.column(c, width=w, stretch=c == "title")
-        vsb = ttk.Scrollbar(listf, orient="vertical", command=self.jobs.yview)
-        hsb = ttk.Scrollbar(listf, orient="horizontal", command=self.jobs.xview)
+        self.jobs.tag_configure("current", background="#fff4c2")
+        self.jobs.bind("<Button-1>", self._on_job_click)
+        self.jobs.bind("<space>", lambda e: (self._toggle(self.current_id), "break")[1])
+        self.jobs.bind("<Up>", lambda e: (self._move_view(-1), "break")[1])
+        self.jobs.bind("<Down>", lambda e: (self._move_view(1), "break")[1])
+        self.current_id = None
+        self._checked = set()
+        self.job_headings = {}
+        self.sort_col, self.sort_desc = None, False
+        self.posted_dates = {}
+        for c, label, w in [
+                ("status", "Status", 75), ("company", "Company", 90), ("title", "Title", 200),
+                ("posted", "Posted", 70), ("location", "Location", 110), ("pay", "Pay", 100),
+                ("ready", "Answers", 90), ("resume", "Resume", 52), ("apply", "Apply", 72),
+                ("rel", "Relevant", 70)]:
+            self.job_headings[c] = label
+            self.jobs.heading(c, text=label, command=lambda c=c: self.sort_jobs(c, toggle=True))
+            self.jobs.column(c, width=w, anchor="w",
+                             stretch=c in ("title", "location"))
+        for st, col in STATUS_COLORS.items():
+            self.jobs.tag_configure(st, foreground=col)
+        vsb = ttk.Scrollbar(left, orient="vertical", command=self.jobs.yview)
+        hsb = ttk.Scrollbar(left, orient="horizontal", command=self.jobs.xview)
         self.jobs.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         self.jobs.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
-        listf.rowconfigure(0, weight=1)
-        listf.columnconfigure(0, weight=1)
-        self.jobs.bind("<Button-1>", self._on_click)
-        self.jobs.bind("<Control-a>", lambda e: (self.select_all(), "break")[1])
-        self._update_job_headings()
+        left.rowconfigure(0, weight=1)
+        left.columnconfigure(0, weight=1)
+        self.jobs.bind("<<TreeviewSelect>>", lambda e: self._sync_checks())
+        split.add(left, weight=3)
+
+        right = ttk.Frame(split, padding=(10, 0, 0, 0))
+        self.d_title = ttk.Label(right, text="Select a job", style="H.TLabel", wraplength=480)
+        self.d_title.pack(anchor="w")
+        self.d_meta = ttk.Label(right, text="", style="Stat.TLabel", wraplength=480, justify="left")
+        self.d_meta.pack(anchor="w", pady=(2, 6))
+        selbar = ttk.Frame(right)
+        selbar.pack(fill="x", pady=(0, 4))
+        ttk.Button(selbar, text="Select all shown", command=self.select_all_jobs).pack(side="right")
+        ttk.Button(selbar, text="Clear selection", command=self.clear_job_selection).pack(
+            side="right", padx=4)
+        self.sel_info = ttk.Label(selbar, text="", foreground="#1f4fbf", justify="left")
+        self.sel_info.pack(side="left", fill="x", expand=True)
+        self.sel_info.bind("<Configure>",
+                           lambda e: self.sel_info.config(wraplength=max(120, e.width - 4)))
+        btns = ttk.Frame(right)
+        btns.pack(fill="x", pady=(0, 2))
+        ttk.Button(btns, text="Open job page", command=self.open_job).pack(side="left")
+        ttk.Button(btns, text="Open Apply link", command=self.open_apply).pack(side="left", padx=4)
+        self.b_make = ttk.Button(btns, text="Make resume", command=self.make_resume_selected)
+        self.b_make.pack(side="left", padx=4)
+        ttk.Button(btns, text="Open resume", command=self.open_resume).pack(side="left", padx=4)
+        btns2 = ttk.Frame(right)
+        btns2.pack(fill="x", pady=(0, 6))
+        self.b_dry = ttk.Button(btns2, text="Dry run", command=lambda: self.apply(True))
+        self.b_dry.pack(side="left")
+        self.b_apply = ttk.Button(btns2, text="Apply", style="Accent.TButton",
+                                  command=lambda: self.apply(False))
+        self.b_apply.pack(side="left", padx=4)
+        self.b_answers_sel = ttk.Button(btns2, text="Answers for selected",
+                                        command=self.show_answers_for_selected)
+        self.b_answers_sel.pack(side="left")
+        stbar = ttk.Frame(right)
+        stbar.pack(fill="x", pady=(0, 6))
+        ttk.Label(stbar, text="Status").pack(side="left")
+        self.d_status = ttk.Combobox(stbar, width=12, state="readonly", values=db.STATUSES)
+        self.d_status.pack(side="left", padx=4)
+        ttk.Button(stbar, text="Set status", command=self.set_status_selected).pack(side="left")
+        st_hint = ttk.Label(stbar, text="ticked jobs, else the one shown",
+                            style="Stat.TLabel", justify="left")
+        st_hint.pack(side="left", padx=6, fill="x", expand=True)
+
+        self.d_tabs = ttk.Notebook(right)
+        self.d_tabs.pack(fill="both", expand=True)
+        self.d_overview = ScrolledText(self.d_tabs, wrap="word", font=("Segoe UI", 10), padx=8,
+                                       pady=6, relief="flat", borderwidth=0)
+        self.d_tabs.add(self.d_overview, text="Overview")
+        self.d_overview.tag_configure("h", font=("Segoe UI Semibold", 11), spacing1=8, spacing3=2)
+        self.d_overview.tag_configure("b", font=("Segoe UI Semibold", 10))
+        app_frame = ttk.Frame(self.d_tabs)
+        self.d_app = ttk.Treeview(app_frame, columns=("q", "a", "src"), show="headings")
+        for c, label, w in [("q", "Required question", 220), ("a", "Answer the bot will use", 170),
+                            ("src", "From", 80)]:
+            self.d_app.heading(c, text=label)
+            self.d_app.column(c, width=w, minwidth=60, anchor="w", stretch=c != "src")
+        self.d_app.tag_configure("missing", foreground="#c62828")
+        self.d_app.tag_configure("ai", foreground="#b35900")
+        ttk.Label(app_frame, text="Double-click a question to answer it in the Answers tab.",
+                  style="Stat.TLabel").pack(side="bottom", anchor="w", pady=(4, 0))
+        asb = ttk.Scrollbar(app_frame, orient="vertical", command=self.d_app.yview)
+        self.d_app.configure(yscrollcommand=asb.set)
+        asb.pack(side="right", fill="y")
+        self.d_app.pack(side="left", fill="both", expand=True)
+        self.d_app.bind("<Double-1>", self.answer_from_job)
+        self.d_app.bind("<Return>", self.answer_from_job)
+        self.d_app_items = {}
+        self.d_tabs.add(app_frame, text="Application")
+        split.add(right, weight=2)
 
     def _answers_tab(self):
         tab = ttk.Frame(self.tabs, padding=8)
+        self.answers_tab = tab
         self.tabs.add(tab, text="  Answers  ")
         split = ttk.PanedWindow(tab, orient="horizontal")
         split.pack(fill="both", expand=True)
@@ -299,7 +520,10 @@ class App(tk.Tk):
         self.p_entries = {}
         fields = [
             ("name", "Full Name"), ("first_name", "First Name"), ("last_name", "Last Name"),
-            ("email", "Email"), ("phone", "Phone"), ("location", "Location"),
+            ("email", "Email"), ("phone", "Phone"),
+            ("location", "Location (City, State, Country)"),
+            ("address", "Mailing address"),
+            ("salary", "Desired / target salary (USD)"),
             ("linkedin", "LinkedIn URL"), ("github", "GitHub URL"), ("website", "Website"),
             ("authorized_us", "Authorized to work in US (true/false)"),
             ("sponsorship", "Need visa sponsorship (true/false)"),
@@ -311,20 +535,42 @@ class App(tk.Tk):
             e.insert(0, self.bank["profile"].get(key) or "")
             self.p_entries[key] = e
         box.columnconfigure(1, weight=1)
-        ttk.Button(box, text="Save profile", command=self.save_profile).grid(
-            row=len(fields), column=1, sticky="e", pady=8)
+        ttk.Button(box, text="Save profile", style="Accent.TButton",
+                   command=self.save_profile).grid(row=len(fields), column=1, sticky="e", pady=8)
+        self.p_saved = ttk.Label(box, text="", foreground="#1a7f37")
+        self.p_saved.grid(row=len(fields) + 1, column=1, sticky="e")
         ttk.Label(box, foreground="#666", wraplength=320, text=(
             "Profile is shared via Supabase keys; answer bank rows use platform=greenhouse "
             "(independent of Ashby)."
-        )).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        )).grid(row=len(fields) + 2, column=0, columnspan=2, sticky="w", pady=(6, 0))
         split.add(box, weight=1)
 
         right = ttk.Frame(split, padding=(10, 0, 0, 0))
-        ttk.Label(right, text="Required questions (Greenhouse bank)",
-                  font=("Segoe UI Semibold", 10)).pack(anchor="w")
+        top = ttk.Frame(right)
+        top.pack(fill="x")
+        ttk.Label(top, text="Required questions (Greenhouse bank)", style="H.TLabel").pack(
+            side="left")
+        self.q_only_open = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="only unanswered", variable=self.q_only_open,
+                        command=self.load_bank_list).pack(side="right")
+        ttk.Button(top, text="Import from backup…",
+                   command=self.import_answers_backup).pack(side="right", padx=(0, 8))
+        self.q_kind = ttk.Combobox(top, state="readonly", width=24,
+                                     values=["You answer", "AI writes (text / essays)", "All required"])
+        self.q_kind.set("You answer")
+        self.q_kind.bind("<<ComboboxSelected>>", lambda e: self.load_bank_list())
+        self.q_kind.pack(side="right", padx=(0, 12))
+        self.answers_filter_ids = None
+        self.answers_filter_keys = None
+        self.q_filter_bar = ttk.Frame(right)
+        self.q_filter_lbl = ttk.Label(self.q_filter_bar, text="", foreground="#1f4fbf")
+        self.q_filter_lbl.pack(side="left")
+        ttk.Button(self.q_filter_bar, text="Show all answers",
+                   command=self.clear_answers_job_filter).pack(side="right")
+
         sortbar = ttk.Frame(right)
-        sortbar.pack(fill="x", pady=(4, 0))
-        ttk.Label(sortbar, text="Sort by", foreground="#666").pack(side="left")
+        sortbar.pack(fill="x", pady=(2, 0))
+        ttk.Label(sortbar, text="Sort by", style="Stat.TLabel").pack(side="left")
         self.q_sort_pick = ttk.Combobox(
             sortbar, width=14, state="readonly",
             values=["Required in", "Type", "Question", "Answer"])
@@ -334,26 +580,24 @@ class App(tk.Tk):
         self.q_sort_dir_btn = ttk.Button(sortbar, text="▼ High→Low", width=12,
                                          command=self._q_toggle_sort_dir)
         self.q_sort_dir_btn.pack(side="left", padx=4)
-        ttk.Label(sortbar, text="Search", foreground="#666").pack(side="left", padx=(16, 0))
+        ttk.Label(sortbar, text="Search", style="Stat.TLabel").pack(side="left", padx=(16, 0))
         self.q_search = ttk.Entry(sortbar, width=28)
         self.q_search.pack(side="left", padx=4)
         self.q_search.bind("<KeyRelease>", self._on_q_search)
         self.q_search.bind("<Escape>", lambda e: self._clear_q_search())
         self._q_search_after = None
-        self.q_only_open = tk.BooleanVar(value=False)
-        ttk.Checkbutton(sortbar, text="only unanswered", variable=self.q_only_open,
-                        command=self.load_bank_list).pack(side="right")
-        self.q_count = ttk.Label(right, text="", foreground="#666")
-        self.q_count.pack(anchor="w")
 
+        self.q_count = ttk.Label(right, text="", style="Stat.TLabel")
+        self.q_count.pack(anchor="w")
         qframe = ttk.Frame(right)
         cols = ("jobs", "type", "question", "answer")
         self.qlist = ttk.Treeview(qframe, columns=cols, show="headings", selectmode="browse",
-                                  height=14)
+                                  height=12)
         self.q_headings = {
             "jobs": "Required in", "type": "Type", "question": "Question", "answer": "Answer"}
         self.q_sort_col, self.q_sort_desc = "jobs", True
-        for c, label, w in [("jobs", "Required in", 90), ("type", "Type", 100),
+        self._q_row_meta = {}
+        for c, label, w in [("jobs", "Required in", 80), ("type", "Type", 100),
                             ("question", "Question", 360), ("answer", "Answer", 180)]:
             self.qlist.heading(c, text=label,
                                command=lambda c=c: self.sort_questions(c, toggle=True))
@@ -361,10 +605,8 @@ class App(tk.Tk):
         self.qlist.tag_configure("open", foreground="#c62828")
         qsb = ttk.Scrollbar(qframe, orient="vertical", command=self.qlist.yview)
         self.qlist.configure(yscrollcommand=qsb.set)
-        self.qlist.grid(row=0, column=0, sticky="nsew")
-        qsb.grid(row=0, column=1, sticky="ns")
-        qframe.rowconfigure(0, weight=1)
-        qframe.columnconfigure(0, weight=1)
+        qsb.pack(side="right", fill="y")
+        self.qlist.pack(side="left", fill="both", expand=True)
         self.qlist.bind("<<TreeviewSelect>>", lambda e: self.edit_question())
 
         ed = ttk.LabelFrame(right, text="  Answer (local until Sync / tab change)  ", padding=8)
@@ -376,9 +618,12 @@ class App(tk.Tk):
             side="right", padx=(8, 0))
         self.e_saved = ttk.Label(eb, text="", foreground="#1a7f37")
         self.e_saved.pack(side="right", padx=10)
+        self.back_btn = ttk.Button(eb, text="← Back to job", command=self.back_to_job)
         self.e_question = ttk.Label(ed, text="Select a question above.", wraplength=700,
                                     justify="left")
         self.e_question.pack(anchor="w")
+        self.e_note = ttk.Label(ed, text="", style="Stat.TLabel", wraplength=700, justify="left")
+        self.e_note.pack(anchor="w")
         self.e_holder = ttk.Frame(ed)
         self.e_holder.pack(fill="x", pady=6)
         self._answer_ignore = False
@@ -393,11 +638,12 @@ class App(tk.Tk):
         tab = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(tab, text="  Run  ")
         ttk.Label(tab, text=(
-            "1) Collect jobs from companies.csv (public Greenhouse boards API — no login)\n"
+            "1) Collect: boards API list → descriptions + apply-form questions (?questions=true)\n"
             "2) AI tab → resume platform (Claude Code / API / …) — independent of Ashby\n"
-            "3) Fill Answers / My profile → Select jobs → Make resume → Apply\n"
-            "4) Apply opens each job’s apply link in bot Chrome (sign in only if a board asks)\n"
-            "5) Apply uploads the tailored PDF and submits"
+            "3) Fill Answers / My profile (Jobs Answers column updates after Collect)\n"
+            "4) Open mail browser once → sign in to Gmail used on applications → close it\n"
+            "5) Select jobs → Make resume → Apply (job-boards …/jobs/<id>)\n"
+            "6) TWO Chromes: Greenhouse (form) + mail (8-char security codes from Gmail)"
         ), justify="left").pack(anchor="w")
         row = ttk.Frame(tab, padding=(0, 12, 0, 0))
         row.pack(fill="x")
@@ -432,108 +678,450 @@ class App(tk.Tk):
         ), foreground="#666", wraplength=900, justify="left").grid(
             row=2, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
-    def _job_is_today(self, row):
-        """Posted label looks like today, or first seen today (UTC date)."""
-        try:
-            from greenhouse_browser import posted_looks_like_today
-            if posted_looks_like_today(row["published_at"] or ""):
-                return True
-        except Exception:
-            pass
-        # first_seen_at ISO date == today
-        fs = (row["first_seen_at"] or "")[:10]
-        from datetime import date
-        return fs == date.today().isoformat()
-
     def load_jobs(self):
+        status = self.f_status.get()
+        term = self.f_search.get().strip().lower()
         sql = "SELECT * FROM jobs WHERE is_active=1"
-        if self.f_rel.get() == "relevant":
+        params = []
+        show = self.f_relevant.get()
+        if show == "relevant":
             sql += " AND relevant=1"
-        elif self.f_rel.get() == "not relevant":
+        elif show == "not relevant":
             sql += " AND relevant=0"
-        st = self.f_status.get() if getattr(self, "f_status", None) else "all"
-        if st and st != "all":
+        if status == "applied + later":
+            sql += f" AND status IN ({','.join('?' * len(db.APPLIED_STATUSES))})"
+            params += list(db.APPLIED_STATUSES)
+        elif status != "all":
             sql += " AND status=?"
-            rows = self.conn.execute(sql + " ORDER BY COALESCE(published_at, first_seen_at) DESC",
-                                     (st,)).fetchall()
-        else:
-            rows = self.conn.execute(
-                sql + " ORDER BY COALESCE(published_at, first_seen_at) DESC").fetchall()
-        if self.f_posted.get() == "today":
-            rows = [r for r in rows if self._job_is_today(r)]
-        keep = set(self.jobs.selection())
+            params.append(status)
+        chosen = self.settings.get("companies") or []
+        if chosen:
+            sql += (f" AND COALESCE(NULLIF(company,''), org) IN "
+                    f"({','.join('?' * len(chosen))})")
+            params += chosen
+        rows = self.conn.execute(
+            sql + " ORDER BY COALESCE(published_at, first_seen_at) DESC", params).fetchall()
+        if getattr(self, "company_btn", None):
+            self.company_btn.config(
+                text="Companies: all ▾" if not chosen else (
+                    f"{chosen[0][:18]} ▾" if len(chosen) == 1
+                    else f"Companies: {len(chosen)} ▾"))
+        keep = self.jobs.selection()
         self.jobs.delete(*self.jobs.get_children())
+        answers_filter = self.f_answers.get()
+        max_age = POSTED_WITHIN[self.f_posted.get()]
+        today = date.today()
+        self.posted_dates = {}
         for r in rows:
-            posted = format_posted(r["published_at"]) or (r["first_seen_at"] or "")[:10]
-            has_resume = bool(r["resume_path"] and Path(r["resume_path"]).is_file())
-            self.jobs.insert("", "end", iid=r["id"], values=(
-                "☑" if r["id"] in self._checked else "☐",
-                r["status"], r["company"] or r["org"], r["title"],
-                posted, r["compensation"] or "",
-                "yes" if r["apply_url"] else "—",
-                "✓" if has_resume else "—"))
-        for i in keep:
-            if self.jobs.exists(i):
-                self.jobs.selection_add(i)
-        if self.sort_col:
-            self.sort_jobs(self.sort_col, toggle=False)
-        n = self.conn.execute(
-            "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND relevant=1").fetchone()["c"]
-        ready = self.conn.execute(
-            "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND relevant=1 AND status='ready'"
-        ).fetchone()["c"]
-        applied = self.conn.execute(
-            "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND status='applied'"
-        ).fetchone()["c"]
-        shown = len(rows)
-        today_bit = f" · {shown} today" if self.f_posted.get() == "today" else f" · {shown} shown"
-        self.stats.config(
-            text=f"{n} relevant · {ready} ready · {applied} applied · "
-                 f"{len(self._checked)} selected{today_bit}")
-        if getattr(self, "job_count", None):
-            self.job_count.config(text=f"{shown} in list")
-
-    def _update_job_headings(self):
-        for c, label in self.job_headings.items():
-            if self.sort_col == c:
-                arrow = " ▼" if self.sort_desc else " ▲"
+            company = r["company"] or r["org"]
+            loc = r["location"] or ""
+            wpt = r["workplace_type"] or ""
+            if term and term not in f"{company} {r['title']} {loc} {wpt}".lower():
+                continue
+            posted = job_fresh_date(r)
+            if max_age is not None and (posted is None or (today - posted).days > max_age):
+                continue
+            self.posted_dates[r["id"]] = posted
+            missing = bank_mod.blocking(self.resolved.get(r["id"], []))
+            if not r["relevant"]:
+                ready, state = "—", "none"
+            elif r["id"] not in self.resolved:
+                ready, state = "no details yet", "no details"
+            elif not missing:
+                ready, state = "✓ all", "all"
+            elif all(bank_mod.ai_writable(i) for i in missing):
+                ready, state = (f"AI writes ({len(missing)})", "essay")
             else:
-                arrow = " ⇅"
-            self.jobs.heading(c, text=label + arrow)
+                ready, state = f"{len(missing)} missing", "missing"
+            if answers_filter != "any":
+                want = {"✓ all (ready to apply)": "all", "missing answers": "missing",
+                        "AI essay needed": "essay", "no details yet": "no details"}[answers_filter]
+                if want == "all":
+                    if state not in ("all", "essay"):
+                        continue
+                elif want != state:
+                    continue
+            has_resume = "✓" if r["resume_path"] and os.path.isfile(r["resume_path"]) else ""
+            resume_filter = self.f_resume.get()
+            if (resume_filter == "✓ ready" and not has_resume) or (
+                    resume_filter == "not made yet" and has_resume):
+                continue
+            apply = (r["apply_url"] or r["job_url"] or "").strip()
+            if apply and "greenhouse.io" in apply:
+                apply_cell = "…/" + apply.split("greenhouse.io/", 1)[-1][:40]
+            else:
+                apply_cell = (apply[:36] + "…") if len(apply) > 36 else (apply or "—")
+            rel = {1: "yes", 0: "no"}.get(r["relevant"], "?")
+            if r["relevance_by"]:
+                rel += f" ({r['relevance_by']})"
+            loc_show = loc[:40] if loc else (wpt or "—")
+            self.jobs.insert("", "end", iid=r["id"], tags=(r["status"],), values=(
+                "☐", r["status"], company, r["title"], posted_label(posted, today),
+                loc_show, (r["compensation"] or "")[:50], ready, has_resume, apply_cell, rel))
+        if self.sort_col:
+            self.sort_jobs(self.sort_col)
+        shown = len(self.jobs.get_children())
+        today_n = sum(1 for d in self.posted_dates.values() if d == today)
+        if self.f_posted.get() == "today":
+            self.job_count.config(text=f"{shown:,} today's jobs shown")
+        else:
+            self.job_count.config(text=f"{shown:,} shown · {today_n:,} today in this list")
+        self._checked = set()
+        still_there = [i for i in keep if self.jobs.exists(i)]
+        if still_there:
+            self.jobs.selection_set(still_there)
+        if self.current_id and self.jobs.exists(self.current_id):
+            self._mark_current(self.current_id)
+        self._sync_checks()
+        self.update_summary()
+
+    def pick_companies(self):
+        """Multi-select company filter (same as Ashby)."""
+        counts = [(r["company"], r["n"]) for r in self.conn.execute(
+            "SELECT COALESCE(NULLIF(company,''), org) AS company, COUNT(*) n "
+            "FROM jobs WHERE is_active=1 AND relevant=1 "
+            "AND COALESCE(NULLIF(company,''), org) IS NOT NULL "
+            "GROUP BY 1 ORDER BY n DESC, company")]
+
+        def apply(selection):
+            self.settings["companies"] = selection
+            save_settings(self.settings)
+            self.load_jobs()
+            self.update_summary()
+
+        CompanyPicker(self, counts, self.settings.get("companies") or [], apply)
+
+    @staticmethod
+    def _sort_key(col, value):
+        if col == "pay":
+            m = re.search(r"(\d[\d,.]*)\s*([KkMm]?)", value or "")
+            if not m:
+                return -1
+            n = float(m.group(1).replace(",", ""))
+            return n * {"k": 1e3, "m": 1e6}.get(m.group(2).lower(), 1)
+        if col == "ready":
+            return 0 if (value or "").startswith("✓") else int(re.sub(r"\D", "", value or "") or 99)
+        return (value or "").lower()
 
     def sort_jobs(self, col, toggle=False):
-        """Click a Jobs column header to sort; click again to reverse."""
         if toggle:
             self.sort_desc = (not self.sort_desc) if self.sort_col == col else False
             self.sort_col = col
-        if col == "pay":
-            def key(i):
-                v = self.jobs.set(i, col) or ""
-                import re as _re
-                m = _re.search(r"(\d[\d,.]*)", v)
-                return float(m.group(1).replace(",", "")) if m else -1
+        if col == "posted":
+            key = lambda i: (self.posted_dates.get(i) or date.min).toordinal()
         else:
-            def key(i):
-                return (self.jobs.set(i, col) or "").lower()
+            key = lambda i: self._sort_key(col, self.jobs.set(i, col))
         rows = [(key(i), i) for i in self.jobs.get_children()]
         rows.sort(reverse=self.sort_desc)
         for n, (_, iid) in enumerate(rows):
             self.jobs.move(iid, "", n)
-        self._update_job_headings()
+        for c, label in self.job_headings.items():
+            arrow = (" ▼" if self.sort_desc else " ▲") if c == col else ""
+            self.jobs.heading(c, text=label + arrow)
+
+    def selected_ids(self):
+        ticked = list(self.jobs.selection())
+        if ticked:
+            return ticked
+        return [self.current_id] if self.current_id and self.jobs.exists(self.current_id) else []
+
+    def select_all_jobs(self):
+        self.jobs.selection_set(self.jobs.get_children())
+
+    def clear_job_selection(self):
+        self.jobs.selection_remove(self.jobs.selection())
 
     def toggle_all_shown(self):
         rows = self.jobs.get_children()
-        if rows and all(i in self._checked for i in rows):
-            self._checked.clear()
+        if rows and len(self.jobs.selection()) == len(rows):
+            self.clear_job_selection()
         else:
-            self._checked.update(rows)
+            self.select_all_jobs()
+
+    def _toggle(self, row):
+        if row and self.jobs.exists(row):
+            self.jobs.selection_toggle(row)
+
+    def _on_job_click(self, event):
+        if self.jobs.identify_region(event.x, event.y) == "heading":
+            return None
+        row = self.jobs.identify_row(event.y)
+        if not row:
+            return None
+        if event.state & 0x0005:
+            self.after(1, lambda: self.view_job(row))
+            return None
+        if self.jobs.identify_column(event.x) == "#1":
+            self._toggle(row)
+            if not self.current_id:
+                self.view_job(row)
+            return "break"
+        self.view_job(row)
+        return "break"
+
+    def _move_view(self, step):
+        rows = self.jobs.get_children()
+        if not rows:
+            return
+        i = rows.index(self.current_id) + step if self.current_id in rows else 0
+        self.view_job(rows[max(0, min(len(rows) - 1, i))])
+
+    def _mark_current(self, row):
+        old = self.current_id
+        if old and self.jobs.exists(old):
+            self.jobs.item(old, tags=tuple(t for t in self.jobs.item(old, "tags") if t != "current"))
+        self.current_id = row
+        self.jobs.item(row, tags=tuple(self.jobs.item(row, "tags")) + ("current",))
+
+    def view_job(self, row):
+        self._mark_current(row)
+        self.jobs.focus(row)
+        self.jobs.see(row)
+        self.show_job(row)
+
+    def _sync_checks(self):
+        now = set(self.jobs.selection())
+        for row in now ^ self._checked:
+            if self.jobs.exists(row):
+                self.jobs.set(row, "chk", "☑" if row in now else "☐")
+        self._checked = now
+        rows = len(self.jobs.get_children())
+        self.jobs.heading("chk", text="☑" if rows and len(now) == rows else ("◪" if now else "☐"))
+        self._update_selection_buttons()
+
+    def _update_selection_buttons(self):
+        n = len(self.jobs.selection())
+        suffix = f" ({n})" if n > 1 else ""
+        self.b_make.config(text=f"Make resume{suffix}")
+        self.b_dry.config(text=f"Dry run{suffix}")
+        self.b_apply.config(text=f"Apply{suffix}")
+        self.b_answers_sel.config(text=f"Answers for selected{suffix}")
+        self.sel_info.config(
+            text=f"☑ {n} job{'s' if n != 1 else ''} ticked" if n else
+            "Tick ☐ jobs to work on several at once (header ☐ = all shown)")
+
+    def show_job(self, shown=None):
+        shown = shown or self.current_id
+        if not shown or not self.jobs.exists(shown):
+            return
+        job = self.conn.execute("SELECT * FROM jobs WHERE id=?", (shown,)).fetchone()
+        if not job:
+            return
+        self.selected_job = job
+        self.d_status.set(job["status"] or "")
+        self.d_title.config(text=f"{job['title']}  ·  {job['company'] or job['org']}")
+        locs = json.loads(job["locations_all"] or "[]") if job["locations_all"] else []
+        meta = (f"{job['workplace_type'] or '—'}  ·  {job['location'] or '—'}\n"
+                f"{', '.join(locs) if locs else ''}\n"
+                f"{(job['compensation'] or '').replace(chr(10), '   ·   ')}\n"
+                f"Status: {job['status']}" + (f"  —  {job['note']}" if job["note"] else ""))
+        apply = job["apply_url"] or job["job_url"] or ""
+        if apply:
+            meta += f"\nApply: {apply}"
+        self.d_meta.config(text=meta.strip())
+
+        t = self.d_overview
+        t.config(state="normal")
+        t.delete("1.0", "end")
+        desc = job["description"] or job["description_html"] or ""
+        if job["description_html"] and not job["description"]:
+            desc = re.sub(r"<[^>]+>", " ", job["description_html"])
+        for line in desc.splitlines():
+            if line.startswith("#"):
+                t.insert("end", line.lstrip("# ") + "\n", "h")
+                continue
+            parts = line.split("**")
+            for i, part in enumerate(parts):
+                t.insert("end", part, "b" if i % 2 else "")
+            t.insert("end", "\n")
+        t.config(state="disabled")
+
+        self.d_app.delete(*self.d_app.get_children())
+        self.d_app_items = {}
+        if shown not in self.resolved:
+            return
+        for i in bank_mod.resolve_job(self.conn, job["id"], self.bank):
+            q = i["q"]
+            self.d_app_items[q["id"]] = i
+            if i.get("error"):
+                ans, tag = f"!! {i['error']}", "missing"
+            elif i["missing"]:
+                if bank_mod.ai_writable(i):
+                    ans, tag = "(AI will write)", "ai"
+                elif (i["source"] or "").startswith("profile"):
+                    ans, tag = "MISSING - fill My profile", "missing"
+                else:
+                    ans, tag = "MISSING - need your answer", "missing"
+            else:
+                v = i["value"]
+                ans = ("Yes" if v else "No") if isinstance(v, bool) else str(v)
+                tag = ""
+            self.d_app.insert("", "end", iid=q["id"],
+                              values=(q["title"], ans[:200], i["source"] or ""), tags=(tag,))
+
+    def answer_from_job(self, _event=None):
+        sel = self.d_app.selection()
+        item = self.d_app_items.get(sel[0]) if sel else None
+        if not item:
+            return
+        q, source = item["q"], item["source"] or ""
+        if source and source.startswith("tailored"):
+            messagebox.showinfo("Resume", "The resume is tailored per job by Make resume / Apply.")
+            return
+        self.return_to_job = self.selected_job["id"] if self.selected_job else None
+        self.back_btn.pack(side="left")
+        self.tabs.select(self.answers_tab)
+        if source.startswith("profile."):
+            key = source.split(".", 1)[1]
+            entry = self.p_entries.get(key)
+            if entry:
+                entry.focus_set()
+                entry.select_range(0, "end")
+                self.e_question.config(
+                    text=f"\"{q['title']}\" comes from My profile — fill it and Save profile.")
+                self.e_note.config(text="")
+            return
+        bk = q.get("bank_key") or db.bank_key(q.get("title") or "", q.get("type") or "String")
+        idx = next((n for n, b in enumerate(self.bank["questions"]) if b["key"] == bk), None)
+        if idx is None:
+            bank_mod.sync_bank(self.conn, self.bank)
+            bank_mod.save_bank(self.bank)
+            idx = next((n for n, b in enumerate(self.bank["questions"]) if b["key"] == bk), None)
+            if idx is None:
+                messagebox.showwarning("Answers", "This question is not in the answer bank yet.")
+                return
+        if not self.qlist.exists(str(idx)):
+            self.q_only_open.set(False)
+            self.q_kind.set("All required")
+            self.load_bank_list()
+        self.qlist.selection_set(str(idx))
+        self.qlist.see(str(idx))
+        self.qlist.focus(str(idx))
+
+    def back_to_job(self):
+        jid = getattr(self, "return_to_job", None)
+        self.back_btn.pack_forget()
+        self.tabs.select(0)
+        self.d_tabs.select(1)
+        if jid and self.jobs.exists(jid):
+            self.view_job(jid)
+
+    def open_resume(self):
+        job = self._fresh_job()
+        if job and job["resume_path"] and os.path.isfile(job["resume_path"]):
+            os.startfile(job["resume_path"])
+        else:
+            messagebox.showinfo("Resume", "No resume for this job yet. Click 'Make resume'.")
+
+    def _fresh_job(self):
+        if not self.selected_job:
+            return None
+        return self.conn.execute("SELECT * FROM jobs WHERE id=?", (self.selected_job["id"],)).fetchone()
+
+    def set_status_selected(self):
+        status = self.d_status.get()
+        ids = self.selected_ids()
+        if not ids or not status:
+            return
+        if len(ids) > 1 and not messagebox.askyesno(
+                "Set status", f'Set status of {len(ids)} jobs to "{status}"?'):
+            return
+        for jid in ids:
+            db.set_status(self.conn, jid, status)
+        self.log(f'✓ Status "{status}": {len(ids)} job(s)\n')
+        self.refresh_all()
+
+    def show_answers_for_selected(self):
+        ids = self.selected_ids()
+        if not ids:
+            messagebox.showinfo("Answers for selected",
+                                "Tick one or more jobs (or select a job on the right).")
+            return
+        try:
+            bank_mod.sync_bank(self.conn, self.bank)
+            bank_mod.save_bank(self.bank)
+        except Exception as e:
+            self.log(f"! Answer bank sync: {e}\n")
+        placeholders = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT bank_key, COUNT(DISTINCT job_id) n FROM questions "
+            f"WHERE required=1 AND job_id IN ({placeholders}) "
+            f"AND bank_key IS NOT NULL AND bank_key != '' GROUP BY bank_key",
+            ids).fetchall()
+        self.answers_filter_ids = list(ids)
+        self.answers_filter_keys = {r["bank_key"]: r["n"] for r in rows}
+        titles = []
+        for jid in ids[:3]:
+            row = self.conn.execute(
+                "SELECT title, company FROM jobs WHERE id=?", (jid,)).fetchone()
+            if row:
+                titles.append(f"{row['company'] or '?'}: {(row['title'] or '')[:40]}")
+        more = f" (+{len(ids) - 3} more)" if len(ids) > 3 else ""
+        self.q_filter_lbl.config(
+            text=f"Answers for {len(ids)} job(s): " + "; ".join(titles) + more)
+        self.q_filter_bar.pack(fill="x", pady=(4, 0), before=self.q_count)
+        self.q_only_open.set(False)
+        self.q_kind.set("All required")
+        self.tabs.select(self.answers_tab)
+        self.load_bank_list()
+
+    def clear_answers_job_filter(self):
+        self.answers_filter_ids = None
+        self.answers_filter_keys = None
+        self.q_filter_bar.pack_forget()
+        self.load_bank_list()
+
+    def import_answers_backup(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Choose autobid_questions backup (JSON or CSV)",
+            filetypes=[("Backup", "*.json;*.csv"), ("JSON", "*.json"), ("CSV", "*.csv"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            bank_mod.sync_bank(self.conn, self.bank)
+            bank_mod.save_bank(self.bank)
+            self.bank, stats = bank_mod.import_matched_answers_from_backup(path, self.bank)
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+            return
+        self.load_bank_list()
+        self.refresh_all()
+        messagebox.showinfo(
+            "Import from backup",
+            f"Filled: {stats['filled']}\nSkipped (already answered): {stats['skipped_has_answer']}\n"
+            f"No match: {stats['no_match']}")
+
+    def update_summary(self):
+        rows = dict(self.conn.execute(
+            "SELECT status, COUNT(*) FROM jobs WHERE is_active=1 AND relevant=1 GROUP BY status"
+        ).fetchall())
+        applied = sum(rows.get(s, 0) for s in db.APPLIED_STATUSES)
+        total = sum(rows.values())
+        self.stats.config(
+            text=f"{total} jobs · {applied} applied · {rows.get('needs_you', 0)} need you")
+
+    def refresh_all(self):
+        try:
+            bank_mod.sync_bank(self.conn, self.bank)
+            bank_mod.save_bank(self.bank)
+        except Exception:
+            pass
+        self.resolved = bank_mod.resolve_all(self.conn, self.bank)
         self.load_jobs()
+        if getattr(self, "qlist", None):
+            self.load_bank_list()
+        self.update_summary()
+        if self.selected_job:
+            self.show_job()
 
     def show_todays_jobs(self):
+        self.f_relevant.set("relevant")
+        self.f_status.set("all")
+        self.f_answers.set("any")
+        self.f_resume.set("any")
         self.f_posted.set("today")
-        self.f_rel.set("relevant")
-        if getattr(self, "f_status", None):
-            self.f_status.set("all")
         self.load_jobs()
         self.tabs.select(0)
 
@@ -542,6 +1130,58 @@ class App(tk.Tk):
 
     def collect(self, auto=False):
         return self._start_or_queue_collect("all", auto=auto)
+
+    def fetch_details(self):
+        """Re-fetch description + apply-form questions (answers) for relevant jobs.
+
+        Prefers ticked jobs; otherwise jobs still missing details/questions.
+        Use Collect to discover new postings — Fetch refreshes form fields for Apply.
+        """
+        ids = [i for i in self.jobs.selection()] if getattr(self, "jobs", None) else []
+        # Fall back to header ticks if selection empty but _checked set
+        if not ids and getattr(self, "_checked", None):
+            ids = [i for i in self._checked if self.jobs.exists(i)]
+        if ids:
+            n = len(ids)
+            if not messagebox.askyesno(
+                    "Fetch",
+                    f"Re-fetch description + application questions for {n} ticked job(s)?\n\n"
+                    "This updates the Answers column and answer bank from the boards API."):
+                return False
+            path = self._write_selection(ids)
+            return self.run_script(
+                ["scrape_details.py", "--jobs-file", str(path), "--refresh"],
+                f"Fetching details + questions: {n} job(s)")
+        n = self.conn.execute("""
+            SELECT COUNT(*) c FROM jobs j
+            WHERE j.is_active=1 AND j.relevant=1 AND (
+              j.description IS NULL OR j.description='' OR j.details_at IS NULL OR
+              NOT EXISTS (SELECT 1 FROM questions q WHERE q.job_id = j.id)
+            )""").fetchone()["c"]
+        if n:
+            if not messagebox.askyesno(
+                    "Fetch",
+                    f"{n} relevant job(s) still need description and/or questions "
+                    f"(Answers = “no details yet”).\n\nFetch them now from the boards API?"):
+                return False
+            return self.run_script(
+                ["scrape_details.py"],
+                f"Fetching details + questions: {n} job(s)")
+        # Nothing missing — offer full refresh of all relevant
+        total = self.conn.execute(
+            "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND relevant=1"
+        ).fetchone()["c"]
+        if not total:
+            messagebox.showinfo("Fetch", "No relevant jobs yet — run Collect first.")
+            return False
+        if not messagebox.askyesno(
+                "Fetch",
+                f"Every relevant job already has details.\n\n"
+                f"Re-fetch description + questions for all {total} relevant job(s)?"):
+            return False
+        return self.run_script(
+            ["scrape_details.py", "--refresh"],
+            f"Re-fetching details + questions: {total} job(s)")
 
     def _start_or_queue_collect(self, kind, auto=False):
         """Start a collection now, or queue it if Apply / another task is running."""
@@ -597,59 +1237,12 @@ class App(tk.Tk):
         self._auto_info()
 
     def refresh(self):
-        try:
-            bank_mod.sync_bank(self.conn, self.bank)
-            bank_mod.save_bank(self.bank)
-        except Exception:
-            pass
-        self.load_jobs()
-        if getattr(self, "qlist", None):
-            try:
-                self.load_bank_list()
-            except Exception:
-                pass
-
-    def _on_click(self, event):
-        row = self.jobs.identify_row(event.y)
-        col = self.jobs.identify_column(event.x)
-        if not row:
-            return
-        self.current_id = row
-        if col == "#1":
-            if row in self._checked:
-                self._checked.discard(row)
-            else:
-                self._checked.add(row)
-            vals = list(self.jobs.item(row, "values"))
-            vals[0] = "☑" if row in self._checked else "☐"
-            self.jobs.item(row, values=vals)
-            # refresh only the selected count in the header
-            cur = self.stats.cget("text")
-            parts = [p.strip() for p in cur.split("·")]
-            if parts:
-                parts[-1] = f"{len(self._checked)} selected" if "selected" in parts[-1] else parts[-1]
-                # keep last "shown/today" bit if present
-                shown = next((p for p in parts if "shown" in p or "today" in p), None)
-                base = [p for p in parts if "selected" not in p and "shown" not in p and "today" not in p]
-                base.append(f"{len(self._checked)} selected")
-                if shown:
-                    base.append(shown)
-                self.stats.config(text=" · ".join(base))
-
-    def select_all(self):
-        for i in self.jobs.get_children():
-            self._checked.add(i)
-        self.load_jobs()
-
-    def clear_sel(self):
-        self._checked.clear()
-        self.load_jobs()
-
-    def selected_ids(self):
-        return [i for i in self.jobs.get_children() if i in self._checked] or (
-            [self.current_id] if self.current_id else [])
+        self.refresh_all()
 
     def open_job(self):
+        if self.selected_job and self.selected_job.get("job_url"):
+            webbrowser.open(self.selected_job["job_url"])
+            return
         ids = self.selected_ids()
         if not ids:
             return
@@ -661,16 +1254,37 @@ class App(tk.Tk):
         ids = self.selected_ids()
         if not ids:
             return
-        row = self.conn.execute("SELECT apply_url FROM jobs WHERE id=?", (ids[0],)).fetchone()
-        if row and row["apply_url"]:
-            webbrowser.open(row["apply_url"])
+        row = self.conn.execute(
+            "SELECT id, org, apply_url, job_url FROM jobs WHERE id=?", (ids[0],)
+        ).fetchone()
+        if not row:
+            return
+        url = (row["apply_url"] or row["job_url"] or "").strip()
+        # Rebuild canonical job-boards link when possible (same as bid.py)
+        sid = str(row["id"] or "")
+        org = (row["org"] or "").strip()
+        if ":" in sid:
+            token, jid = sid.split(":", 1)
+            org = org or token
+            if org and jid.isdigit():
+                url = f"https://job-boards.greenhouse.io/{org}/jobs/{jid}"
+        if url:
+            self.log(f"Open Apply link: {url}\n")
+            webbrowser.open(url)
         else:
             messagebox.showinfo("Apply link", "No Apply link remembered for this job yet.")
 
     def save_profile(self):
-        vals = {k: e.get().strip() for k, e in self.p_entries.items()}
-        self.bank = bank_mod.set_profile(vals, self.bank)
-        messagebox.showinfo("Saved", "Profile saved to Supabase.")
+        try:
+            vals = {k: e.get().strip() for k, e in self.p_entries.items()}
+            self.bank = bank_mod.set_profile(vals, self.bank)
+        except Exception as e:
+            messagebox.showerror("Not saved", str(e))
+            return
+        self.log("✓ Profile saved.\n")
+        self.refresh_all()
+        if getattr(self, "p_saved", None):
+            self.p_saved.config(text=f"✓ Saved  {datetime.now().strftime('%H:%M:%S')}")
 
     def open_bot_browser(self):
         if self.proc and self.proc.poll() is None:
@@ -685,6 +1299,21 @@ class App(tk.Tk):
                      f"(Ashby can keep its own Chrome open).\n")
         except Exception as e:
             messagebox.showerror("Open bot browser", str(e))
+
+    def open_mail_browser(self):
+        if self.proc and self.proc.poll() is None:
+            messagebox.showwarning("Busy", "Stop the current task first.")
+            return
+        try:
+            from browser import get_mail_profile_dir
+            import open_browser_mail
+            open_browser_mail.main()
+            self.log(f"Opened mail Chrome ({get_mail_profile_dir()}) — "
+                     f"sign in to Gmail (same address as on applications), "
+                     f"then close it before Apply. Apply will reopen Greenhouse + mail "
+                     f"together to read security codes.\n")
+        except Exception as e:
+            messagebox.showerror("Open mail browser", str(e))
 
     def make_resume_selected(self):
         ids = self.selected_ids()
@@ -702,7 +1331,10 @@ class App(tk.Tk):
             messagebox.showinfo("Apply", "Select one or more jobs first.")
             return
         if not dry and not messagebox.askyesno(
-                "Apply", f"Submit applications to {len(ids)} Greenhouse job(s)?"):
+                "Apply",
+                f"Submit applications to {len(ids)} Greenhouse job(s)?\n\n"
+                "Apply opens Greenhouse Chrome + mail Chrome.\n"
+                "Sign in to Gmail first via “Open mail browser” if you have not yet."):
             return
         self._flush_ai_settings()
         path = self._write_selection(ids)
@@ -718,8 +1350,10 @@ class App(tk.Tk):
         return path
 
     def _show_run_bar(self, label):
+        self.run_stats = {"ok": 0, "fail": 0, "need": 0}
         self.run_label.config(text=f"●  Running: {label}", bg="#fff4e5", fg="#7a4a00")
         self.run_bar.config(bg="#fff4e5")
+        self._update_run_stats()
         self.b_stop_after.config(text="Stop after this job", state="normal")
         self._set_pause_button(paused=False)
         self.b_pause.config(state="normal")
@@ -729,6 +1363,61 @@ class App(tk.Tk):
         PAUSE_FLAG.unlink(missing_ok=True)
         self._set_pause_button(paused=False)
         self.run_bar.pack_forget()
+
+    def _update_run_stats(self):
+        """Refresh the live counters on the orange run bar (this run only)."""
+        s = self.run_stats
+        bidding = self.proc_label.startswith(("Bidding", "Applying", "Dry run"))
+        if bidding:
+            self.run_ok.config(text=f"✓ {s['ok']} success")
+            self.run_fail.config(text=f"✗ {s['fail']} failed")
+            self.run_need.config(text=f"⚠ {s['need']} need you")
+        else:
+            self.run_ok.config(text="")
+            self.run_fail.config(text="")
+            self.run_need.config(text="")
+
+    def _track_run_line(self, line):
+        """Parse one bid.py log line and bump success / failed / need-you for this run."""
+        if not self.proc_label.startswith(("Bidding", "Applying", "Dry run")):
+            return
+        t = line.strip()
+        # Cool-down between batches — still running (not stopped)
+        if t.startswith("batch pause"):
+            self.run_label.config(
+                text=f"●  Running: {self.proc_label}  ·  {t}",
+                bg="#fff4e5", fg="#7a4a00")
+            return
+        # success — only after URL change (not merely clicking Submit)
+        if ("✓ applied" in t or "✓ submitted" in t
+                or t == "APPLIED" or t.startswith("APPLIED:")
+                or t.startswith("APPLIED (by you)")):
+            self.run_stats["ok"] += 1
+        # need you (OTP / URL unchanged / upload / button missing / tab left open)
+        elif ("? email security code" in t
+              or "? submit clicked" in t
+              or "URL unchanged" in t
+              or "required fields still empty" in t
+              or "submit blocked" in t
+              or "resume upload failed" in t
+              or "Submit application button not found" in t
+              or t.startswith("UNCLEAR")
+              or t.startswith("NOT SUBMITTED")
+              or ("tab left open" in t and t.lstrip().startswith(("!", "?")))):
+            self.run_stats["need"] += 1
+        # failed (no apply link, etc.)
+        elif (t.startswith("FAILED") or "FAILED -" in t
+              or "no Apply link remembered" in t
+              or t.startswith("failed:") or t.startswith("NOT applied")):
+            self.run_stats["fail"] += 1
+        else:
+            return
+        self.run_label.config(text=f"●  Running: {self.proc_label}", bg="#fff4e5", fg="#7a4a00")
+        self._update_run_stats()
+        try:
+            self.update_summary()
+        except Exception:
+            pass
 
     def _set_pause_button(self, paused):
         if paused:
@@ -789,33 +1478,46 @@ class App(tk.Tk):
         self._set_pause_button(paused=False)
         self.log("\n■ Stopped now (task, browser, and AI call ended).\n")
 
-    def _ensure_chrome_free(self, auto=False):
-        """Apply/Collect need exclusive use of .browser-profile-greenhouse."""
+    def _ensure_chrome_free(self, auto=False, also_mail=False):
+        """Apply needs exclusive .browser-profile-greenhouse (+ mail when bidding)."""
         try:
-            from browser import close_bot_chrome, get_profile_dir, profile_busy
+            from browser import close_bot_chrome, get_profile_dir, get_mail_profile_dir, profile_busy
         except Exception:
             return True
-        if not profile_busy():
-            return True
-        profile = get_profile_dir()
-        if auto:
-            # Scheduled collect: close without a dialog so the app does not freeze overnight
-            n = close_bot_chrome()
-            self.log(f"(auto) Closed Greenhouse Chrome ({n} process(es)) → {profile.name}\n")
+        checks = [("greenhouse", get_profile_dir, None)]
+        if also_mail:
+            checks.append(("mail", get_mail_profile_dir, "mail"))
+        for label, get_dir, bot in checks:
+            if not profile_busy(bot):
+                continue
+            profile = get_dir()
+            if auto:
+                n = close_bot_chrome(bot)
+                self.log(f"(auto) Closed {label} Chrome ({n} process(es)) → {profile.name}\n")
+                import time as _t
+                _t.sleep(0.8)
+                if profile_busy(bot):
+                    return False
+                continue
+            title = "Greenhouse Chrome is open" if bot is None else "Mail Chrome is open"
+            hint = (
+                "“Open bot browser” (or another Greenhouse task)"
+                if bot is None else
+                "“Open mail browser”"
+            )
+            if not messagebox.askyesno(
+                    title,
+                    f"{hint} is using:\n{profile}\n\n"
+                    f"Close that Chrome now so Apply can run?\n\n"
+                    "(Ashby’s Chrome is separate and will not be closed.)"):
+                self.log(f"Cancelled — close {label} Chrome, then try again.\n")
+                return False
+            n = close_bot_chrome(bot)
+            self.log(f"Closed {label} Chrome ({n} process(es)) → {profile.name}\n")
             import time as _t
             _t.sleep(0.8)
-            return not profile_busy()
-        if not messagebox.askyesno(
-                "Greenhouse Chrome is open",
-                f"“Open bot browser” (or another Greenhouse task) is using:\n{profile}\n\n"
-                "Close that Chrome now so Apply / Collect can run?\n\n"
-                "(Ashby’s Chrome is separate and will not be closed.)"):
-            self.log("Cancelled — close Greenhouse Chrome, then try again.\n")
-            return False
-        n = close_bot_chrome()
-        self.log(f"Closed Greenhouse Chrome ({n} process(es)) → {profile.name}\n")
-        import time as _t
-        _t.sleep(0.8)
+            if profile_busy(bot):
+                return False
         return True
 
     def run_script(self, args, label, quiet=False):
@@ -823,9 +1525,13 @@ class App(tk.Tk):
             if not quiet:
                 messagebox.showwarning("Busy", "Something is already running. Stop it first.")
             return False
-        # Apply / Make resume need exclusive Greenhouse Chrome (Collect is API-only)
-        if args and Path(str(args[0])).name in ("bid.py", "make_resume.py"):
-            if not self._ensure_chrome_free(auto=quiet):
+        # Apply needs Greenhouse + mail Chrome free; Make resume needs Greenhouse only
+        name = Path(str(args[0])).name if args else ""
+        if name == "bid.py":
+            if not self._ensure_chrome_free(auto=quiet, also_mail=True):
+                return False
+        elif name == "make_resume.py":
+            if not self._ensure_chrome_free(auto=quiet, also_mail=False):
                 return False
         STOP_FLAG.unlink(missing_ok=True)
         PAUSE_FLAG.unlink(missing_ok=True)
@@ -850,6 +1556,7 @@ class App(tk.Tk):
     def log(self, text):
         self.logbox.insert("end", text)
         self.logbox.see("end")
+        self._track_run_line(text)
 
     # ---------------- auto-collection
 
@@ -948,7 +1655,8 @@ class App(tk.Tk):
                     if finished_label.startswith("Collecting"):
                         self.f_posted.set(
                             "today" if "today" in finished_label.lower() else self.f_posted.get())
-                    self.refresh()
+                    # Collect / Fetch update questions → refresh Answers column
+                    self.refresh_all()
                     # Queued Collect first; else start auto-collect if a slot is due
                     pending = self._pending_collect
                     if pending:
@@ -1022,17 +1730,33 @@ class App(tk.Tk):
         return "break"
 
     def load_bank_list(self):
+        kind = self.q_kind.get() if getattr(self, "q_kind", None) else "All required"
+        filt = self.answers_filter_keys
         needle = (self.q_search.get() if getattr(self, "q_search", None) else "") or ""
         needle = needle.strip().lower()
+        prev = self.qlist.selection()
         self.qlist.delete(*self.qlist.get_children())
+        self._q_row_meta = {}
+        shown = open_n = 0
         rows = []
-        open_n = 0
         for i, q in enumerate(self.bank.get("questions") or []):
-            if not q.get("asked_in_jobs"):
+            if filt is not None:
+                if q["key"] not in filt:
+                    continue
+            elif not q.get("asked_in_jobs"):
+                continue
+            # "You answer" = yes/no, choices, city, auth, multi-select, … (even if type=String)
+            # "AI writes" = real free-form text / essays only
+            is_ai = bank_mod.is_ai_text_question(q)
+            if (kind == "You answer" and is_ai) or (kind.startswith("AI") and not is_ai):
                 continue
             empty = bank_mod._is_empty(q.get("answer"))
             ans = "" if empty else (
                 ", ".join(q["answer"]) if isinstance(q["answer"], list) else str(q["answer"]))
+            if empty and is_ai:
+                ans = "(AI writes per job)"
+            elif empty:
+                ans = "(need your answer)"
             if needle:
                 blob = f"{q.get('question') or ''} {ans} {q.get('type') or ''}".lower()
                 if needle not in blob:
@@ -1040,27 +1764,47 @@ class App(tk.Tk):
             open_n += empty
             if self.q_only_open.get() and not empty:
                 continue
-            n = int(q.get("asked_in_jobs") or 0)
+            if filt is not None:
+                n_sel = filt.get(q["key"], 0)
+                n_jobs = len(self.answers_filter_ids or [])
+                jobs_col = f"{n_sel}/{n_jobs}"
+                jobs_n = n_sel
+            else:
+                n = q["asked_in_jobs"]
+                jobs_col = f"{n} job{'s' if n != 1 else ''}"
+                jobs_n = int(n or 0)
             rows.append({
                 "iid": str(i),
                 "tags": ("open",) if empty else (),
-                "values": (f"{n} job{'s' if n != 1 else ''}", q.get("type") or "",
-                           q.get("question") or "", (ans or "")[:80]),
-                "jobs_n": n,
+                "values": (jobs_col, q.get("type") or "", q.get("question") or "", (ans or "")[:80]),
+                "jobs_n": jobs_n,
                 "type": q.get("type") or "",
                 "question": q.get("question") or "",
                 "answer": ans or "",
                 "empty": empty,
             })
+            shown += 1
         if self.q_sort_col:
             rows.sort(key=self._q_sort_key, reverse=self.q_sort_desc)
         for r in rows:
             self.qlist.insert("", "end", iid=r["iid"], tags=r["tags"], values=r["values"])
+            self._q_row_meta[r["iid"]] = r
         self._update_q_headings()
+        if prev:
+            keep = [i for i in prev if self.qlist.exists(i)]
+            if keep:
+                self.qlist.selection_set(keep)
+                self.qlist.see(keep[0])
         search_bit = f"  ·  search “{needle}”" if needle else ""
-        self.q_count.config(
-            text=f"{len(rows)} questions shown  ·  {open_n} unanswered{search_bit}  ·  "
-                 f"platform=greenhouse")
+        if filt is not None:
+            n_jobs = len(self.answers_filter_ids or [])
+            self.q_count.config(
+                text=f"{shown} questions for {n_jobs} selected job(s)  ·  {open_n} unanswered"
+                     f"{search_bit}")
+        else:
+            self.q_count.config(
+                text=f"{shown} questions shown  ·  {open_n} unanswered{search_bit}  ·  "
+                     f"platform=greenhouse")
 
     def edit_question(self):
         sel = self.qlist.selection()
@@ -1069,6 +1813,8 @@ class App(tk.Tk):
         q = self.bank["questions"][int(sel[0])]
         self.selected_q = q
         self.e_question.config(text=q.get("question") or "")
+        if getattr(self, "e_note", None):
+            self.e_note.config(text=q.get("note") or "")
         for w in self.e_holder.winfo_children():
             w.destroy()
         if self._answer_save_after:
@@ -1153,7 +1899,7 @@ class App(tk.Tk):
         if prev and self.qlist.exists(prev[0]):
             self.qlist.selection_set(prev[0])
             self.qlist.see(prev[0])
-        self.load_jobs()
+        self.refresh_all()
 
     def flush_pending_answers(self, reason=""):
         """Push all locally cached answer changes to Supabase in one multi-save."""
@@ -1262,9 +2008,11 @@ class App(tk.Tk):
         browser_bar = ttk.Frame(tab)
         browser_bar.pack(fill="x", pady=(10, 0))
         ttk.Button(browser_bar, text="Open bot browser", command=self.open_bot_browser).pack(side="left")
-        ttk.Label(browser_bar, foreground="#666", wraplength=780, text=(
-            "  Greenhouse Chrome (.browser-profile-greenhouse) for AI web logins + MyGreenhouse. "
-            "Close it before Make resume / Apply.")).pack(side="left", padx=(8, 0))
+        ttk.Button(browser_bar, text="Open mail browser", command=self.open_mail_browser).pack(
+            side="left", padx=(8, 0))
+        ttk.Label(browser_bar, foreground="#666", wraplength=700, text=(
+            "  Greenhouse Chrome = MyGreenhouse / AI. Mail Chrome = Gmail for "
+            "application security codes. Close both before Apply.")).pack(side="left", padx=(8, 0))
 
         save_row = ttk.Frame(tab)
         save_row.pack(fill="x", pady=(8, 4))

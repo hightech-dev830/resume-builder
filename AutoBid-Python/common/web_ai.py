@@ -134,8 +134,44 @@ PROVIDERS = {
             "a:has-text('New chat')",
             "[class*='new-chat']",
             "[aria-label*='New chat' i]",
+            "div[role=button]:has-text('New chat')",
         ],
-        # DeepSeek: ⋯ on the active sidebar row, then Delete → Confirm
+        # Profile: ⋯ next to your name at the BOTTOM of the left sidebar → Settings
+        "settings_open": [
+            "aside >> text=/Settings/i",
+            "[class*='sidebar'] button:has-text('Settings')",
+            "button:has-text('Settings')",
+        ],
+        "profile_menu": [
+            # three-dots / more next to account name (bottom of sidebar)
+            "aside > div:last-child button",
+            "aside [class*='user'] button",
+            "aside [class*='User'] button",
+            "aside [class*='profile'] button",
+            "aside [class*='account'] button",
+            "[class*='sidebar'] [class*='footer'] button",
+            "button[aria-label*='More' i]",
+            "button[aria-haspopup='menu']",
+        ],
+        "settings_item": [
+            "[role='menuitem']:has-text('Settings')",
+            "div[role='menu'] >> text=Settings",
+            "button:has-text('Settings')",
+            "text=Settings",
+        ],
+        "settings_data_tab": [
+            "[role='tab']:has-text('Data')",
+            "button:has-text('Data')",
+            "div[role='tab']:has-text('Data')",
+            "[class*='tab']:has-text('Data')",
+            "text=Data",
+        ],
+        "delete_all_chats": [
+            "button:has-text('Delete all')",
+            "button:has-text('Delete All')",
+            "[role='dialog'] button:has-text('Delete all')",
+        ],
+        # DeepSeek: ⋯ on a sidebar chat row, then Delete → Delete chat
         "chat_menu": [
             "[class*='ds-dropdown'] button",
             "aside [class*='active'] button:has(svg)",
@@ -149,13 +185,18 @@ PROVIDERS = {
             "[role='menuitem']:has-text('Delete')",
             "div[role='menu'] >> text=Delete",
             "button:has-text('Delete')",
-            "div:has-text('Delete'):not(:has(div:has-text('Delete')))",
             "text=Delete",
         ],
         "delete_confirm": [
+            "[role='dialog'] button:has-text('Delete all chats')",
+            "[role='dialog'] button:has-text('Delete chat')",
+            "[role='dialog'] button:has-text('Delete all')",
             "[role='dialog'] button:has-text('Confirm')",
             "[role='dialog'] button:has-text('Delete')",
+            "button:has-text('Delete all chats')",
+            "button:has-text('Delete chat')",
             "button:has-text('Confirm')",
+            "button:has-text('Delete all')",
             "button:has-text('Delete')",
         ],
         "send": [
@@ -175,7 +216,8 @@ PROVIDERS = {
 }
 
 # Pause between web-chat asks so free sites (DeepSeek especially) are less likely to ban.
-WEB_ASK_GAP_SEC = {"deepseek": 25, "chatgpt": 12, "claude": 12}
+# Seconds between web-AI asks (resume / essays). Lower = faster; too low risks free-account bans.
+WEB_ASK_GAP_SEC = {"deepseek": 8, "chatgpt": 8, "claude": 8}
 
 CLI = {
     # --tools "": text answers only, Claude Code never runs tools (faster, nothing touched)
@@ -255,6 +297,8 @@ class WebAI:
         self.page = None
         self.last_model = None     # API: the model that actually answered
         self._have_chat = False    # web: True after a prompt was sent in the current thread
+        # DeepSeek: wipe sidebar once when this WebAI session starts (→ "No chat history")
+        self._history_cleared = False
 
     @property
     def label(self):
@@ -819,13 +863,326 @@ class WebAI:
                 f"(ChatGPT Free is fine - the page DOM likely changed; see composer debug above)")
         return box
 
+    def _deepseek_chat_count(self) -> int:
+        """How many saved chats are listed in the left sidebar (0 = empty / unknown)."""
+        if self.page is None or self.page.is_closed():
+            return 0
+        try:
+            return int(self.page.evaluate(
+                """() => {
+                  const body = (document.body && document.body.innerText) || '';
+                  if (/No chat history/i.test(body)) return 0;
+                  // Chat rows live under date headers like Today / Yesterday / Last 7 days
+                  const skip = /^(new chat|today|yesterday|last 7 days|last 30 days|older|settings|deepseek)$/i;
+                  const roots = [
+                    ...document.querySelectorAll('aside, [class*="sidebar"], nav, [class*="history"]'),
+                  ];
+                  const root = roots.find(r => /Today|Yesterday|No chat history/i.test(r.innerText || ''))
+                            || roots[0] || document.body;
+                  const nodes = Array.from(root.querySelectorAll('div, a, li, button, span'));
+                  const titles = new Set();
+                  for (const el of nodes) {
+                    if (el.children && el.children.length > 3) continue;
+                    const t = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ');
+                    if (!t || t.length < 4 || t.length > 120) continue;
+                    if (skip.test(t)) continue;
+                    if (/^\\+|new chat/i.test(t)) continue;
+                    // Prefer leaf-ish nodes that look like chat titles
+                    const kidText = Array.from(el.children || [])
+                      .map(c => (c.innerText || '').trim()).filter(Boolean);
+                    if (kidText.length > 1) continue;
+                    titles.add(t.slice(0, 80));
+                  }
+                  return titles.size;
+                }"""
+            ) or 0)
+        except Exception:
+            return -1  # unknown
+
+    def _deepseek_history_empty(self) -> bool:
+        """True only when the sidebar explicitly shows 'No chat history'."""
+        if self.page is None or self.page.is_closed():
+            return False
+        try:
+            if self.page.locator("text=/No chat history/i").count():
+                return True
+        except Exception:
+            pass
+        # Strict: do NOT treat "composer ready" as empty — that was skipping deletes
+        n = self._deepseek_chat_count()
+        return n == 0
+
+    def _open_deepseek_settings(self) -> bool:
+        """Open Settings from the account ⋯ menu at the bottom of the sidebar."""
+        cfg = PROVIDERS["deepseek"]
+        self._dismiss_overlays()
+        # Already on settings?
+        try:
+            if self.page.locator("text=/Delete all chats/i").count():
+                return True
+        except Exception:
+            pass
+        # Direct Settings control if visible
+        if self._click_first(cfg.get("settings_open"), timeout=1500):
+            time.sleep(0.5)
+            if self.page.locator("text=/Delete all chats|Settings/i").count():
+                return True
+        # Bottom-of-sidebar profile / ⋯ menu, then Settings
+        # Scroll sidebar to bottom so the account row is visible
+        try:
+            self.page.evaluate(
+                """() => {
+                  const aside = document.querySelector('aside, [class*="sidebar"]');
+                  if (aside) aside.scrollTop = aside.scrollHeight;
+                }"""
+            )
+            time.sleep(0.3)
+        except Exception:
+            pass
+        opened_menu = self._click_first(cfg.get("profile_menu"), timeout=2000)
+        if not opened_menu:
+            # JS: click the last button in the sidebar (usually account ⋯)
+            try:
+                opened_menu = bool(self.page.evaluate(
+                    """() => {
+                      const aside = document.querySelector('aside, [class*="sidebar"]') || document.body;
+                      const buttons = Array.from(aside.querySelectorAll('button, [role=button]'));
+                      const btn = buttons[buttons.length - 1];
+                      if (!btn) return false;
+                      btn.click();
+                      return true;
+                    }"""
+                ))
+                time.sleep(0.4)
+            except Exception:
+                opened_menu = False
+        if not self._click_first(cfg.get("settings_item"), timeout=2500):
+            # Sometimes Settings is a plain text node
+            try:
+                self.page.get_by_text("Settings", exact=True).last.click(timeout=2000)
+            except Exception:
+                return False
+        time.sleep(0.6)
+        return True
+
+    def _clear_deepseek_via_settings(self) -> bool:
+        """Settings → Data → Delete all → confirm 'Delete all chats'. True if sidebar empty."""
+        cfg = PROVIDERS["deepseek"]
+        if not self._open_deepseek_settings():
+            print("    ! deepseek: could not open Settings")
+            return False
+        # Data tab
+        self._click_first(cfg.get("settings_data_tab"), timeout=2500)
+        time.sleep(0.5)
+        # Click Delete all next to "Delete all chats"
+        clicked = self._click_first(cfg.get("delete_all_chats"), timeout=2500)
+        if not clicked:
+            try:
+                clicked = bool(self.page.evaluate(
+                    """() => {
+                      const label = Array.from(document.querySelectorAll('*')).find(el =>
+                        /Delete all chats/i.test((el.innerText || '').trim())
+                        && (el.innerText || '').trim().length < 40);
+                      if (!label) return false;
+                      let row = label;
+                      for (let i = 0; i < 6 && row; i++) {
+                        const btn = Array.from(row.querySelectorAll('button'))
+                          .find(b => /Delete/i.test(b.innerText || ''));
+                        if (btn) { btn.click(); return true; }
+                        row = row.parentElement;
+                      }
+                      return false;
+                    }"""
+                ))
+            except Exception:
+                clicked = False
+        if not clicked:
+            print("    ! deepseek: 'Delete all' button not found in Settings → Data")
+            try:
+                self.page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return False
+        time.sleep(0.5)
+        # Confirm: button text is usually "Delete all chats"
+        confirmed = self._click_first(cfg.get("delete_confirm"), timeout=3000)
+        if not confirmed:
+            try:
+                self.page.get_by_role("button", name=re.compile(
+                    r"Delete all chats|Delete all|Confirm", re.I)).last.click(timeout=2500)
+                confirmed = True
+            except Exception:
+                confirmed = False
+        if not confirmed:
+            print("    ! deepseek: confirm dialog for Delete all chats not clicked")
+            return False
+        time.sleep(1.2)
+        try:
+            self.page.keyboard.press("Escape")
+            time.sleep(0.3)
+            self.page.keyboard.press("Escape")
+        except Exception:
+            pass
+        self._dismiss_overlays()
+        time.sleep(0.6)
+        empty = self._deepseek_history_empty()
+        if empty:
+            print("    deepseek: Settings → Delete all chats succeeded")
+        else:
+            print("    ! deepseek: Delete all clicked but sidebar still has chats")
+        return empty
+
+    def _delete_one_deepseek_sidebar_chat(self) -> bool:
+        """Hover first sidebar chat → ⋯ → Delete → Delete chat."""
+        try:
+            handle = self.page.evaluate_handle(
+                """() => {
+                  const skip = /^(new chat|today|yesterday|last 7 days|last 30 days|older|settings|deepseek)$/i;
+                  const aside = document.querySelector('aside, [class*="sidebar"]') || document.body;
+                  const nodes = Array.from(aside.querySelectorAll('div, a, li'));
+                  for (const el of nodes) {
+                    const t = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+                    if (!t || t.length < 4 || t.length > 100) continue;
+                    if (skip.test(t)) continue;
+                    if (/^\\+|new chat/i.test(t)) continue;
+                    if ((el.children || []).length > 4) continue;
+                    return el;
+                  }
+                  return null;
+                }"""
+            )
+            el = handle.as_element() if handle else None
+            if not el:
+                return False
+            el.scroll_into_view_if_needed()
+            el.hover(timeout=2000)
+            time.sleep(0.25)
+            # Click ⋯ that appears on the row
+            menu_clicked = False
+            for sel in (
+                "button",
+                "[aria-haspopup='menu']",
+                "[class*='more']",
+                "svg",
+            ):
+                try:
+                    btn = el.query_selector(sel)
+                    if btn:
+                        btn.click(timeout=1000)
+                        menu_clicked = True
+                        break
+                except Exception:
+                    continue
+            if not menu_clicked:
+                # Sibling / parent menu button
+                try:
+                    parent = el.evaluate_handle("e => e.parentElement")
+                    pe = parent.as_element() if parent else None
+                    if pe:
+                        for b in pe.query_selector_all("button") or []:
+                            try:
+                                b.click(timeout=800)
+                                menu_clicked = True
+                                break
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+            if not menu_clicked:
+                # Open the chat then use current-thread delete
+                try:
+                    el.click(timeout=1500)
+                    time.sleep(0.4)
+                    return self._delete_current_chat()
+                except Exception:
+                    return False
+            time.sleep(0.35)
+            if not self._click_first(PROVIDERS["deepseek"].get("delete_item"), timeout=2000):
+                return False
+            time.sleep(0.3)
+            self._click_first(PROVIDERS["deepseek"].get("delete_confirm"), timeout=2000)
+            time.sleep(0.5)
+            return True
+        except Exception:
+            return False
+
+    def _clear_deepseek_sidebar_loop(self, max_deletes: int = 120) -> int:
+        """Delete sidebar chats one-by-one until empty or stuck."""
+        deleted = 0
+        stuck = 0
+        for _ in range(max_deletes):
+            if self._deepseek_history_empty():
+                break
+            before = self._deepseek_chat_count()
+            if self._delete_one_deepseek_sidebar_chat():
+                deleted += 1
+                stuck = 0
+                time.sleep(0.35)
+                after = self._deepseek_chat_count()
+                if after >= 0 and before >= 0 and after >= before:
+                    stuck += 1
+                continue
+            stuck += 1
+            if stuck >= 3:
+                break
+            time.sleep(0.3)
+        return deleted
+
+    def _clear_all_chat_history_once(self):
+        """At session start: wipe DeepSeek history so the sidebar shows 'No chat history'.
+
+        Shared by Ashby + Greenhouse. Runs once per WebAI instance.
+        """
+        if self._history_cleared:
+            return
+        if self.provider != "deepseek":
+            self._history_cleared = True
+            return
+        if self.page is None or self.page.is_closed():
+            return
+        try:
+            n = self._deepseek_chat_count()
+            if self._deepseek_history_empty():
+                print("    deepseek: chat history already empty (No chat history)")
+                self._click_new_chat()
+                return
+            print(f"    deepseek: clearing chat history "
+                  f"({n if n >= 0 else '?'} chats in sidebar) …")
+            cleared = False
+            try:
+                cleared = self._clear_deepseek_via_settings()
+            except Exception as e:
+                print(f"    ! deepseek: Settings delete-all failed ({e})")
+            if not cleared:
+                n2 = self._clear_deepseek_sidebar_loop()
+                print(f"    deepseek: deleted {n2} chat(s) from the sidebar")
+                cleared = self._deepseek_history_empty()
+            self._click_new_chat()
+            self._dismiss_overlays()
+            if self._deepseek_history_empty():
+                print("    deepseek: ✓ chat history cleared → No chat history")
+            else:
+                left = self._deepseek_chat_count()
+                print(f"    ! deepseek: could not fully clear history "
+                      f"({left if left >= 0 else '?'} still listed) — "
+                      f"open Settings → Data → Delete all chats once manually")
+        except Exception as e:
+            print(f"    ! deepseek: could not clear history ({e})")
+        finally:
+            self._history_cleared = True
+            self._have_chat = False
+
     def _recycle_chat(self):
         """Same tab: delete the previous AutoBid thread (if any), then open one blank chat.
 
         Keeps the sidebar from accumulating dozens of resume/essay chats.
+        On the first DeepSeek ask in this session, clears ALL history first
+        (sidebar → 'No chat history') before opening New chat.
         """
         cfg = PROVIDERS[self.provider]
         self._ensure_web_page()
+        if not self._history_cleared:
+            self._clear_all_chat_history_once()
         if self._have_chat or self._in_saved_conversation():
             try:
                 if self._delete_current_chat():

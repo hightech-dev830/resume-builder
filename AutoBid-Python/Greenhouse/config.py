@@ -32,7 +32,8 @@ LOCATION_FILTER = "US"
 # "Collect today's jobs": first_published or updated_at within this many hours.
 TODAY_HOURS = 36
 
-# Apply still uses bot Chrome on the apply URL; Collect no longer opens MyGreenhouse.
+# Legacy MyGreenhouse helpers (optional open_browser_login / greenhouse_browser).
+# Collect is API-only; Apply goes straight to scraped job-boards …/jobs/<id> URLs.
 SEARCH_URL = (
     "https://my.greenhouse.io/jobs/search"
     "?date_posted=past_ten_days&work_type[]=remote"
@@ -46,11 +47,17 @@ SEARCH_TODAY_DATE_VALUES = (
 )
 LOGIN_URL = "https://my.greenhouse.io/users/sign_in"
 LOGIN_WAIT_MIN = 30
+SCROLL_MAX_CARDS = 500
+SCROLL_MAX_ROUNDS = 40
+SCROLL_PAUSE_SEC = 1.2
+SCROLL_STABLE_ROUNDS = 4
 
 TAILORED_RESUME = True
 NOTIFY_SOUND = True
-BATCH_SIZE = 3
-BATCH_WAIT_MIN = 20
+# Apply continuously — no cool-down between jobs (BATCH_WAIT_MIN=0).
+# BATCH_SIZE is only used if you set BATCH_WAIT_MIN > 0 again.
+BATCH_SIZE = 50
+BATCH_WAIT_MIN = 0
 COLLECT_LIMIT = 0  # 0 = no cap
 
 import notify as _notify  # noqa: E402

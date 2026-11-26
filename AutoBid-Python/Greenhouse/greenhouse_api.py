@@ -1,7 +1,8 @@
 """Public Greenhouse Job Board API (no login).
 
   Stage 1  fetch_job_list(token)     - every job on a board (title, location, apply URL)
-  Stage 2  fetch_job_details(token, id) - one job with HTML description
+  Stage 2  fetch_job_details(token, id) - description HTML + application questions
+           (?questions=true — same fields as the job-boards apply form)
 
 API: https://boards-api.greenhouse.io/v1/boards/{token}/jobs
 """
@@ -26,6 +27,16 @@ HEADERS = {
     "Accept": "application/json",
 }
 RETRIES = 5
+
+# Greenhouse field type → AutoBid form type (same vocabulary as Ashby answers bank)
+_FIELD_TYPE = {
+    "input_text": "String",
+    "textarea": "LongText",
+    "input_file": "File",
+    "multi_value_single_select": "ValueSelect",
+    "multi_value_multi_select": "MultiValueSelect",
+    "input_hidden": None,  # skip (lat/long helpers)
+}
 
 _SSL_CTX = None
 
@@ -158,6 +169,83 @@ def looks_remote(text: str) -> bool:
         text or "", re.I))
 
 
+def _map_field_type(raw_type: str, values: list) -> str | None:
+    t = _FIELD_TYPE.get(raw_type)
+    if t is None and raw_type in _FIELD_TYPE:
+        return None
+    if t is None:
+        # Unknown → treat as text unless it has choices
+        t = "ValueSelect" if values else "String"
+    # Yes/No single-select → Boolean (same as Ashby)
+    if t == "ValueSelect" and len(values) == 2:
+        labels = {(v.get("label") or "").strip().lower() for v in values}
+        if labels <= {"yes", "no"} or labels == {"true", "false"}:
+            return "Boolean"
+    return t
+
+
+def normalize_questions(job: dict, job_key: str) -> list[dict]:
+    """Map Greenhouse API questions (+ location_questions) to AutoBid question rows.
+
+    Same shape as scrape/bid expect: title, type, required, path, options, id, form.
+    """
+    out = []
+    seen_paths = set()
+    buckets = (
+        ("application", job.get("questions") or []),
+        ("location", job.get("location_questions") or []),
+        ("demographic", job.get("demographic_questions") or []),
+    )
+    for form, items in buckets:
+        # demographic_questions can be {questions: [...]} on some boards
+        if isinstance(items, dict):
+            items = items.get("questions") or []
+        for i, q in enumerate(items):
+            if not isinstance(q, dict):
+                continue
+            fields = q.get("fields") or []
+            if not fields:
+                continue
+            f0 = fields[0] or {}
+            raw_type = (f0.get("type") or "").strip()
+            values = f0.get("values") or []
+            ftype = _map_field_type(raw_type, values)
+            if not ftype:
+                continue
+            title = (q.get("label") or f0.get("name") or "").strip()
+            # Keep helper lines (“- Only select one”) but flatten for the Answers UI
+            title = re.sub(r"\s*\n\s*", " — ", title).strip()
+            if not title:
+                continue
+            path = (f0.get("name") or "").strip().rstrip("[]")
+            if path in seen_paths:
+                continue
+            if path:
+                seen_paths.add(path)
+            opts = []
+            for v in values:
+                lab = (v.get("label") if isinstance(v, dict) else str(v)) or ""
+                if lab:
+                    opts.append({"label": lab, "value": v.get("value") if isinstance(v, dict) else lab})
+            required = bool(q.get("required"))
+            # Always keep Resume even when optional (we upload a tailored PDF)
+            if ftype == "File" and re.search(r"resume", title, re.I):
+                required = True
+            qid = f"{job_key}:{path or i}"
+            out.append({
+                "id": qid,
+                "form": form,
+                "path": path or title,
+                "title": title,
+                "type": ftype,
+                "required": required,
+                "description": (q.get("description") or "").strip(),
+                "options": [o["label"] for o in opts] if opts else [],
+                "raw": {"greenhouse_type": raw_type, "name": path, "values": values[:50]},
+            })
+    return out
+
+
 def fetch_job_list(token: str, company: str = "") -> list[dict]:
     """All jobs on a board (no HTML content — fast)."""
     url = API.format(token=urllib.parse.quote(token)) + "/jobs"
@@ -166,14 +254,20 @@ def fetch_job_list(token: str, company: str = "") -> list[dict]:
     return [_normalize(token, company or token, j, with_content=False) for j in jobs]
 
 
-def fetch_job_details(token: str, job_id: str, company: str = "") -> dict | None:
-    """One job with description HTML."""
+def fetch_job_details(token: str, job_id: str, company: str = "") -> tuple[dict | None, list]:
+    """One job with description HTML + application questions (public API).
+
+    Returns (details_dict, questions_list). details is None if the job is gone.
+    """
     jid = str(job_id).split(":")[-1]
-    url = API.format(token=urllib.parse.quote(token)) + f"/jobs/{urllib.parse.quote(jid)}"
+    url = (API.format(token=urllib.parse.quote(token))
+           + f"/jobs/{urllib.parse.quote(jid)}?questions=true")
     try:
         data = _request(url)
     except RuntimeError:
-        return None
+        return None, []
     if not data or not data.get("id"):
-        return None
-    return _normalize(token, company or token, data, with_content=True)
+        return None, []
+    details = _normalize(token, company or token, data, with_content=True)
+    questions = normalize_questions(data, details["id"])
+    return details, questions

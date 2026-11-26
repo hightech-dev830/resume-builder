@@ -147,15 +147,25 @@ def mark_inactive(conn, org, active_ids):
     return cur.rowcount
 
 
-def jobs_needing_details(conn, orgs=None):
-    """Relevant active jobs missing a description."""
-    sql = ("SELECT id, org, company FROM jobs WHERE is_active=1 AND relevant=1 "
-           "AND (description IS NULL OR description='')")
+def jobs_needing_details(conn, orgs=None, refresh=False):
+    """Relevant active jobs missing description and/or application questions."""
+    if refresh:
+        sql = ("SELECT id, org, company FROM jobs WHERE is_active=1 AND relevant=1")
+    else:
+        # Need description OR no questions rows yet (Answers column = "no details yet")
+        sql = (
+            "SELECT j.id, j.org, j.company FROM jobs j "
+            "WHERE j.is_active=1 AND j.relevant=1 AND ("
+            "  j.description IS NULL OR j.description='' OR j.details_at IS NULL OR "
+            "  NOT EXISTS (SELECT 1 FROM questions q WHERE q.job_id = j.id)"
+            ")"
+        )
     rows = conn.execute(sql).fetchall()
     return [r for r in rows if not orgs or r["org"] in orgs]
 
 
-def save_details(conn, job_id, details):
+def save_details(conn, job_id, details, questions=None):
+    """Stage 2: description + application questions from the boards API."""
     conn.execute("""
         UPDATE jobs SET description=?, description_html=?,
             published_at=COALESCE(?, published_at), details_at=?,
@@ -164,6 +174,8 @@ def save_details(conn, job_id, details):
         WHERE id=?""",
         (details.get("description") or "", details.get("description_html") or "",
          details.get("published_at"), now(), job_id))
+    if questions is not None:
+        save_questions(conn, job_id, questions)
 
 
 def set_status(conn, job_id, status, note=None):
@@ -214,15 +226,32 @@ def save_answer(conn, qid, answer):
 
 
 def save_questions(conn, job_id, questions):
+    """Store apply-form questions. Keep required fields + Resume (even if optional)."""
+    keep = []
+    for q in questions or []:
+        title = q.get("title") or ""
+        path = (q.get("path") or "").lower()
+        is_resume = q.get("type") == "File" and ("resume" in title.lower() or path == "resume")
+        if q.get("required") or is_resume:
+            keep.append(q)
+    # If API returned nothing required, still store everything non-hidden so Answers works
+    if not keep and questions:
+        keep = list(questions)
     conn.execute("DELETE FROM questions WHERE job_id=?", (job_id,))
-    for i, q in enumerate(questions):
+    for i, q in enumerate(keep):
         qid = q.get("id") or f"{job_id}:{i}"
+        ftype = q.get("type") or "String"
+        title = q.get("title") or ""
         conn.execute("""
             INSERT OR REPLACE INTO questions
             (id, job_id, position, form, path, title, type, required, description, options, raw, bank_key)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
             qid, job_id, i, q.get("form") or "application", q.get("path") or "",
-            q.get("title") or "", q.get("type") or "String", int(bool(q.get("required"))),
+            title, ftype, int(bool(q.get("required"))),
             q.get("description") or "", json.dumps(q.get("options") or []),
             json.dumps(q.get("raw") or {}),
-            bank_key(q.get("title") or "", q.get("type") or "String")))
+            bank_key(title, ftype)))
+    conn.execute(
+        "UPDATE jobs SET status='ready' WHERE id=? AND status='new' "
+        "AND apply_url IS NOT NULL AND apply_url != ''",
+        (job_id,))

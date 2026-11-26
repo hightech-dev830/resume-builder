@@ -397,7 +397,7 @@ class App(tk.Tk):
         self.job_count.pack(side="left", padx=12)
         ttk.Button(bar, text="⬆ Sync to DB", command=self.sync_to_db).pack(side="right")
         ttk.Button(bar, text="⬇ Sync from DB", command=self.sync_from_db).pack(side="right", padx=(4, 4))
-        ttk.Button(bar, text="Fetch missing details", command=self.fetch_missing_details).pack(side="right", padx=4)
+        ttk.Button(bar, text="Fetch", command=self.fetch_missing_details).pack(side="right", padx=4)
         ttk.Button(bar, text="Collect today's jobs", command=self.collect_today).pack(side="right", padx=4)
         ttk.Button(bar, text="⟳ Collect jobs", command=self.collect).pack(side="right")
 
@@ -455,18 +455,21 @@ class App(tk.Tk):
         self.sel_info.pack(side="left", fill="x", expand=True)
         self.sel_info.bind("<Configure>", lambda e: self.sel_info.config(wraplength=max(120, e.width - 4)))
         btns = ttk.Frame(right)
-        btns.pack(fill="x", pady=(0, 6))
+        btns.pack(fill="x", pady=(0, 2))
         ttk.Button(btns, text="Open job page", command=self.open_job).pack(side="left")
         self.b_make = ttk.Button(btns, text="Make resume", command=self.make_resume_selected)
         self.b_make.pack(side="left", padx=4)
         ttk.Button(btns, text="Open resume", command=self.open_resume).pack(side="left")
-        self.b_dry = ttk.Button(btns, text="Dry run", command=self.dry_run_selected)
-        self.b_dry.pack(side="left", padx=4)
-        self.b_apply = ttk.Button(btns, text="Apply", style="Accent.TButton", command=self.apply_selected)
-        self.b_apply.pack(side="left")
-        self.b_answers_sel = ttk.Button(btns, text="Answers for selected",
+        btns2 = ttk.Frame(right)
+        btns2.pack(fill="x", pady=(0, 6))
+        self.b_dry = ttk.Button(btns2, text="Dry run", command=self.dry_run_selected)
+        self.b_dry.pack(side="left")
+        self.b_apply = ttk.Button(btns2, text="Apply", style="Accent.TButton",
+                                  command=self.apply_selected)
+        self.b_apply.pack(side="left", padx=4)
+        self.b_answers_sel = ttk.Button(btns2, text="Answers for selected",
                                         command=self.show_answers_for_selected)
-        self.b_answers_sel.pack(side="left", padx=4)
+        self.b_answers_sel.pack(side="left")
         stbar = ttk.Frame(right)
         stbar.pack(fill="x", pady=(0, 6))
         ttk.Label(stbar, text="Status").pack(side="left")
@@ -1523,11 +1526,11 @@ class App(tk.Tk):
         ).fetchone()["c"]
         if not n:
             if not auto:
-                messagebox.showinfo("Fetch missing details",
+                messagebox.showinfo("Fetch",
                                     "Every relevant job already has details. Nothing to fetch.")
             return False
         if not auto and not messagebox.askyesno(
-                "Fetch missing details",
+                "Fetch",
                 f"{n} relevant job(s) still show “no details yet” (often reopened from "
                 f"not-relevant). Download their questions now so you can Apply?"):
             return False
@@ -1740,7 +1743,7 @@ class App(tk.Tk):
                     "No details yet",
                     f"{len(missing)} of {len(ids)} selected job(s) still have no questions "
                     f"(often reopened from not-relevant). You cannot Apply until details are "
-                    f"fetched.\n\nFetch missing details now?"):
+                    f"fetched.\n\nFetch now?"):
                 self.fetch_missing_details()
             return
         titles = [f"• {self.jobs.set(i, 'title')}  ({self.jobs.set(i, 'company')})" for i in ids[:12]]
@@ -2283,7 +2286,7 @@ class App(tk.Tk):
                             "SELECT COUNT(*) c FROM jobs WHERE is_active=1 AND relevant=1 "
                             "AND status='ready'").fetchone()["c"]
                         self.log(f"Details fetch done → {ready} ready to apply"
-                                 + (f", {missing} still missing (retry Fetch missing details)\n"
+                                 + (f", {missing} still missing (retry Fetch)\n"
                                     if missing else ".\n"))
                         self._sync_after_collect()
                     # Apply/resume/etc. just freed the bot: run a queued Collect first, else
@@ -2339,7 +2342,7 @@ class App(tk.Tk):
         """Move Data Analyst / IT Specialist / Solutions Engineer etc. out of 'not relevant'
         when the current rules say YES (fixes older AI/rule rejections).
 
-        Does not auto-start Fetch missing details — use that Jobs-tab button when you want."""
+        Does not auto-start Fetch — use that Jobs-tab button when you want."""
         try:
             from relevance import RelevanceFilter
             n = RelevanceFilter(ai=None, log=lambda *a: None).reopen_false_negatives(self.conn)
@@ -2352,7 +2355,7 @@ class App(tk.Tk):
             ).fetchone()["c"]
             if missing:
                 self.log(f"{missing} relevant job(s) still have no details (cannot Apply yet) — "
-                         f"use “Fetch missing details” when ready.\n")
+                         f"use “Fetch” when ready.\n")
         except Exception as e:
             self.log(f"! Could not reopen relevance false-negatives: {str(e)[:150]}\n")
 

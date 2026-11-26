@@ -81,8 +81,8 @@ def request(method, table, params=None, body=None, prefer=None, headers=None):
             if e.code < 500 and e.code != 429:
                 hint = ""
                 if "PGRST205" in text or "does not exist" in text:
-                    hint = ("\nRun supabase/migrations/004_autobid_answers.sql in the Supabase "
-                            "SQL editor first.")
+                    hint = ("\nRun supabase/migrations/004_autobid_answers.sql (then "
+                            "006_autobid_questions_platform_array.sql) in the Supabase SQL editor.")
                 raise SupabaseError(f"Supabase {method} {table}: HTTP {e.code} {text[:300]}{hint}")
             last = f"HTTP {e.code} {text[:200]}"
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:

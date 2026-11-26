@@ -6,11 +6,17 @@ Each platform bot uses its OWN profile so Ashby and Greenhouse can bid at the sa
   AutoBid-Python/.browser-profile-greenhouse
   AutoBid-Python/.browser-profile-wellfound
 
+Mail inbox (Gmail) for Greenhouse security codes — separate from every bid bot:
+
+  AutoBid-Python/.browser-profile-mail
+
 Set AUTOBID_BOT in that bot's config.py (ashby / greenhouse / wellfound) before
 importing this module (or call open_browser(..., bot=\"ashby\")).
+Use bot=\"mail\" (or open_mail_browser) for the Gmail profile.
 
 If a per-bot profile is empty, it is seeded once from the legacy shared
-`.browser-profile` (so existing logins carry over).
+`.browser-profile` (so existing logins carry over). The mail profile is never
+seeded from the shared folder (keep Gmail separate).
 """
 import os
 import shutil
@@ -25,6 +31,7 @@ _BOT_DIRS = {
     "ashbyhq": ".browser-profile-ashby",
     "greenhouse": ".browser-profile-greenhouse",
     "wellfound": ".browser-profile-wellfound",
+    "mail": ".browser-profile-mail",
 }
 
 # Sites to open when preparing logins before the bot runs
@@ -34,6 +41,10 @@ PREP_URLS = (
     "https://chat.deepseek.com/",
 )
 
+MAIL_PREP_URLS = (
+    "https://mail.google.com/",
+)
+
 
 def get_profile_dir(bot=None):
     """Profile folder for this bot (or AUTOBID_BOT / shared legacy)."""
@@ -41,13 +52,21 @@ def get_profile_dir(bot=None):
     folder = _BOT_DIRS.get(name)
     path = _ROOT / folder if folder else _SHARED
     path.mkdir(parents=True, exist_ok=True)
-    _seed_from_shared(path)
+    if name != "mail":
+        _seed_from_shared(path)
     return path
+
+
+def get_mail_profile_dir():
+    """Gmail / inbox Chrome profile (.browser-profile-mail)."""
+    return get_profile_dir("mail")
 
 
 def _seed_from_shared(dest: Path):
     """One-time copy of legacy shared profile into an empty per-bot profile."""
     if dest.resolve() == _SHARED.resolve():
+        return
+    if dest.name == ".browser-profile-mail":
         return
     try:
         if any(dest.iterdir()):
@@ -161,6 +180,14 @@ def open_bot_chrome(urls=None, bot=None):
     return subprocess.Popen(args, cwd=str(_ROOT))
 
 
+def open_mail_chrome(urls=None):
+    """Open the mail Chrome (.browser-profile-mail) so you can sign in to Gmail.
+
+    Close it before Greenhouse Apply (Playwright needs this profile for code reading).
+    """
+    return open_bot_chrome(urls if urls is not None else list(MAIL_PREP_URLS), bot="mail")
+
+
 def open_browser(playwright, headless=False, bot=None):
     """Playwright persistent context for this bot's Chrome profile."""
     profile = get_profile_dir(bot)
@@ -174,11 +201,16 @@ def open_browser(playwright, headless=False, bot=None):
         if "ProcessSingleton" in str(e) or "in use" in str(e).lower():
             raise SystemExit(
                 f"This bot's Chrome profile is already open ({profile.name}).\n"
-                f"Close that Chrome window (Open bot browser) and run again.\n"
-                f"(Ashby / Greenhouse / Wellfound each have their own profile — "
+                f"Close that Chrome window (Open bot browser / Open mail browser) and run again.\n"
+                f"(Ashby / Greenhouse / Wellfound / mail each have their own profile — "
                 f"other bots can keep running.)"
             ) from e
         raise
+
+
+def open_mail_browser(playwright, headless=False):
+    """Playwright persistent context for the Gmail / mail profile."""
+    return open_browser(playwright, headless=headless, bot="mail")
 
 
 def __getattr__(name):

@@ -96,7 +96,7 @@ Most Ashby questions repeat on every job, but each job gives them a different fi
 
 The questions, your answers and your profile are saved in **Supabase** (the same project as Resume Builder), not in a local file, so every computer uses the same answers:
 
-- table `autobid_questions`: one row per question (`platform` = `ashby`, `key`, question text, type, choices, `answer`)
+- table `autobid_questions`: one row per question (`key`, shared `answer`; `platform` is a **text array** e.g. `{ashby,greenhouse}` so Ashby and Greenhouse share one bank)
 - table `autobid_profile`: name, email, phone, LinkedIn, GitHub, website, location, resume file
 
 Setup, once: run [`supabase/migrations/004_autobid_answers.sql`](../../supabase/migrations/004_autobid_answers.sql) in Supabase → SQL Editor. The bot reads `SUPABASE_URL` and `SUPABASE_SECRET_KEY` from `resume-builder/.env.local` or `.env`, the same file as the web app. On a new computer, copy that `.env` and you have all your answers.

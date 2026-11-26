@@ -95,6 +95,7 @@ def _is_empty(v):
 
 
 def _entry(row):
+    import autobid_qbank as qbank
     e = {"key": row["key"], "question": row["question"], "type": row["type"],
          "form": row.get("form") or "application"}
     if row.get("note"):
@@ -103,13 +104,13 @@ def _entry(row):
         e["choices"] = row["choices"]
     e["asked_in_jobs"] = row.get("asked_in_jobs") or 0
     e["answer"] = row.get("answer")
+    e["platforms"] = qbank.normalize_platforms(row.get("platform"), ensure=PLATFORM)
     return e
 
 
 def _fetch_questions():
-    return supa.select_all("autobid_questions", {
-        "select": "key,question,type,form,note,choices,asked_in_jobs,answer",
-        "platform": f"eq.{PLATFORM}", "order": "key"})
+    import autobid_qbank as qbank
+    return qbank.shared_fetch_questions(PLATFORM)
 
 
 def _fetch_profile():
@@ -125,18 +126,17 @@ def load_bank():
 
 
 def save_bank(bank):
+    import autobid_qbank as qbank
     rows = []
     for e in bank["questions"]:
         rows.append({
-            "platform": PLATFORM, "key": e["key"],
+            "platform": e.get("platforms") or [PLATFORM], "key": e["key"],
             "question": e.get("question") or "", "type": e.get("type") or "",
             "form": e.get("form") or "", "note": e.get("note"),
             "choices": e.get("choices"), "asked_in_jobs": int(e.get("asked_in_jobs") or 0),
             "answer": e.get("answer"), "updated_at": _now(),
         })
-    for i in range(0, len(rows), 200):
-        if rows[i:i + 200]:
-            supa.upsert("autobid_questions", rows[i:i + 200], "platform,key")
+    qbank.upsert_rows(rows, PLATFORM)
     set_profile(bank.get("profile") or {})
 
 
@@ -152,25 +152,24 @@ def set_profile(values, bank=None):
 
 
 def set_answer(key, answer, bank=None):
-    rows = supa.request(
-        "PATCH", "autobid_questions",
-        {"platform": f"eq.{PLATFORM}", "key": f"eq.{key}"},
-        {"answer": None if _is_empty(answer) else answer, "updated_at": _now()},
-        prefer="return=representation")
+    import autobid_qbank as qbank
+    ans = None if _is_empty(answer) else answer
+    rows = qbank.patch_answer(key, ans, PLATFORM)
     if not rows:
-        # upsert if missing
         q = next((x for x in (bank or {}).get("questions", []) if x["key"] == key), None)
         if q:
-            supa.upsert("autobid_questions", [{
-                "platform": PLATFORM, "key": key, "question": q.get("question") or "",
-                "type": q.get("type") or "", "form": q.get("form") or "",
-                "answer": answer, "updated_at": _now(), "asked_in_jobs": q.get("asked_in_jobs") or 0,
-            }], "platform,key")
+            qbank.upsert_rows([{
+                "platform": q.get("platforms") or [PLATFORM], "key": key,
+                "question": q.get("question") or "", "type": q.get("type") or "",
+                "form": q.get("form") or "",
+                "answer": ans, "updated_at": _now(),
+                "asked_in_jobs": q.get("asked_in_jobs") or 0,
+            }], PLATFORM)
     if bank is None:
         return load_bank()
     for q in bank["questions"]:
         if q["key"] == key:
-            q["answer"] = answer
+            q["answer"] = ans
     return bank
 
 

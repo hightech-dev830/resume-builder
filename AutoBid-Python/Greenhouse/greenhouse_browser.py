@@ -557,18 +557,36 @@ def close_modal(page):
 
 
 def extract_apply_form_fields(page):
+    """Discover visible apply-form fields (including long required custom questions)."""
     return page.evaluate("""() => {
-      const root = document.querySelector('[role="dialog"]')
+      const root = document.querySelector('#application')
+                || document.querySelector('form#application-form')
+                || document.querySelector('form[id*="application"]')
+                || document.querySelector('[role="dialog"]')
                 || document.querySelector('form')
                 || document.body;
       const fields = [];
+      const seen = new Set();
       for (const lab of root.querySelectorAll('label')) {
-        const title = (lab.innerText || '').replace(/\\*$/,'').trim().split('\\n')[0];
-        if (!title || title.length > 100) continue;
-        const required = /\\*/.test(lab.innerText || '');
+        const rawLab = (lab.innerText || '').trim();
+        // First line only; keep long titles (salary / address questions often > 80 chars)
+        let title = rawLab.replace(/\\s*\\*$/,'').trim().split('\\n')[0].trim();
+        if (!title || title.length < 2) continue;
+        if (title.length > 200) title = title.slice(0, 200);
+        const required = /\\*/.test(rawLab) || lab.querySelector('.required, [aria-required=true]') != null;
         let el = lab.querySelector('input,textarea,select');
-        if (!el && lab.htmlFor) el = root.querySelector('#' + CSS.escape(lab.htmlFor));
+        if (!el && lab.htmlFor) {
+          try { el = root.querySelector('#' + CSS.escape(lab.htmlFor)); } catch (e) {}
+        }
+        if (!el) {
+          // Greenhouse often puts the control next to / under the label
+          const wrap = lab.closest('div, fieldset, li') || lab.parentElement;
+          if (wrap) el = wrap.querySelector('input:not([type=hidden]),textarea,select');
+        }
         if (!el) continue;
+        const key = (el.name || el.id || title).toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
         let type = 'String';
         const t = (el.type || '').toLowerCase();
         if (el.tagName === 'TEXTAREA') type = 'LongText';
@@ -576,7 +594,7 @@ def extract_apply_form_fields(page):
         else if (t === 'email') type = 'Email';
         else if (t === 'tel') type = 'Phone';
         else if (t === 'file') type = 'File';
-        else if (t === 'checkbox') type = 'Boolean';
+        else if (t === 'checkbox' || t === 'radio') type = 'Boolean';
         fields.push({
           id: el.name || el.id || title, title, type, required,
           path: el.name || el.id || title, form: 'application',
@@ -652,15 +670,101 @@ def upload_resume(page, pdf_path: str):
         return False
 
 
+def fill_location_city(page, value: str) -> bool:
+    """Fill Greenhouse Location (City) geocode typeahead (#candidate-location).
+
+    Must type trusted keystrokes and click a suggestion so hidden lat/lon commit.
+    Plain fill() leaves Location required and validation fails on every job.
+    """
+    value = (value or "").strip()
+    if not value:
+        return False
+    # Prefer the official Greenhouse candidate-location input
+    candidates = [
+        page.locator("input#candidate-location").first,
+        page.locator("input[name='job_application[location]'], input[name='location']").first,
+        page.get_by_label(re.compile(r"Location\s*\(City\)|^Location$|^City$", re.I)).first,
+    ]
+    box = None
+    for loc in candidates:
+        try:
+            if loc.count() and loc.is_visible():
+                box = loc
+                break
+        except Exception:
+            continue
+    if box is None:
+        return False
+    try:
+        box.click(timeout=3000)
+        box.fill("")
+        # Real typing triggers geocode-earth-proxy (synthetic fill alone does not)
+        box.type(value, delay=35)
+        page.wait_for_timeout(900)
+        # Pick best matching option from the listbox / react-select menu
+        opted = False
+        for opt_sel in (
+            '[role="listbox"] [role="option"]',
+            '[role="option"]',
+            ".select__option",
+            '[class*="option"]',
+            "ul[role=listbox] li",
+        ):
+            try:
+                opts = page.locator(opt_sel)
+                n = min(opts.count(), 12)
+                if not n:
+                    continue
+                # Prefer exact / prefix match, else first suggestion
+                pick = None
+                needle = value.lower()
+                for i in range(n):
+                    t = (opts.nth(i).inner_text(timeout=800) or "").strip()
+                    if not t:
+                        continue
+                    tl = t.lower()
+                    if tl == needle or needle in tl or tl.startswith(needle.split(",")[0]):
+                        pick = opts.nth(i)
+                        break
+                if pick is None:
+                    pick = opts.first
+                pick.click(timeout=2500)
+                opted = True
+                break
+            except Exception:
+                continue
+        if not opted:
+            # Fallback: ArrowDown + Enter on focused combobox
+            try:
+                page.keyboard.press("ArrowDown")
+                page.wait_for_timeout(200)
+                page.keyboard.press("Enter")
+                opted = True
+            except Exception:
+                pass
+        page.wait_for_timeout(400)
+        if opted:
+            print(f"    location: {value}")
+        return opted
+    except Exception as e:
+        print(f"    ! location typeahead: {str(e).splitlines()[0][:100]}")
+        return False
+
+
 def fill_basic_fields(page, profile: dict):
-    """Fill First/Last/Email/Phone from profile."""
+    """Fill Full Name / First / Last / Email / Phone / Location from profile."""
     name = (profile.get("name") or "").strip()
-    first, last = (name.split(" ", 1) + [""])[:2] if name else ("", "")
-    if not last and name:
-        first, last = name, ""
+    first = (profile.get("first_name") or "").strip()
+    last = (profile.get("last_name") or "").strip()
+    if name and not (first or last):
+        parts = name.split(" ", 1)
+        first, last = parts[0], (parts[1] if len(parts) > 1 else "")
+    if not name:
+        name = f"{first} {last}".strip()
     pairs = [
-        (r"First Name", first or profile.get("first_name") or ""),
-        (r"Last Name", last or profile.get("last_name") or ""),
+        (r"Full Name", name),
+        (r"First Name", first),
+        (r"Last Name", last),
         (r"^Email$", profile.get("email") or ""),
         (r"^Phone$", profile.get("phone") or ""),
     ]
@@ -671,18 +775,304 @@ def fill_basic_fields(page, profile: dict):
             page.get_by_label(re.compile(label, re.I)).fill(str(value), timeout=2000)
         except Exception:
             try:
-                page.locator(f'input[placeholder*="{label.replace("^","").replace("$","")}" i]').first.fill(
-                    str(value), timeout=1500)
+                page.locator(
+                    f'input[name*="{label.replace("^","").replace("$","").lower().replace(" ","_")}" i], '
+                    f'input[id*="{label.replace("^","").replace("$","").lower().replace(" ","_")}" i], '
+                    f'input[placeholder*="{label.replace("^","").replace("$","")}" i]'
+                ).first.fill(str(value), timeout=1500)
             except Exception:
                 pass
+    # Classic boards often use #first_name / #last_name / #email / #phone
+    for sel, value in (
+        ("#first_name, input[name='job_application[first_name]']", first),
+        ("#last_name, input[name='job_application[last_name]']", last),
+        ("#email, input[name='job_application[email]']", profile.get("email") or ""),
+        ("#phone, input[name='job_application[phone]']", profile.get("phone") or ""),
+    ):
+        if not value:
+            continue
+        try:
+            loc = page.locator(sel).first
+            if loc.count():
+                loc.fill(str(value), timeout=1500)
+        except Exception:
+            pass
+    # Location (City) — geocode combobox on nearly every job-boards form
+    fill_location_city(page, profile.get("location") or "")
 
 
 def click_submit(page):
+    """Click Submit only. Does NOT mean the application succeeded."""
     for text in ("Submit application", "Submit Application", "Submit", "Apply"):
         try:
             page.locator(f'button:has-text("{text}")').first.click(timeout=3000)
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(800)
             return True
         except Exception:
             continue
     return False
+
+
+# ── Email security code (post-Submit OTP) ─────────────────────────────────────
+
+def has_email_verification(page) -> bool:
+    """True when Greenhouse shows the 8-box application security-code step."""
+    try:
+        if page.locator("fieldset#email-verification").count():
+            return True
+        if page.locator("#security-input-0").count():
+            return True
+        if page.locator("text=/verification code was sent|enter the 8-character code/i").count():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def email_verification_error(page) -> str:
+    try:
+        err = page.locator("#email-verification-error").first
+        if err.count() and err.is_visible():
+            return (err.inner_text(timeout=1000) or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _security_boxes_value(page) -> str:
+    try:
+        return page.evaluate(
+            """() => {
+              let s = '';
+              for (let i = 0; i < 8; i++) {
+                const el = document.getElementById('security-input-' + i);
+                if (!el) break;
+                s += (el.value || '');
+              }
+              return s;
+            }"""
+        ) or ""
+    except Exception:
+        return ""
+
+
+def fill_security_code(page, code: str) -> bool:
+    """Paste the 8-character OTP into Greenhouse Security code boxes, then verify.
+
+    Prefers a real paste into #security-input-0 (Greenhouse splits across boxes).
+    Falls back to per-box typing. Never pastes the email subject sentence.
+    """
+    from mail_code import looks_like_otp
+    code = re.sub(r"\s+", "", (code or "").strip())
+    if not looks_like_otp(code) and len(code) >= 8:
+        # Still allow digit-mixed codes that passed fetch; trim to 8
+        code = code[:8]
+    if len(code) < 8:
+        print(f"    ! security code too short / invalid: {code!r}")
+        return False
+    code = code[:8]
+    if not looks_like_otp(code):
+        print(f"    ! refusing non-OTP value for Security code: {code!r}")
+        return False
+
+    first = page.locator("#security-input-0").first
+    if first.count():
+        try:
+            first.click(timeout=3000)
+            # Clear any prior attempt
+            page.keyboard.press("Control+a")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(100)
+            # Paste path: write clipboard in this page, then Ctrl+V
+            try:
+                page.context.grant_permissions(
+                    ["clipboard-read", "clipboard-write"])
+            except Exception:
+                pass
+            try:
+                page.evaluate(
+                    """async (c) => { await navigator.clipboard.writeText(c); }""",
+                    code,
+                )
+                page.keyboard.press("Control+v")
+                page.wait_for_timeout(400)
+            except Exception:
+                # Synthetic paste event (works when clipboard API is blocked)
+                page.evaluate(
+                    """(c) => {
+                      const el = document.getElementById('security-input-0');
+                      if (!el) return;
+                      el.focus();
+                      el.value = '';
+                      const dt = new DataTransfer();
+                      dt.setData('text/plain', c);
+                      el.dispatchEvent(new ClipboardEvent('paste', {
+                        clipboardData: dt, bubbles: true, cancelable: true
+                      }));
+                      // If the app did not split on paste, set chars directly
+                      if (!(el.value && el.value.length)) {
+                        for (let i = 0; i < c.length; i++) {
+                          const box = document.getElementById('security-input-' + i);
+                          if (!box) break;
+                          box.value = c[i];
+                          box.dispatchEvent(new Event('input', { bubbles: true }));
+                          box.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                      }
+                    }""",
+                    code,
+                )
+                page.wait_for_timeout(300)
+            got = re.sub(r"\s+", "", _security_boxes_value(page))
+            if got.upper() == code.upper() or len(got) >= 8:
+                page.wait_for_timeout(200)
+                return True
+        except Exception:
+            pass
+
+        # Per-box typing fallback
+        filled = 0
+        for i, ch in enumerate(code):
+            sel = f"#security-input-{i}"
+            try:
+                loc = page.locator(sel).first
+                if not loc.count():
+                    break
+                loc.click(timeout=2000)
+                loc.fill("")
+                loc.type(ch, delay=40)
+                filled += 1
+            except Exception:
+                try:
+                    page.evaluate(
+                        """([i, ch]) => {
+                          const el = document.getElementById('security-input-' + i);
+                          if (!el) return false;
+                          el.focus();
+                          el.value = ch;
+                          el.dispatchEvent(new Event('input', { bubbles: true }));
+                          el.dispatchEvent(new Event('change', { bubbles: true }));
+                          return true;
+                        }""",
+                        [i, ch],
+                    )
+                    filled += 1
+                except Exception:
+                    break
+        if filled == 8:
+            page.wait_for_timeout(400)
+            return True
+        print(f"    ! filled {filled}/8 security-input boxes")
+        return filled >= 8
+
+    # Fallback: single labelled field
+    try:
+        page.get_by_label(re.compile(r"Security code|verification code", re.I)).fill(
+            code, timeout=2000)
+        return True
+    except Exception:
+        pass
+    print("    ! Security code inputs not found")
+    return False
+
+
+def _norm_url(url: str) -> str:
+    """Compare post-submit URLs without noisy trailing slash / fragment noise."""
+    u = (url or "").strip()
+    try:
+        p = urlparse(u)
+        path = (p.path or "").rstrip("/") or "/"
+        return f"{p.scheme}://{p.netloc}{path}?{p.query}".rstrip("?").lower()
+    except Exception:
+        return u.lower().rstrip("/")
+
+
+def url_changed_since(page, before: str) -> bool:
+    return _norm_url(page.url or "") != _norm_url(before)
+
+
+def application_confirmed(page, url_before: str | None = None) -> bool:
+    """Success only when the page left the apply URL (URL change /confirmation).
+
+    Clicking Submit alone is never enough. Body “thank you” text without a URL
+    change is ignored — leave the tab open for you to finish.
+    """
+    url = (page.url or "").lower()
+    if "/confirmation" in url:
+        return True
+    if url_before is not None and url_changed_since(page, url_before):
+        # Left the apply form URL → treat as success (Greenhouse thank-you / next step)
+        # unless we are still on the email OTP step (that is not done yet).
+        if has_email_verification(page):
+            return False
+        return True
+    return False
+
+
+def wait_after_submit(page, url_before: str, timeout_ms: int = 20_000) -> str:
+    """After Submit: wait for URL change, email OTP UI, or timeout.
+
+    Returns: "confirmed" | "email_verify" | "unchanged"
+    """
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        if has_email_verification(page):
+            return "email_verify"
+        if application_confirmed(page, url_before=url_before):
+            return "confirmed"
+        try:
+            page.wait_for_timeout(300)
+        except Exception:
+            break
+    if has_email_verification(page):
+        return "email_verify"
+    if application_confirmed(page, url_before=url_before):
+        return "confirmed"
+    return "unchanged"
+
+
+def handle_email_verification(page, mail_page, company: str = "", wait_sec: int = 90) -> bool:
+    """If the OTP step is showing, read Gmail (mail Chrome) and submit the code.
+
+    `mail_page` is a tab in `.browser-profile-mail`. Returns True only when the
+    URL changes after the code Submit (same rule as the main form).
+    """
+    if not has_email_verification(page):
+        return application_confirmed(page)
+    if mail_page is None:
+        print("    ! email verification shown but mail Chrome is not open")
+        return False
+    print("    email verification — Gmail: open latest mail → Copy code → paste …")
+    from mail_code import fetch_greenhouse_code, looks_like_otp
+    code = fetch_greenhouse_code(mail_page, company=company or "", wait_sec=wait_sec)
+    if not code or not looks_like_otp(code):
+        print(f"    ! bad / missing security code from Gmail: {code!r}")
+        return False
+    print(f"    pasting security code into Greenhouse: {code}")
+    if not fill_security_code(page, code):
+        return False
+    err = email_verification_error(page)
+    if err:
+        print(f"    ! {err}")
+    # Submit again after pasting the code (required)
+    url_before = page.url or ""
+    page.wait_for_timeout(400)
+    if not click_submit(page):
+        page.wait_for_timeout(800)
+        if not click_submit(page):
+            print("    ! Submit after security code failed")
+            return False
+    print("    clicked Submit after security code …")
+    outcome = wait_after_submit(page, url_before, timeout_ms=20_000)
+    if outcome == "confirmed":
+        return True
+    # Wrong/expired code: try once more with a fresher email (Copy code again)
+    if has_email_verification(page) or email_verification_error(page) or outcome == "unchanged":
+        print("    retrying with a newer Gmail Copy code …")
+        code2 = fetch_greenhouse_code(mail_page, company=company or "", wait_sec=45)
+        if code2 and looks_like_otp(code2) and code2 != code and fill_security_code(page, code2):
+            url_before2 = page.url or ""
+            if click_submit(page):
+                print("    clicked Submit after security code (retry) …")
+                return wait_after_submit(page, url_before2, timeout_ms=20_000) == "confirmed"
+    return application_confirmed(page, url_before=url_before)

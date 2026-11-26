@@ -63,9 +63,10 @@ CREATE TABLE IF NOT EXISTS public.ai_usage (
 CREATE INDEX IF NOT EXISTS ai_usage_created_at_idx ON public.ai_usage (created_at DESC);
 ALTER TABLE public.ai_usage ENABLE ROW LEVEL SECURITY;
 
--- answer bank + profile of the Python auto-bid bots (same as migrations/004_autobid_answers.sql)
+-- answer bank + profile of the Python auto-bid bots
+-- platform is TEXT[] (shared bank): e.g. {ashby,greenhouse} — see migrations/006_*
 CREATE TABLE IF NOT EXISTS public.autobid_questions (
-  platform       TEXT NOT NULL DEFAULT 'ashby',
+  platform       TEXT[] NOT NULL DEFAULT ARRAY['ashby']::TEXT[],
   key            TEXT NOT NULL,
   question       TEXT NOT NULL DEFAULT '',
   type           TEXT NOT NULL DEFAULT '',
@@ -76,8 +77,10 @@ CREATE TABLE IF NOT EXISTS public.autobid_questions (
   answer         JSONB,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (platform, key)
+  PRIMARY KEY (key)
 );
+CREATE INDEX IF NOT EXISTS autobid_questions_platform_gin
+  ON public.autobid_questions USING GIN (platform);
 CREATE TABLE IF NOT EXISTS public.autobid_profile (
   key         TEXT PRIMARY KEY,
   value       TEXT NOT NULL DEFAULT '',

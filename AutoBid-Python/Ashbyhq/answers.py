@@ -116,6 +116,7 @@ def _sort(questions):
 
 def _entry(row):
     """Supabase row -> bank entry (same shape as the old answers.json entries)."""
+    import autobid_qbank as qbank
     e = {"key": row["key"], "question": row["question"], "type": row["type"], "form": row["form"]}
     if row.get("note"):
         e["note"] = row["note"]
@@ -123,20 +124,22 @@ def _entry(row):
         e["choices"] = row["choices"]
     e["asked_in_jobs"] = row.get("asked_in_jobs") or 0
     e["answer"] = row.get("answer")
+    e["platforms"] = qbank.normalize_platforms(row.get("platform"), ensure=PLATFORM)
     return e
 
 
 def _meta(e):
-    """Bank entry -> the question columns (never the answer)."""
-    return {"platform": PLATFORM, "key": e["key"], "question": e.get("question") or "",
+    """Bank entry -> the question columns (never the answer). platform is TEXT[]."""
+    import autobid_qbank as qbank
+    plats = qbank.normalize_platforms(e.get("platforms") or e.get("platform"), ensure=PLATFORM)
+    return {"platform": plats, "key": e["key"], "question": e.get("question") or "",
             "type": e.get("type") or "", "form": e.get("form") or "", "note": e.get("note") or None,
             "choices": e.get("choices") or None, "asked_in_jobs": int(e.get("asked_in_jobs") or 0)}
 
 
 def _fetch_questions():
-    return supa.select_all("autobid_questions", {
-        "select": "key,question,type,form,note,choices,asked_in_jobs,answer",
-        "platform": f"eq.{PLATFORM}", "order": "key"})
+    import autobid_qbank as qbank
+    return qbank.shared_fetch_questions(PLATFORM)
 
 
 def _fetch_profile():
@@ -166,7 +169,8 @@ def _import_local_file():
         r["answer"] = have["answer"] if have and not _is_empty(have.get("answer")) else q.get("answer")
         r["updated_at"] = _now()
         rows.append(r)
-    supa.upsert("autobid_questions", rows, "platform,key")
+    import autobid_qbank as qbank
+    qbank.upsert_rows(rows, PLATFORM)
     profile = _fetch_profile()
     prows = [{"key": k, "value": str(v), "updated_at": _now()}
              for k, v in (old.get("profile") or {}).items() if not _is_empty(v) and _is_empty(profile.get(k))]
@@ -203,12 +207,13 @@ def save_bank(bank):
             m["updated_at"] = _now()
             changed.append(m)
     if changed:
-        supa.upsert("autobid_questions", changed, "platform,key")
+        import autobid_qbank as qbank
+        qbank.upsert_rows(changed, PLATFORM)
     keys = {q["key"] for q in bank["questions"]}
     gone = [k for k, r in remote.items() if k not in keys and _is_empty(r.get("answer"))]
-    for i in range(0, len(gone), 40):
-        supa.request("DELETE", "autobid_questions", {"platform": f"eq.{PLATFORM}",
-                     "key": supa.in_list(gone[i:i + 40]), "answer": "is.null"}, prefer="return=minimal")
+    if gone:
+        import autobid_qbank as qbank
+        qbank.delete_unanswered(gone, PLATFORM)
     # answered questions only another computer knows about: keep them in this bank too
     for k, r in remote.items():
         if k not in keys and not _is_empty(r.get("answer")):
@@ -249,26 +254,28 @@ def flush_answers(changes, bank=None):
         row["answer"] = None if _is_empty(answer) else answer
         row["updated_at"] = _now()
         rows.append(row)
-    for i in range(0, len(rows), 100):
-        chunk = rows[i:i + 100]
-        if chunk:
-            supa.upsert("autobid_questions", chunk, "platform,key")
+    if rows:
+        import autobid_qbank as qbank
+        qbank.upsert_rows(rows, PLATFORM)
     return bank
 
 
 def set_answer(key, answer, bank=None):
     """Save ONE answer in Supabase immediately (only this question changes). answer=None clears it.
     Prefer set_answer_local + flush_answers from the UI for batching."""
-    rows = supa.request("PATCH", "autobid_questions", {"platform": f"eq.{PLATFORM}", "key": f"eq.{key}"},
-                        {"answer": None if _is_empty(answer) else answer, "updated_at": _now()},
-                        prefer="return=representation")
+    import autobid_qbank as qbank
+    ans = None if _is_empty(answer) else answer
+    rows = qbank.patch_answer(key, ans, PLATFORM)
     if not rows:
-        raise KeyError(f"question not in the answer bank: {key}")
+        q = next((x for x in (bank or {}).get("questions", []) if x["key"] == key), None)
+        if not q:
+            raise KeyError(f"question not in the answer bank: {key}")
+        qbank.upsert_rows([{**_meta(q), "answer": ans, "updated_at": _now()}], PLATFORM)
     if bank is None:
         return load_bank()
     for q in bank["questions"]:
         if q["key"] == key:
-            q["answer"] = rows[0]["answer"]
+            q["answer"] = ans if not rows else rows[0].get("answer", ans)
     return bank
 
 
@@ -358,13 +365,12 @@ def import_matched_answers_from_backup(path, bank=None, dry_run=False):
             stats["no_match"] += 1
             continue
         q["answer"] = hit["answer"]
-        updates.append({"platform": PLATFORM, "key": q["key"], "answer": hit["answer"],
-                        "updated_at": _now()})
+        updates.append({"key": q["key"], "answer": hit["answer"], "updated_at": _now()})
         stats["filled"] += 1
         if len(stats["examples"]) < 8:
             stats["examples"].append(q.get("question") or q["key"])
     if updates and not dry_run:
-        # PATCH one key at a time would be slow; upsert answer column via full row merge
+        import autobid_qbank as qbank
         remote = {r["key"]: r for r in _fetch_questions()}
         payload = []
         for u in updates:
@@ -372,15 +378,13 @@ def import_matched_answers_from_backup(path, bank=None, dry_run=False):
             if not r:
                 continue
             payload.append({
-                "platform": PLATFORM, "key": u["key"],
+                "platform": r.get("platform"), "key": u["key"],
                 "question": r.get("question") or "", "type": r.get("type") or "",
                 "form": r.get("form") or "", "note": r.get("note"),
                 "choices": r.get("choices"), "asked_in_jobs": int(r.get("asked_in_jobs") or 0),
                 "answer": u["answer"], "updated_at": u["updated_at"],
             })
-        if payload:
-            for i in range(0, len(payload), 200):
-                supa.upsert("autobid_questions", payload[i:i + 200], "platform,key")
+        qbank.upsert_rows(payload, PLATFORM)
     return bank, stats
 
 
