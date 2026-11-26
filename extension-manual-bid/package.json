@@ -1,0 +1,7 @@
+{
+  "name": "auto-bid-v2",
+  "private": true,
+  "type": "module",
+  "description": "Chrome extension (no build step). This file only tells Node the lib/ files are ES modules, for the tests.",
+  "scripts": { "test": "node --test test/" }
+}
