@@ -178,3 +178,44 @@ def make_resume(ai, job, source="bot"):
         "", job.get("jd") or "",
     ]), encoding="utf-8")
     return result["pdf"]
+
+
+def make_cover_letter(ai, job, resume_pdf, source="bot"):
+    """Write a cover letter for this job and render it next to the tailored resume.
+
+    Uses Resume Builder's cover-letter prompt (Settings, else the app default) and the
+    tailored resume.json from the same folder, so the letter matches the resume sent.
+    Reuses <folder>/KevinBurgess_CoverLetter.pdf when it already exists. Returns the PDF path.
+    """
+    out_dir = Path(resume_pdf).parent
+    file_base = "KevinBurgess"
+    pdf = out_dir / f"{file_base}_CoverLetter.pdf"
+    if pdf.is_file():
+        return str(pdf)
+    s = settings()
+    resume_json = out_dir / "resume.json"
+    resume = (json.loads(resume_json.read_text(encoding="utf-8"))
+              if resume_json.is_file() else s["base"])
+    prompt = s.get("coverPrompt") or ""
+    user = (f"<resume>\n{json.dumps(resume, indent=2, ensure_ascii=False)}\n</resume>\n\n"
+            f"{job_block(job)}\n\nWrite the cover letter. Output only the letter text.")
+    if ai.provider in API:
+        text = ai.ask(user, system=prompt, max_tokens=4000, effort="medium")
+    else:
+        try:
+            text = ai.ask(f"{prompt}\n\n{user}")
+        finally:
+            ai.finish_web_chat()
+    text = re.sub(r"^```[a-z]*\s*|\s*```$", "", (text or "").strip()).strip()
+    if len(text) < 200:
+        raise RuntimeError(f"{ai.provider} returned no usable cover letter")
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump({"resume": resume, "letter": text, "template": s["template"],
+                   "job": {"company": job.get("company") or "", "role": job.get("role") or ""},
+                   "outDir": str(out_dir), "fileBase": file_base}, f, ensure_ascii=False)
+        req = f.name
+    try:
+        result = _node("cover", req)
+    finally:
+        Path(req).unlink(missing_ok=True)
+    return result["pdf"]

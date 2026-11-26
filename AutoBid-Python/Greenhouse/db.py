@@ -81,6 +81,10 @@ def connect():
         pass
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    qcols = {r["name"] for r in conn.execute("PRAGMA table_info(questions)")}
+    if "prepared" not in qcols:
+        # per-job answer written by "Prepare answers" (JSON); Apply uses it first
+        conn.execute("ALTER TABLE questions ADD COLUMN prepared TEXT")
     return conn
 
 
@@ -187,6 +191,13 @@ def set_status(conn, job_id, status, note=None):
     conn.commit()
 
 
+def applied_orgs(conn):
+    """Board tokens (companies) with at least one job applied to (or a later status)."""
+    ph = ",".join("?" * len(APPLIED_STATUSES))
+    return {r[0] for r in conn.execute(
+        f"SELECT DISTINCT org FROM jobs WHERE status IN ({ph})", APPLIED_STATUSES)}
+
+
 def job_for_ai(job):
     """Shape expected by common/resume.py (same as the extension)."""
     locs = []
@@ -225,6 +236,32 @@ def save_answer(conn, qid, answer):
     conn.execute("UPDATE questions SET answer=? WHERE id=?", (answer, qid))
 
 
+def add_questions(conn, job_id, questions):
+    """Add questions seen only on the live apply form. Never replaces stored (API)
+    questions, which carry the real field types and options. Returns how many were added."""
+    have = {r[0] for r in conn.execute(
+        "SELECT bank_key FROM questions WHERE job_id=?", (job_id,))}
+    pos = conn.execute("SELECT COALESCE(MAX(position), -1) FROM questions WHERE job_id=?",
+                       (job_id,)).fetchone()[0]
+    added = 0
+    for q in questions or []:
+        title, ftype = q.get("title") or "", q.get("type") or "String"
+        key = bank_key(title, ftype)
+        if not title or key in have:
+            continue
+        have.add(key)
+        pos += 1
+        conn.execute("""
+            INSERT OR IGNORE INTO questions
+            (id, job_id, position, form, path, title, type, required, description, options, raw, bank_key)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            f"{job_id}:live:{q.get('path') or pos}", job_id, pos, "application",
+            q.get("path") or "", title, ftype, int(bool(q.get("required"))), "",
+            json.dumps(q.get("options") or []), json.dumps({"live_form": True}), key))
+        added += 1
+    return added
+
+
 def save_questions(conn, job_id, questions):
     """Store apply-form questions. Keep required fields + Resume (even if optional)."""
     keep = []
@@ -237,20 +274,26 @@ def save_questions(conn, job_id, questions):
     # If API returned nothing required, still store everything non-hidden so Answers works
     if not keep and questions:
         keep = list(questions)
+    # keep answers made by "Prepare answers" when the questions are fetched again
+    prepared = {r["bank_key"]: r["prepared"] for r in conn.execute(
+        "SELECT bank_key, prepared FROM questions WHERE job_id=? AND prepared IS NOT NULL",
+        (job_id,))}
     conn.execute("DELETE FROM questions WHERE job_id=?", (job_id,))
     for i, q in enumerate(keep):
         qid = q.get("id") or f"{job_id}:{i}"
         ftype = q.get("type") or "String"
         title = q.get("title") or ""
+        key = bank_key(title, ftype)
         conn.execute("""
             INSERT OR REPLACE INTO questions
-            (id, job_id, position, form, path, title, type, required, description, options, raw, bank_key)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            (id, job_id, position, form, path, title, type, required, description, options, raw,
+             bank_key, prepared)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
             qid, job_id, i, q.get("form") or "application", q.get("path") or "",
             title, ftype, int(bool(q.get("required"))),
             q.get("description") or "", json.dumps(q.get("options") or []),
             json.dumps(q.get("raw") or {}),
-            bank_key(title, ftype)))
+            key, prepared.get(key)))
     conn.execute(
         "UPDATE jobs SET status='ready' WHERE id=? AND status='new' "
         "AND apply_url IS NOT NULL AND apply_url != ''",

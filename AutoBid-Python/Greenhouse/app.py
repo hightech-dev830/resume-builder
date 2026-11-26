@@ -26,6 +26,7 @@ from config import BASE_DIR, BATCH_SIZE, PAUSE_FLAG, STOP_FLAG
 import answers as bank_mod
 import ai_settings
 import db
+from prepare_ui import PREPARE_LABEL, PrepareAnswersMixin
 
 PY = sys.executable.replace("pythonw.exe", "python.exe")
 SETTINGS_PATH = BASE_DIR / "data" / "app_settings.json"
@@ -230,7 +231,7 @@ class CompanyPicker(tk.Toplevel):
         self.destroy()
 
 
-class App(tk.Tk):
+class App(PrepareAnswersMixin, tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("AutoBid · Greenhouse")
@@ -239,8 +240,9 @@ class App(tk.Tk):
         self.conn = db.connect()
         try:
             self.bank = bank_mod.load_bank()
-            bank_mod.sync_bank(self.conn, self.bank)
-            bank_mod.save_bank(self.bank)
+            new_keys = []
+            bank_mod.sync_bank(self.conn, self.bank, new_keys)
+            bank_mod.save_new_questions(self.bank, new_keys)
         except Exception as e:
             self.withdraw()
             messagebox.showerror("Supabase", f"Could not load answer bank:\n{e}")
@@ -305,6 +307,12 @@ class App(tk.Tk):
             side="left", padx=(16, 0))
         ttk.Button(top, text="Open mail browser", command=self.open_mail_browser).pack(
             side="left", padx=(8, 0))
+        # Where Apply reads Greenhouse security codes (setting kept in data/app_settings.json)
+        ttk.Label(top, text="Codes from").pack(side="left", padx=(12, 4))
+        self.mail_pick = ttk.Combobox(top, width=8, state="readonly", values=["Gmail", "Outlook"])
+        self.mail_pick.set("Outlook" if self.settings.get("mail_provider") == "outlook" else "Gmail")
+        self.mail_pick.bind("<<ComboboxSelected>>", lambda e: self._save_mail_provider())
+        self.mail_pick.pack(side="left")
         self.stats = ttk.Label(top, text="", foreground="#444")
         self.stats.pack(side="right")
         self.auto_hdr = ttk.Label(top, text="", foreground="#1a7f37")
@@ -396,6 +404,12 @@ class App(tk.Tk):
         self.f_search = ttk.Entry(bar, width=30)
         self.f_search.pack(side="left", padx=4)
         self.f_search.bind("<KeyRelease>", lambda e: self.load_jobs())
+        # One application per company: other jobs at a company already applied to are
+        # marked "company applied" (grey) and Apply skips them.
+        self.f_hide_applied_co = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Hide companies I applied to",
+                        variable=self.f_hide_applied_co,
+                        command=self.load_jobs).pack(side="left", padx=(8, 0))
         self.job_count = ttk.Label(bar, text="", style="Stat.TLabel")
         self.job_count.pack(side="left", padx=12)
 
@@ -430,6 +444,7 @@ class App(tk.Tk):
                              stretch=c in ("title", "location"))
         for st, col in STATUS_COLORS.items():
             self.jobs.tag_configure(st, foreground=col)
+        self.jobs.tag_configure("co_applied", foreground="#9e9e9e")
         vsb = ttk.Scrollbar(left, orient="vertical", command=self.jobs.yview)
         hsb = ttk.Scrollbar(left, orient="horizontal", command=self.jobs.xview)
         self.jobs.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -472,6 +487,8 @@ class App(tk.Tk):
         self.b_answers_sel = ttk.Button(btns2, text="Answers for selected",
                                         command=self.show_answers_for_selected)
         self.b_answers_sel.pack(side="left")
+        ttk.Button(btns2, text="Prepare answers", command=self.prepare_answers_for_jobs).pack(
+            side="left", padx=4)
         stbar = ttk.Frame(right)
         stbar.pack(fill="x", pady=(0, 6))
         ttk.Label(stbar, text="Status").pack(side="left")
@@ -555,6 +572,8 @@ class App(tk.Tk):
                         command=self.load_bank_list).pack(side="right")
         ttk.Button(top, text="Import from backup…",
                    command=self.import_answers_backup).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="Prepare selected", style="Accent.TButton",
+                   command=self.prepare_answers_for_questions).pack(side="right", padx=(0, 8))
         self.q_kind = ttk.Combobox(top, state="readonly", width=24,
                                      values=["You answer", "AI writes (text / essays)", "All required"])
         self.q_kind.set("You answer")
@@ -591,7 +610,8 @@ class App(tk.Tk):
         self.q_count.pack(anchor="w")
         qframe = ttk.Frame(right)
         cols = ("jobs", "type", "question", "answer")
-        self.qlist = ttk.Treeview(qframe, columns=cols, show="headings", selectmode="browse",
+        # extended: Ctrl/Shift-click several questions for "Prepare selected"
+        self.qlist = ttk.Treeview(qframe, columns=cols, show="headings", selectmode="extended",
                                   height=12)
         self.q_headings = {
             "jobs": "Required in", "type": "Type", "question": "Question", "answer": "Answer"}
@@ -603,19 +623,23 @@ class App(tk.Tk):
                                command=lambda c=c: self.sort_questions(c, toggle=True))
             self.qlist.column(c, width=w, stretch=c == "question")
         self.qlist.tag_configure("open", foreground="#c62828")
+        # unsaved draft (configured after "open" so the draft colour wins)
+        self.qlist.tag_configure("draft", foreground="#1f4fbf", background="#eef3ff")
         qsb = ttk.Scrollbar(qframe, orient="vertical", command=self.qlist.yview)
         self.qlist.configure(yscrollcommand=qsb.set)
         qsb.pack(side="right", fill="y")
         self.qlist.pack(side="left", fill="both", expand=True)
         self.qlist.bind("<<TreeviewSelect>>", lambda e: self.edit_question())
 
-        ed = ttk.LabelFrame(right, text="  Answer (local until Sync / tab change)  ", padding=8)
+        ed = ttk.LabelFrame(
+            right, text="  Answer (draft until “Save answers” or a tab change)  ", padding=8)
         ed.pack(side="bottom", fill="x")
         eb = ttk.Frame(ed)
         eb.pack(side="bottom", fill="x")
-        ttk.Button(eb, text="⬆ Sync answers to DB",
-                   command=lambda: self.flush_pending_answers(reason="Sync answers")).pack(
-            side="right", padx=(8, 0))
+        self.save_answers_btn = ttk.Button(
+            eb, text="💾 Save answers", style="Accent.TButton", state="disabled",
+            command=lambda: self.flush_pending_answers(reason="Save answers"))
+        self.save_answers_btn.pack(side="right", padx=(8, 0))
         self.e_saved = ttk.Label(eb, text="", foreground="#1a7f37")
         self.e_saved.pack(side="right", padx=10)
         self.back_btn = ttk.Button(eb, text="← Back to job", command=self.back_to_job)
@@ -626,6 +650,7 @@ class App(tk.Tk):
         self.e_note.pack(anchor="w")
         self.e_holder = ttk.Frame(ed)
         self.e_holder.pack(fill="x", pady=6)
+        self._build_per_job_frame(ed)       # per-job answers (Prepare answers), under the answer
         self._answer_ignore = False
         self._answer_save_after = None
         qframe.pack(fill="both", expand=True, pady=(6, 6))
@@ -708,6 +733,8 @@ class App(tk.Tk):
                     else f"Companies: {len(chosen)} ▾"))
         keep = self.jobs.selection()
         self.jobs.delete(*self.jobs.get_children())
+        applied_orgs = db.applied_orgs(self.conn)
+        hide_applied_co = self.f_hide_applied_co.get()
         answers_filter = self.f_answers.get()
         max_age = POSTED_WITHIN[self.f_posted.get()]
         today = date.today()
@@ -755,8 +782,13 @@ class App(tk.Tk):
             if r["relevance_by"]:
                 rel += f" ({r['relevance_by']})"
             loc_show = loc[:40] if loc else (wpt or "—")
-            self.jobs.insert("", "end", iid=r["id"], tags=(r["status"],), values=(
-                "☐", r["status"], company, r["title"], posted_label(posted, today),
+            status_cell, tags = r["status"], (r["status"],)
+            if r["org"] in applied_orgs and r["status"] not in db.APPLIED_STATUSES:
+                if hide_applied_co:
+                    continue
+                status_cell, tags = f"{r['status']} · company applied", ("co_applied",)
+            self.jobs.insert("", "end", iid=r["id"], tags=tags, values=(
+                "☐", status_cell, company, r["title"], posted_label(posted, today),
                 loc_show, (r["compensation"] or "")[:50], ready, has_resume, apply_cell, rel))
         if self.sort_col:
             self.sort_jobs(self.sort_col)
@@ -984,8 +1016,9 @@ class App(tk.Tk):
         bk = q.get("bank_key") or db.bank_key(q.get("title") or "", q.get("type") or "String")
         idx = next((n for n, b in enumerate(self.bank["questions"]) if b["key"] == bk), None)
         if idx is None:
-            bank_mod.sync_bank(self.conn, self.bank)
-            bank_mod.save_bank(self.bank)
+            new_keys = []
+            bank_mod.sync_bank(self.conn, self.bank, new_keys)
+            bank_mod.save_new_questions(self.bank, new_keys)
             idx = next((n for n, b in enumerate(self.bank["questions"]) if b["key"] == bk), None)
             if idx is None:
                 messagebox.showwarning("Answers", "This question is not in the answer bank yet.")
@@ -1037,9 +1070,14 @@ class App(tk.Tk):
             messagebox.showinfo("Answers for selected",
                                 "Tick one or more jobs (or select a job on the right).")
             return
+        self.show_answers_for_ids(ids)
+
+    def show_answers_for_ids(self, ids):
+        """Answers tab, listing only the questions these jobs require."""
         try:
-            bank_mod.sync_bank(self.conn, self.bank)
-            bank_mod.save_bank(self.bank)
+            new_keys = []
+            bank_mod.sync_bank(self.conn, self.bank, new_keys)
+            bank_mod.save_new_questions(self.bank, new_keys)
         except Exception as e:
             self.log(f"! Answer bank sync: {e}\n")
         placeholders = ",".join("?" * len(ids))
@@ -1103,11 +1141,16 @@ class App(tk.Tk):
             text=f"{total} jobs · {applied} applied · {rows.get('needs_you', 0)} need you")
 
     def refresh_all(self):
+        # Push only questions that are new to the bank. The old full save_bank() re-sent
+        # every answer (and the profile) from this app's memory on every refresh.
         try:
-            bank_mod.sync_bank(self.conn, self.bank)
-            bank_mod.save_bank(self.bank)
+            new_keys = []
+            bank_mod.sync_bank(self.conn, self.bank, new_keys)
+            if new_keys:
+                bank_mod.save_new_questions(self.bank, new_keys)
         except Exception:
             pass
+        self._answers_dirty = False
         self.resolved = bank_mod.resolve_all(self.conn, self.bank)
         self.load_jobs()
         if getattr(self, "qlist", None):
@@ -1300,6 +1343,14 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Open bot browser", str(e))
 
+    def _mail_provider(self):
+        return "outlook" if self.mail_pick.get() == "Outlook" else "gmail"
+
+    def _save_mail_provider(self):
+        self.settings["mail_provider"] = self._mail_provider()
+        save_settings(self.settings)
+        self.log(f"Security codes will be read from {self.mail_pick.get()}.\n")
+
     def open_mail_browser(self):
         if self.proc and self.proc.poll() is None:
             messagebox.showwarning("Busy", "Stop the current task first.")
@@ -1307,9 +1358,9 @@ class App(tk.Tk):
         try:
             from browser import get_mail_profile_dir
             import open_browser_mail
-            open_browser_mail.main()
+            open_browser_mail.main(self._mail_provider())
             self.log(f"Opened mail Chrome ({get_mail_profile_dir()}) — "
-                     f"sign in to Gmail (same address as on applications), "
+                     f"sign in to {self.mail_pick.get()} (same address as on applications), "
                      f"then close it before Apply. Apply will reopen Greenhouse + mail "
                      f"together to read security codes.\n")
         except Exception as e:
@@ -1336,9 +1387,12 @@ class App(tk.Tk):
                 "Apply opens Greenhouse Chrome + mail Chrome.\n"
                 "Sign in to Gmail first via “Open mail browser” if you have not yet."):
             return
+        # bid.py reads the bank from Supabase: save draft answers first
+        self.flush_pending_answers(reason="before Apply")
         self._flush_ai_settings()
         path = self._write_selection(ids)
-        args = ["bid.py", "--jobs-file", str(path), "--batch", str(BATCH_SIZE)]
+        args = ["bid.py", "--jobs-file", str(path), "--batch", str(BATCH_SIZE),
+                "--mail", self._mail_provider()]
         if dry:
             args.append("--dry-run")
         self.run_script(args, f"{'Dry run' if dry else 'Applying'}: {len(ids)} jobs")
@@ -1530,7 +1584,7 @@ class App(tk.Tk):
         if name == "bid.py":
             if not self._ensure_chrome_free(auto=quiet, also_mail=True):
                 return False
-        elif name == "make_resume.py":
+        elif name in ("make_resume.py", "prepare_answers.py"):
             if not self._ensure_chrome_free(auto=quiet, also_mail=False):
                 return False
         STOP_FLAG.unlink(missing_ok=True)
@@ -1657,6 +1711,8 @@ class App(tk.Tk):
                             "today" if "today" in finished_label.lower() else self.f_posted.get())
                     # Collect / Fetch update questions → refresh Answers column
                     self.refresh_all()
+                    if finished_label.startswith(PREPARE_LABEL):
+                        self.after(200, self._prepare_finished)
                     # Queued Collect first; else start auto-collect if a slot is due
                     pending = self._pending_collect
                     if pending:
@@ -1773,9 +1829,11 @@ class App(tk.Tk):
                 n = q["asked_in_jobs"]
                 jobs_col = f"{n} job{'s' if n != 1 else ''}"
                 jobs_n = int(n or 0)
+            tags = (("open",) if empty else ()) + (
+                ("draft",) if q["key"] in self.pending_answers else ())
             rows.append({
                 "iid": str(i),
-                "tags": ("open",) if empty else (),
+                "tags": tags,
                 "values": (jobs_col, q.get("type") or "", q.get("question") or "", (ans or "")[:80]),
                 "jobs_n": jobs_n,
                 "type": q.get("type") or "",
@@ -1851,6 +1909,7 @@ class App(tk.Tk):
                 self.e_widget.bind("<FocusOut>", lambda e: self._auto_save_answer())
         finally:
             self._answer_ignore = False
+        self._show_per_job_answers(q)
 
     def _schedule_answer_save(self, _event=None):
         if self._answer_ignore:
@@ -1887,19 +1946,49 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Not saved", f"The answer could not be cached:\n{e}")
             return
+        # Draft only: no Supabase call and no full reload while typing. Only this row
+        # changes; everything is written in one go by "Save answers" or a tab change.
         self.pending_answers[q["key"]] = None if bank_mod._is_empty(answer) else answer
-        shown = "(cleared)" if answer is None else str(answer)[:60]
-        n_pend = len(self.pending_answers)
-        self.e_saved.config(
-            text=f"✓ Local ({n_pend} pending)  {datetime.now().strftime('%H:%M:%S')}")
-        self.log(f"✓ Local: {(q.get('question') or '')[:70]}  ->  {shown}  "
-                 f"({n_pend} pending sync)\n")
-        prev = self.qlist.selection()
-        self.load_bank_list()
-        if prev and self.qlist.exists(prev[0]):
-            self.qlist.selection_set(prev[0])
-            self.qlist.see(prev[0])
-        self.refresh_all()
+        self._answers_dirty = True
+        self._update_q_row(q)
+        self._update_draft_ui()
+
+    def _update_q_row(self, q):
+        """Repaint one Answers row in place (answer text + draft colour)."""
+        try:
+            iid = str(self.bank["questions"].index(q))
+        except ValueError:
+            return
+        if not self.qlist.exists(iid):
+            return
+        empty = bank_mod._is_empty(q.get("answer"))
+        if empty:
+            ans = ("(AI writes per job)" if bank_mod.is_ai_text_question(q)
+                   else "(need your answer)")
+        else:
+            ans = (", ".join(q["answer"]) if isinstance(q["answer"], list)
+                   else str(q["answer"]))
+        self.qlist.set(iid, "answer", ans[:80])
+        tags = []
+        if empty:
+            tags.append("open")
+        if q["key"] in self.pending_answers:
+            tags.append("draft")
+        self.qlist.item(iid, tags=tuple(tags))
+        meta = self._q_row_meta.get(iid)
+        if meta:
+            meta.update(answer=ans, empty=empty)
+
+    def _update_draft_ui(self):
+        n = len(self.pending_answers)
+        if getattr(self, "save_answers_btn", None):
+            self.save_answers_btn.config(
+                text=f"💾 Save answers ({n})" if n else "💾 Save answers",
+                state="normal" if n else "disabled")
+        if getattr(self, "e_saved", None):
+            self.e_saved.config(
+                text=f"✎ {n} draft answer{'s' if n != 1 else ''} not saved yet" if n else "",
+                foreground="#b35900")
 
     def flush_pending_answers(self, reason=""):
         """Push all locally cached answer changes to Supabase in one multi-save."""
@@ -1914,6 +2003,7 @@ class App(tk.Tk):
                 self.save_answer()
         pending = dict(self.pending_answers)
         if not pending:
+            self._refresh_after_answers()
             return 0
         try:
             bank_mod.flush_answers(pending, self.bank)
@@ -1925,17 +2015,37 @@ class App(tk.Tk):
             return 0
         self.pending_answers.clear()
         why = f" ({reason})" if reason else ""
-        self.log(f"✓ Synced {len(pending)} answer(s) to Supabase{why}\n")
+        self.log(f"✓ Saved {len(pending)} answer(s) to Supabase{why}\n")
+        self._update_draft_ui()
         if getattr(self, "e_saved", None):
             self.e_saved.config(
-                text=f"✓ Synced {len(pending)}  {datetime.now().strftime('%H:%M:%S')}")
+                text=f"✓ Saved {len(pending)}  {datetime.now().strftime('%H:%M:%S')}",
+                foreground="#1a7f37")
+        for iid in self.qlist.get_children():
+            tags = tuple(t for t in self.qlist.item(iid, "tags") if t != "draft")
+            self.qlist.item(iid, tags=tags)
+        self._refresh_after_answers()
         return len(pending)
 
+    def _refresh_after_answers(self):
+        """Edited answers change the Jobs tab's Answers column: recompute it locally
+        (SQLite + the in-memory bank, no Supabase), once per save instead of per keystroke."""
+        if not getattr(self, "_answers_dirty", False):
+            return
+        self._answers_dirty = False
+        self.resolved = bank_mod.resolve_all(self.conn, self.bank)
+        self.load_jobs()
+        if self.selected_job:
+            self.show_job()
+
     def _on_tab_changed(self, _event=None):
+        if getattr(self, "_suppress_tab_flush", False):
+            return   # Prepare answers just opened the Answers tab with drafts to review
         self.flush_pending_answers(reason="tab change")
 
     def _on_close(self):
         try:
+            self._answers_dirty = False   # closing: no need to rebuild the job list
             self.flush_pending_answers(reason="app close")
         except Exception:
             pass
@@ -2011,8 +2121,9 @@ class App(tk.Tk):
         ttk.Button(browser_bar, text="Open mail browser", command=self.open_mail_browser).pack(
             side="left", padx=(8, 0))
         ttk.Label(browser_bar, foreground="#666", wraplength=700, text=(
-            "  Greenhouse Chrome = MyGreenhouse / AI. Mail Chrome = Gmail for "
-            "application security codes. Close both before Apply.")).pack(side="left", padx=(8, 0))
+            "  Greenhouse Chrome = MyGreenhouse / AI. Mail Chrome = Gmail or Outlook "
+            "(“Codes from” at the top) for security codes. Close both before Apply.")).pack(
+            side="left", padx=(8, 0))
 
         save_row = ttk.Frame(tab)
         save_row.pack(fill="x", pady=(8, 4))

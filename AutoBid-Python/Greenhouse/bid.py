@@ -24,13 +24,14 @@ from playwright.sync_api import sync_playwright
 
 import answers as bank_mod
 import db
+import gh_fill as gf
 import greenhouse_browser as gh
 from browser import open_mail_browser, profile_busy
 from config import (BATCH_SIZE, BATCH_WAIT_MIN, TAILORED_RESUME,
                     stop_requested, wait_while_paused)
-from mail_code import wait_gmail_login
+from mail_code import MAIL_LABEL, normalize_provider, wait_mail_login
 from notify import notify
-from resume import make_resume
+from resume import make_cover_letter, make_resume
 import ai_settings
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -161,197 +162,197 @@ def _qget(q, key, default=""):
         return default
 
 
-def _truthy(v):
-    if isinstance(v, bool):
-        return v
-    return str(v).strip().lower() in ("1", "true", "yes", "y")
+def _ntitle(s):
+    return gf.norm(str(s or "").strip().rstrip("?:*"))
 
 
-_LOCATION_TITLES = re.compile(
-    r"^(location(\s*\(city\))?|city|current (city|location))$", re.I)
+def _live_type(f):
+    """Answer-bank type for a field found only on the live form."""
+    if f["kind"] in ("select", "combobox"):
+        return "ValueSelect"
+    if f["kind"] == "radio":
+        yn = {o.strip().lower() for o in f["options"]}
+        return "Boolean" if yn <= {"yes", "no"} else "ValueSelect"
+    if f["kind"] == "checkbox":
+        return "Boolean" if f.get("single") else "MultiValueSelect"
+    return "LongText" if f["kind"] == "textarea" else "String"
 
 
-def _fill_select_or_radio(page, title: str, value) -> bool:
-    """Native <select>, radio Yes/No, or react-select for a labelled question."""
-    choice = str(value).strip()
-    if not choice:
-        return False
-    # Yes/No radios / checkboxes
-    if choice.lower() in ("yes", "no", "true", "false", "1", "0"):
-        yn = "Yes" if _truthy(choice) else "No"
+def _basics(profile):
+    name = (profile.get("name") or "").strip()
+    first = (profile.get("first_name") or "").strip()
+    last = (profile.get("last_name") or "").strip()
+    if name and not (first or last):
+        first, _, last = name.partition(" ")
+    return {
+        "first_name": first, "last_name": last, "email": profile.get("email") or "",
+        "phone": profile.get("phone") or "", "candidate-location": profile.get("location") or "",
+        "location": profile.get("location") or "",
+        # phone country picker on job-boards forms (#country): required, not in the API questions
+        "country": profile.get("country") or "United States",
+    }
+
+
+def plan_answers(fields, items, bank, profile):
+    """Pair every EMPTY live field with an answer (fields already filled by autofill or
+    MyGreenhouse are left alone).
+
+    Returns (plan, essays, missing, live_new):
+      plan     [(field, value, multi)]  ready to fill
+      essays   [(field, item)]          free-text answers the AI writes for this job
+      missing  [label]                  required, empty and no answer -> needs you
+      live_new [question dict]          required fields the stored API questions did not list
+    """
+    by_key, by_label = {}, {}
+    for f in fields:
+        for k in (f["id"], f["name"], (f["name"] or "").removesuffix("[]")):
+            if k:
+                by_key.setdefault(k.lower(), f)
+        if f["label"]:
+            by_label.setdefault(_ntitle(f["label"]), f)
+
+    def field_for(q):
+        path = (_qget(q, "path") or "").strip().lower()
+        if path and path in by_key:
+            return by_key[path]
+        t = _ntitle(_qget(q, "title"))
+        if not t:
+            return None
+        if t in by_label:
+            return by_label[t]
+        if len(t) >= 20:   # long questions: the page may cut or extend the label text
+            for lab, f in by_label.items():
+                if len(lab) >= 20 and (lab.startswith(t[:40]) or t.startswith(lab[:40])):
+                    return f
+        return None
+
+    plan, essays, missing, live_new, used = [], [], [], [], set()
+    for it in items:
+        q = it["q"]
+        f = field_for(q)
+        if f is None:
+            continue
+        used.add(f["key"])
+        if f["kind"] == "file" or f["value"] or _qget(q, "type") == "File":
+            continue   # files are swapped separately; filled fields stay as autofill left them
+        val = it.get("value")
+        if val == bank_mod.TAILORED_PLACEHOLDER:
+            continue
+        title = _qget(q, "title") or f["label"]
+        if bank_mod._is_empty(val):
+            if re.search(r"salary|compensation", title, re.I) and profile.get("salary"):
+                val = profile["salary"]
+            elif re.search(r"mailing address|home address|^address", title, re.I) \
+                    and profile.get("address"):
+                val = profile["address"]
+        if not bank_mod._is_empty(val):
+            plan.append((f, val, _qget(q, "type") == "MultiValueSelect"))
+        elif bank_mod.ai_writable(it):
+            essays.append((f, it))
+        elif it.get("missing") or _qget(q, "required"):
+            missing.append(title)
+
+    basics = _basics(profile)
+    with_answer = {_ntitle(e["question"]): e for e in bank["questions"]
+                   if not bank_mod._is_empty(e.get("answer"))}
+    for f in fields:
+        if f["key"] in used or f["kind"] == "file" or f["value"]:
+            continue
+        val = basics.get((f["id"] or "").lower()) or None
+        if val is None:
+            pkey = bank_mod.profile_key({"path": f["id"] or f["name"] or "", "title": f["label"]})
+            if pkey and pkey != "resume_file" and not bank_mod._is_empty(profile.get(pkey)):
+                val = profile[pkey]
+        if val is None and f["label"]:
+            e = with_answer.get(_ntitle(f["label"]))
+            if e:
+                val = e["answer"]
+        if val is not None:
+            plan.append((f, val, f["kind"] == "checkbox" and not f.get("single")))
+            continue
+        if not f["required"] or not f["label"]:
+            continue
+        qtype = _live_type(f)
+        q = {"title": f["label"], "type": qtype, "path": f["id"] or f["name"] or f["label"],
+             "required": True, "description": "", "options": f["options"]}
+        live_new.append(q)
+        it = {"q": q, "value": None, "missing": True, "source": "bank", "error": None}
+        if f["kind"] in ("text", "textarea") and bank_mod.ai_writable(it):
+            essays.append((f, it))
+        else:
+            missing.append(f["label"])
+    return plan, essays, missing, live_new
+
+
+def fill_plan(page, plan):
+    """Fill the planned fields. Returns the labels that could not be filled."""
+    failed = []
+    for f, value, multi in plan:
+        shown = (", ".join(map(str, value)) if isinstance(value, list) else str(value))
+        print(f"    · {(f['label'] or f['id'])[:55]}: {shown[:50]}")
+        if not gf.fill_field(page, f, value, multi=multi):
+            failed.append(f["label"] or f["id"])
+    return failed
+
+
+def answer_empty_fields(page, conn, ai, job, items, bank):
+    """Scan the live form and answer only what is still empty.
+    Returns (fields, problem) - problem is None when every empty required field got an answer."""
+    fields = gf.scan_form(page)
+    profile = bank["profile"]
+    plan, essays, missing, live_new = plan_answers(fields, items, bank, profile)
+    if live_new:
+        # questions only the live form shows: keep them for the Answers tab (added, never
+        # replacing the API questions, whose types and options are better)
+        if db.add_questions(conn, job["id"], live_new):
+            conn.commit()
+            try:
+                new_keys = []
+                bank_mod.sync_bank(conn, bank, new_keys)
+                bank_mod.save_new_questions(bank, new_keys)
+            except Exception:
+                pass
+    if missing:
+        why = "; ".join(f"{m[:50]} (no answer)" for m in missing[:4])
+        return fields, f"missing answers: {why}"
+    if essays:
         try:
-            group = page.locator(f"text=/{re.escape(title)}/i").locator(
-                "xpath=ancestor::*[self::div or self::fieldset or self::label][1]")
-            group.get_by_label(yn, exact=True).check(timeout=1500)
-            return True
-        except Exception:
-            pass
-    # Native <select>
-    try:
-        lab = page.get_by_label(re.compile(re.escape(title), re.I)).first
-        tag = (lab.evaluate("el => el.tagName") or "").lower()
-        if tag == "select":
-            try:
-                lab.select_option(label=choice, timeout=2000)
-                return True
-            except Exception:
-                lab.select_option(value=choice, timeout=1500)
-                return True
-    except Exception:
-        pass
-    # React-select / combobox near the label
-    try:
-        root = page.locator(f"text=/{re.escape(title)}/i").locator(
-            "xpath=ancestor::*[self::div or self::fieldset][1]")
-        box = root.locator(
-            "input[role=combobox], .select__control, [class*='select__control']").first
-        if box.count():
-            box.click(timeout=2000)
-            page.wait_for_timeout(250)
-            try:
-                root.locator("input").first.type(choice, delay=25)
-            except Exception:
-                page.keyboard.type(choice, delay=25)
-            page.wait_for_timeout(400)
-            opt = page.locator(
-                f'[role=option]:has-text("{choice}"), .select__option:has-text("{choice}")'
-            ).first
-            if opt.count():
-                opt.click(timeout=2500)
-                return True
-            page.keyboard.press("Enter")
-            return True
-    except Exception:
-        pass
-    return False
+            write_essays(ai, job, [it for _, it in essays])
+        except Exception as e:
+            return fields, f"essays not written: {str(e).splitlines()[0][:200]}"
+        plan += [(f, it["value"], False) for f, it in essays]
+    print(f"    {len(plan)} empty field(s) to answer"
+          + (f" ({len(essays)} written by AI)" if essays else ""))
+    failed = fill_plan(page, plan)
+    if failed:
+        print(f"    ! could not fill: {'; '.join(x[:40] for x in failed[:5])}")
+    return fields, None
 
 
-def _fill_labelled_text(page, title: str, value) -> bool:
-    """Fill input/textarea for a Greenhouse question label (long titles OK)."""
-    text = str(value)
-    if not text or not title:
-        return False
-    # 1) Accessible label
-    try:
-        page.get_by_label(re.compile(re.escape(title), re.I)).fill(text, timeout=2500)
-        return True
-    except Exception:
-        pass
-    # 2) Partial label match (first ~48 chars) — salary/address questions are long
-    needle = title[:48]
-    try:
-        lab = page.locator("label").filter(has_text=re.compile(re.escape(needle), re.I)).first
-        if lab.count():
-            el = None
-            try:
-                fid = lab.get_attribute("for")
-                if fid:
-                    el = page.locator(f"#{fid}, [id={json.dumps(fid)}]").first
-            except Exception:
-                el = None
-            if not el or not el.count():
-                wrap = lab.locator(
-                    "xpath=ancestor::*[self::div or self::fieldset or self::li][1]")
-                el = wrap.locator(
-                    "textarea, input:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio])"
-                ).first
-            if el and el.count():
-                el.click(timeout=2000)
-                el.fill("")
-                el.fill(text, timeout=2500)
-                return True
-    except Exception:
-        pass
-    # 3) JS: find label containing title, set nearest control
-    try:
-        ok = page.evaluate(
-            """([title, value]) => {
-              const labs = Array.from(document.querySelectorAll('label'));
-              const t = title.toLowerCase();
-              const lab = labs.find(l => (l.innerText || '').toLowerCase().includes(t.slice(0, 40)));
-              if (!lab) return false;
-              let el = null;
-              if (lab.htmlFor) el = document.getElementById(lab.htmlFor);
-              if (!el) el = lab.querySelector('textarea,input:not([type=hidden]):not([type=file])');
-              if (!el) {
-                const wrap = lab.closest('div,fieldset,li') || lab.parentElement;
-                el = wrap && wrap.querySelector(
-                  'textarea,input:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio])');
-              }
-              if (!el) return false;
-              el.focus();
-              el.value = value;
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-              return true;
-            }""",
-            [title, text],
-        )
-        return bool(ok)
-    except Exception:
-        return False
-
-
-def fill_from_profile_and_bank(page, items, profile):
-    """Fill Greenhouse apply form fields (classic boards + MyGreenhouse modal)."""
-    # Build lookup
-    by_title = {}
-    for item in items:
-        if bank_mod._is_empty(item.get("value")) or item["value"] == bank_mod.TAILORED_PLACEHOLDER:
-            continue
-        t = (item["q"].get("title") if isinstance(item["q"], dict) else item["q"]["title"] or "")
-        by_title[t.strip().lower().rstrip("?:*").strip()] = item["value"]
-
-    # Name / email / phone / Location (City) typeahead from profile
-    gh.fill_basic_fields(page, profile)
-    # Profile mailing address / salary when present (also in items when mapped)
-    if profile.get("address") and "please provide your mailing address" not in by_title:
-        by_title["please provide your mailing address"] = profile["address"]
-    if profile.get("salary"):
-        # Any salary-ish title without a value yet gets the profile salary
-        for item in items:
-            title = (_qget(item["q"], "title") or "").strip().lower().rstrip("?:*").strip()
-            if title and re.search(r"salary|compensation", title) and title not in by_title:
-                by_title[title] = profile["salary"]
-
-    filled_n = 0
-    # Extra text / select / radio from bank
-    for title, value in by_title.items():
-        if title in ("first name", "last name", "email", "phone", "resume/cv", "resume"):
-            continue
-        # Location (City) is a geocode combobox — never plain fill()
-        if _LOCATION_TITLES.match(title):
-            if gh.fill_location_city(page, str(value)):
-                filled_n += 1
-            continue
-        if _fill_select_or_radio(page, title, value):
-            filled_n += 1
-            continue
-        if _fill_labelled_text(page, title, value):
-            filled_n += 1
-            print(f"    · filled: {title[:60]}")
-            continue
-        print(f"    ! could not fill: {title[:60]}")
-
-    # Common authorization / sponsorship from profile when present
-    for label, key in (
-        (r"legally authorized to work", "authorized_us"),
-        (r"require sponsorship", "sponsorship"),
-    ):
-        if key not in profile:
-            continue
-        choice = "Yes" if _truthy(profile.get(key)) else "No"
+def swap_files(page, fields, ai, job, pdf):
+    """Resume: always upload the tailored PDF, replacing one already attached.
+    Cover letter: generated and swapped in when one is already attached, or it is required.
+    Returns a problem text, or None."""
+    if pdf:
+        res = gf.file_field(fields, "resume")
+        if not res or not gf.swap_file(page, res, pdf):
+            return "resume upload failed"
+    cov = gf.file_field(fields, "cover_letter")
+    if cov and (cov.get("attached") or cov.get("required")):
+        if not pdf:
+            return "cover letter needed but there is no tailored resume to base it on"
         try:
-            group = page.locator(f"text=/{label}/i").locator(
-                "xpath=ancestor::*[self::div or self::fieldset][1]")
-            group.get_by_label(choice, exact=True).check(timeout=2000)
-        except Exception:
-            pass
-    # Ensure location again after other fills (some boards re-render the form)
-    if profile.get("location"):
-        gh.fill_location_city(page, profile["location"])
-    if filled_n:
-        print(f"    filled {filled_n} custom field(s)")
+            print(f"    writing cover letter with {ai.provider} ...")
+            letter = make_cover_letter(ai, db.job_for_ai(job), pdf, source="greenhouse")
+        except Exception as e:
+            if cov.get("required"):
+                return f"cover letter not written: {str(e).splitlines()[0][:160]}"
+            print(f"    ! cover letter not written ({str(e).splitlines()[0][:120]}); "
+                  f"keeping the attached one")
+            return None
+        if not gf.swap_file(page, cov, letter) and cov.get("required"):
+            return "cover letter upload failed"
+    return None
 
 
 def _has_required_field_errors(page) -> bool:
@@ -385,7 +386,7 @@ def board_apply_url(job) -> str:
     return raw
 
 
-def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None):
+def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None, mail_provider="gmail"):
     print(f"\n- {job['title']}  ({job['company'] or job['org']})  [{job['id']}]")
     apply_url = board_apply_url(job)
     if not apply_url:
@@ -415,7 +416,15 @@ def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None):
             print(f"    ! resume: {e}")
             return "skipped"
 
+    def needs_you(why):
+        print(f"    ! {why} — tab left open")
+        if dry_run:
+            return "dry_run"
+        db.set_status(conn, job["id"], "needs_you", why[:500])
+        return "needs_you"
+
     page = ctx.new_page()
+    page.set_default_timeout(10_000)   # a missing element fails fast instead of waiting 30 s
     try:
         # Go straight to the scraped job-board apply page (not MyGreenhouse browse).
         page.goto(apply_url, wait_until="domcontentloaded", timeout=120_000)
@@ -436,52 +445,17 @@ def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None):
                 except Exception:
                     continue
 
-        # Discover live form fields (salary / mailing / custom) → save → re-resolve
-        fields = gh.extract_apply_form_fields(page) or []
-        if fields:
-            db.save_questions(conn, job["id"], fields)
-            conn.commit()
-            try:
-                bank_mod.sync_bank(conn, bank_mod.load_bank())
-            except Exception:
-                pass
-            bank = bank_mod.load_bank()
-            items = bank_mod.resolve_job(conn, job["id"], bank)
-            # Re-apply tailored resume placeholder → concrete PDF path
-            for item in items:
-                if item.get("value") == bank_mod.TAILORED_PLACEHOLDER and pdf:
-                    item["value"] = pdf
-
-        blocked = _blocking_non_ai(items)
-        if blocked:
-            why = "; ".join(
-                f"{_qget(i['q'], 'title')[:50]} (no answer)" for i in blocked[:4])
-            print(f"    ! missing answers (not AI-writable): {why} — tab left open")
-            if not dry_run:
-                db.set_status(conn, job["id"], "needs_you", f"missing answers: {why}"[:500])
-            return "needs_you" if not dry_run else "dry_run"
-
-        try:
-            write_essays(ai, job, items)
-        except Exception as e:
-            msg = f"essays not written: {str(e).splitlines()[0][:200]}"
-            print(f"    ! {msg} (tab left open)")
-            if not dry_run:
-                db.set_status(conn, job["id"], "needs_you", msg)
-            return "needs_you" if not dry_run else "dry_run"
-
-        profile = bank_mod.load_bank()["profile"]
-        fill_from_profile_and_bank(page, items, profile)
-
-        # Picture 4: remove base resume, upload tailored PDF
-        if pdf:
-            ok = gh.upload_resume(page, str(pdf))
-            if not ok:
-                print("    ! resume upload failed — tab left open")
-                if not dry_run:
-                    db.set_status(conn, job["id"], "needs_you", "resume upload failed")
-                    return "needs_you"
-                return "dry_run"
+        # 1) Focus the first input once so MyGreenhouse / Chrome autofill fills what it knows
+        gf.prime_autofill(page)
+        # 2) Answer only the fields that are still empty
+        bank = bank_mod.load_bank()
+        fields, problem = answer_empty_fields(page, conn, ai, job, items, bank)
+        if problem:
+            return needs_you(problem)
+        # 3) Resume / cover letter: replace what autofill attached with the generated files
+        problem = swap_files(page, fields, ai, job, pdf)
+        if problem:
+            return needs_you(problem)
 
         if dry_run:
             print("    dry-run: filled, not submitting (tab left open)")
@@ -496,10 +470,12 @@ def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None):
 
         outcome = gh.wait_after_submit(page, url_before, timeout_ms=20_000)
 
-        # Validation left us on the same URL (empty salary/address etc.) — refill + one retry
+        # Validation left us on the same URL (a field still empty): answer the empties, retry once
         if outcome == "unchanged" and _has_required_field_errors(page):
-            print("    form still has required-field errors — refill + Submit again …")
-            fill_from_profile_and_bank(page, items, profile)
+            print("    form still has required-field errors — filling empty fields + Submit again …")
+            _, problem = answer_empty_fields(page, conn, ai, job, items, bank)
+            if problem:
+                return needs_you(problem)
             page.wait_for_timeout(600)
             url_before = page.url or ""
             if gh.click_submit(page):
@@ -514,7 +490,7 @@ def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None):
         if outcome == "email_verify" or gh.has_email_verification(page):
             company = (job["company"] or job["org"] or "").strip()
             ok = gh.handle_email_verification(
-                page, mail_page, company=company, wait_sec=90)
+                page, mail_page, company=company, wait_sec=90, provider=mail_provider)
             if ok:
                 db.set_status(conn, job["id"], "applied",
                               "url changed after email code")
@@ -548,6 +524,8 @@ def main(argv=None):
     parser.add_argument("--batch", type=int, default=BATCH_SIZE)
     parser.add_argument("--ai", help="AI provider override")
     parser.add_argument("--model", help="AI model override")
+    parser.add_argument("--mail", default="gmail", choices=["gmail", "outlook"],
+                        help="mailbox that receives the Greenhouse security codes")
     args = parser.parse_args(argv)
 
     ids = list(args.job or [])
@@ -579,17 +557,19 @@ def main(argv=None):
               f"text answers still need AI or Answers/profile.")
 
     applied = failed = needs = skipped = 0
+    mail_provider = normalize_provider(args.mail)
+    mail_name = MAIL_LABEL[mail_provider]
     need_mail = not args.dry_run
     if need_mail and profile_busy("mail"):
         sys.exit(
             "Mail Chrome (.browser-profile-mail) is already open.\n"
             "Close “Open mail browser” first — Apply needs that profile to read "
-            "Greenhouse security codes from Gmail.")
+            f"Greenhouse security codes from {mail_name}.")
     with sync_playwright() as pw:
         mail_ctx = None
         mail_page = None
         if need_mail:
-            print("Opening Greenhouse Chrome + mail Chrome (Gmail for security codes) …")
+            print(f"Opening Greenhouse Chrome + mail Chrome ({mail_name} for security codes) …")
         else:
             print("Opening Greenhouse Chrome (dry-run — mail Chrome skipped) …")
         ctx = gh.open_ctx(pw)
@@ -597,10 +577,10 @@ def main(argv=None):
             mail_ctx = open_mail_browser(pw)
             mail_page = mail_ctx.new_page()
             try:
-                print("Checking Gmail in mail Chrome …")
-                if not wait_gmail_login(mail_page, timeout_sec=300):
+                print(f"Checking {mail_name} in mail Chrome …")
+                if not wait_mail_login(mail_page, mail_provider, timeout_sec=300):
                     raise RuntimeError(
-                        "Gmail not signed in on mail Chrome.\n"
+                        f"{mail_name} not signed in on mail Chrome.\n"
                         "Use “Open mail browser”, sign in with the address you put on "
                         "applications, close that window, then Apply again.")
             except Exception as e:
@@ -625,12 +605,27 @@ def main(argv=None):
 
         batch = max(1, args.batch)
         keep_open = False  # True once any bid did not fully finish in-browser
+        # One application per company: skip companies already applied to (earlier runs),
+        # and after one successful application in this run, skip that company's other jobs.
+        done_orgs = db.applied_orgs(conn)
+        tried_orgs = set()   # companies already attempted in this run
         try:
             for n, job in enumerate(jobs, 1):
                 if wait_while_paused() or stop_requested():
                     print("Stopped.")
                     keep_open = True
                     break
+                org = (job["org"] or "").strip()
+                if org in done_orgs:
+                    print(f"  skip {job['title']} ({job['company'] or org}): "
+                          f"already applied at this company")
+                    skipped += 1
+                    continue
+                if org in tried_orgs and not args.dry_run:
+                    print(f"  skip {job['title']} ({job['company'] or org}): "
+                          f"another job at this company was already tried in this run")
+                    skipped += 1
+                    continue
                 items = bank_mod.resolve_job(conn, job["id"], bank)
                 # profile name/email required for Greenhouse forms
                 profile = bank["profile"]
@@ -648,8 +643,13 @@ def main(argv=None):
                     skipped += 1
                     continue
                 state = apply_one(
-                    ctx, conn, ai, job, items, dry_run=args.dry_run, mail_page=mail_page)
+                    ctx, conn, ai, job, items, dry_run=args.dry_run, mail_page=mail_page,
+                    mail_provider=mail_provider)
+                if state in ("applied", "needs_you"):
+                    # needs_you = submitted or left open for you to finish: still one per company
+                    tried_orgs.add(org)
                 if state == "applied":
+                    done_orgs.add(org)
                     applied += 1
                 elif state == "needs_you":
                     needs += 1

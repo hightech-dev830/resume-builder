@@ -842,13 +842,27 @@ def main():
     print(f"{len(ready)} jobs ready ({waiting_ai} with AI essays to write) | "
           f"{blocked} need answers in the answer bank")
 
+    # One application per company: skip companies already applied to, and queue only the
+    # first (newest) job of each company in this run. Dry runs may still try several.
+    done_orgs = set() if args.dry_run else db.applied_orgs(conn)
     planned, queue = {}, []
+    same_company = 0
     for job, items in ready:
-        if args.dry_run or within_limit(conn, job["org"], planned):
-            planned[job["org"]] = planned.get(job["org"], 0) + 1
+        org = job["org"]
+        if not args.dry_run and (org in done_orgs or planned.get(org)):
+            same_company += 1
+            why = "already applied at this company" if org in done_orgs else \
+                  "another job at this company is already queued in this run"
+            print(f"  skip {job['title']} ({job['company'] or org}): {why}")
+            continue
+        if args.dry_run or within_limit(conn, org, planned):
+            planned[org] = planned.get(org, 0) + 1
             queue.append((job, items))
-    if len(queue) < len(ready):
-        print(f"{len(ready) - len(queue)} skipped because of company application limits {APPLY_LIMITS}")
+    if same_company:
+        print(f"{same_company} skipped: one application per company")
+    if len(queue) + same_company < len(ready):
+        print(f"{len(ready) - len(queue) - same_company} skipped because of company application "
+              f"limits {APPLY_LIMITS}")
     if not queue:
         return
 

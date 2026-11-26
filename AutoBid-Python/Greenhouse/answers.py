@@ -276,7 +276,26 @@ def set_answer(key, answer, bank=None):
     return bank
 
 
-def sync_bank(conn, bank):
+def save_new_questions(bank, keys):
+    """Upsert only the given (newly discovered) question rows - never the whole bank,
+    so answers edited meanwhile in another bot's app are not overwritten."""
+    import autobid_qbank as qbank
+    keys = set(keys or ())
+    rows = [{
+        "platform": e.get("platforms") or [PLATFORM], "key": e["key"],
+        "question": e.get("question") or "", "type": e.get("type") or "",
+        "form": e.get("form") or "", "note": e.get("note"),
+        "choices": e.get("choices"), "asked_in_jobs": int(e.get("asked_in_jobs") or 0),
+        "answer": e.get("answer"), "updated_at": _now(),
+    } for e in bank["questions"] if e["key"] in keys]
+    if rows:
+        qbank.upsert_rows(rows, PLATFORM)
+    return len(rows)
+
+
+def sync_bank(conn, bank, new_keys=None):
+    """Add questions from local jobs that the bank does not know yet (in memory).
+    new_keys: optional list that receives the keys added, for save_new_questions()."""
     existing = {q["key"]: q for q in bank["questions"]}
     stats = {}
     rows = conn.execute("""
@@ -298,6 +317,8 @@ def sync_bank(conn, bank):
                 "choices": json.loads(q["options"] or "[]") or None,
             })
             added += 1
+            if new_keys is not None:
+                new_keys.append(key)
         else:
             existing[key]["asked_in_jobs"] = len(s["jobs"])
     return added
@@ -351,6 +372,12 @@ def _resolve_rows(rows, bank, by_key):
                 item["missing"] = True
             result.append(item)
             continue
+        prep = prepared_answer(q)
+        if prep is not None:
+            # written for THIS job by "Prepare answers" (edit it in the Answers tab)
+            item["value"], item["source"] = prep, "job (prepared)"
+            result.append(item)
+            continue
         pkey = profile_key(q)
         if pkey == "resume_file" and TAILORED_RESUME:
             item["value"], item["source"] = TAILORED_PLACEHOLDER, "tailored resume (AI)"
@@ -394,6 +421,21 @@ def _resolve_rows(rows, bank, by_key):
                 item["source"] = "bank"
         result.append(item)
     return result
+
+
+def prepared_answer(q):
+    """The per-job answer saved by Prepare answers (questions.prepared), or None."""
+    try:
+        raw = q["prepared"]
+    except (KeyError, IndexError):
+        return None
+    if raw in (None, ""):
+        return None
+    try:
+        v = json.loads(raw)
+    except Exception:
+        v = raw
+    return None if _is_empty(v) else v
 
 
 def blocking(items):

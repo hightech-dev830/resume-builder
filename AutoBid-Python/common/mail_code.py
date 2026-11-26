@@ -1,14 +1,19 @@
-"""Read Greenhouse security codes from Gmail in .browser-profile-mail.
+"""Read Greenhouse security codes from Gmail or Outlook in .browser-profile-mail.
 
-After Submit, Greenhouse emails an 8-character code (greenhouse-mail.io) with a
-**Copy code** button. During Apply we open the newest matching mail, click
-Copy code, read the clipboard, then paste into the job-board Security code boxes.
+When a bid asks for a verification code, Greenhouse emails it ("Here's your MyGreenhouse
+security code" / "Security code for your application to …"). fetch_greenhouse_code()
+looks at the mail list (newest first), prefers an UNREAD code email, opens it and reads
+the code from the body ("Your security code is: XXXXXXXX"; Gmail: Copy code button).
+Codes already used are remembered (.cache/mail_codes_used.json) so an old email is never
+typed twice. Provider = "gmail" | "outlook" (the app's "Codes from" setting).
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 import urllib.parse
+from pathlib import Path
 
 # 8-char Greenhouse OTP (letters + digits). Avoid matching long hex / tracking ids.
 _CODE_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9]{8})(?![A-Za-z0-9])")
@@ -246,11 +251,8 @@ def copy_code_from_open_email(page) -> str | None:
     return _code_near_copy_button(page)
 
 
-def fetch_greenhouse_code(page, company: str = "", wait_sec: int = 90) -> str | None:
-    """Open the newest Greenhouse security-code email, click Copy code, return OTP.
-
-    `page` must be a tab in the mail Playwright context (.browser-profile-mail).
-    """
+def _legacy_gmail_fetch(page, company: str = "", wait_sec: int = 90) -> str | None:
+    """Previous Gmail-only search + Copy code flow (kept as a fallback)."""
     query = _SEARCH
     if company:
         # Prefer the company-named subject when we know it
@@ -311,4 +313,238 @@ def fetch_greenhouse_code(page, company: str = "", wait_sec: int = 90) -> str | 
             last_err = str(e).splitlines()[0][:120]
         page.wait_for_timeout(4000)
     print(f"    ! Gmail code not found ({last_err})")
+    return None
+
+
+# ====================================================================== Gmail + Outlook
+
+PROVIDERS = ("gmail", "outlook")
+MAIL_URLS = {
+    "gmail": GMAIL + "#inbox",
+    "outlook": "https://outlook.live.com/mail/0/",
+}
+MAIL_LABEL = {"gmail": "Gmail", "outlook": "Outlook"}
+
+# Subjects of Greenhouse code emails (MyGreenhouse + per-application codes)
+_SUBJECT_RE = (r"MyGreenhouse security code|security code for your application|"
+               r"your security code|verification code")
+# Gmail search: every category (Primary / Updates / …), newest first
+_GMAIL_CODE_SEARCH = '"security code" newer_than:1d'
+
+_USED_PATH = Path(__file__).resolve().parent.parent / ".cache" / "mail_codes_used.json"
+
+
+def normalize_provider(provider) -> str:
+    p = str(provider or "").strip().lower()
+    return p if p in PROVIDERS else "gmail"
+
+
+def _used_codes() -> list:
+    try:
+        return list(json.loads(_USED_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        return []
+
+
+def mark_code_used(code: str):
+    """Remember a code that was typed, so the same email is never used again."""
+    codes = [c for c in _used_codes() if c != code] + [code]
+    try:
+        _USED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _USED_PATH.write_text(json.dumps(codes[-100:]), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def outlook_logged_in(page) -> bool:
+    try:
+        url = (page.url or "").lower()
+        if "login.live.com" in url or "login.microsoftonline.com" in url:
+            return False
+        if ("outlook.live.com" in url or "outlook.office" in url) and "/mail" in url:
+            return bool(page.locator(
+                "[role=listbox], [role=tree], #topSearchInput, "
+                "input[aria-label*='Search' i], button[aria-label*='New mail' i]").count())
+    except Exception:
+        pass
+    return False
+
+
+def mail_logged_in(page, provider="gmail") -> bool:
+    return outlook_logged_in(page) if normalize_provider(provider) == "outlook" \
+        else gmail_logged_in(page)
+
+
+def wait_mail_login(page, provider="gmail", timeout_sec=300):
+    """Open the mailbox and wait until you are signed in in the mail Chrome."""
+    provider = normalize_provider(provider)
+    name = MAIL_LABEL[provider]
+    page.goto(MAIL_URLS[provider], wait_until="domcontentloaded", timeout=120_000)
+    end = time.time() + timeout_sec
+    told = False
+    while time.time() < end:
+        page.wait_for_timeout(1500)
+        if mail_logged_in(page, provider):
+            if told:
+                print(f"  Mail Chrome: {name} ready.")
+            return True
+        if not told:
+            print(f"  Mail Chrome: sign in to {name} "
+                  f"(the address you use on Greenhouse applications).")
+            print(f"  Waiting up to {timeout_sec // 60} min …")
+            told = True
+    return False
+
+
+# Mark matching message rows (newest first) with data-ab-mail=<n>; report unread state.
+_ROWS_JS = r"""(pat) => {
+  const re = new RegExp(pat, 'i');
+  document.querySelectorAll('[data-ab-mail]').forEach(e => e.removeAttribute('data-ab-mail'));
+  const rows = document.querySelectorAll(
+    'tr.zA, div[role="option"], div[role="listitem"][data-convid], div[data-convid]');
+  const out = [];
+  for (const r of rows) {
+    if (!r.getClientRects().length) continue;
+    if (r.parentElement && r.parentElement.closest('[data-ab-mail]')) continue;
+    const label = r.getAttribute('aria-label') || '';
+    const text = (r.innerText || '').replace(/\s+/g, ' ').trim();
+    if (!re.test(label + ' ' + text)) continue;
+    // unread: Gmail row class zE; Outlook aria-label "Unread …"; else a bold subject line
+    let unread = r.classList.contains('zE') || /\bunread\b/i.test(label);
+    if (!unread) {
+      for (const el of r.querySelectorAll('span, div')) {
+        if (el.children.length || !re.test(el.textContent || '')) continue;
+        if (parseInt(getComputedStyle(el).fontWeight, 10) >= 600) { unread = true; break; }
+      }
+    }
+    r.setAttribute('data-ab-mail', String(out.length));
+    out.push({ text: text.slice(0, 300), unread });
+  }
+  return out;
+}"""
+
+# Text of the open message(s), newest message first.
+_BODY_JS = r"""(provider) => {
+  const vis = e => e.getClientRects().length > 0;
+  let bodies = [];
+  if (provider === 'gmail') {
+    bodies = [...document.querySelectorAll('div.a3s')].filter(vis).reverse();  // thread: newest last
+  } else {
+    bodies = [...document.querySelectorAll(
+      '[aria-label="Message body"], div[role="document"], div.allowTextSelection')].filter(vis);
+  }
+  return bodies.map(b => (b.innerText || '').trim()).filter(Boolean);
+}"""
+
+_CODE_IN_TEXT = (
+    re.compile(r"(?i)security code(?: is)?\s*[:\-]?\s*([A-Za-z0-9]{6,10})(?![A-Za-z0-9])"),
+    re.compile(r"(?i)verification code(?: is)?\s*[:\-]?\s*([A-Za-z0-9]{6,10})(?![A-Za-z0-9])"),
+    re.compile(r"(?i)\bcode(?: is)?\s*[:\-]\s*([A-Za-z0-9]{6,10})(?![A-Za-z0-9])"),
+)
+
+
+def code_from_text(text: str) -> list:
+    """Codes in an email text, in order: “Your security code is: X” first, then 8-char OTPs."""
+    out = []
+    for rx in _CODE_IN_TEXT:
+        for m in rx.finditer(text or ""):
+            c = m.group(1)
+            if (c.lower() not in ("is", "for", "below", "within", "expires")
+                    and not _BAD.match(c) and re.search(r"\d", c) and c not in out):
+                out.append(c)
+    for c in extract_codes(text):
+        if re.search(r"\d", c) and c not in out:
+            out.append(c)
+    return out
+
+
+def _list_rows(page, provider):
+    """Code-email rows in the list, newest first (Outlook: Focused, then Other)."""
+    rows = page.evaluate(_ROWS_JS, _SUBJECT_RE) or []
+    if rows or provider != "outlook":
+        return rows
+    for tab in ("Other", "Focused"):
+        try:
+            t = page.get_by_role("tab", name=re.compile(rf"^{tab}$", re.I)).first
+            if t.count() and t.get_attribute("aria-selected") != "true":
+                t.click(timeout=3000)
+                page.wait_for_timeout(1200)
+                rows = page.evaluate(_ROWS_JS, _SUBJECT_RE) or []
+                if rows:
+                    return rows
+        except Exception:
+            continue
+    return rows
+
+
+def _refresh_list(page, provider, first):
+    if provider == "gmail":
+        page.goto(_gmail_search_url(_GMAIL_CODE_SEARCH), wait_until="domcontentloaded",
+                  timeout=60_000)
+    elif first:
+        page.goto(MAIL_URLS["outlook"], wait_until="domcontentloaded", timeout=60_000)
+    else:
+        # Outlook updates its list live; reload only while nothing new showed up
+        page.reload(wait_until="domcontentloaded", timeout=60_000)
+    page.wait_for_timeout(2500)
+
+
+def fetch_greenhouse_code(page, company: str = "", wait_sec: int = 90,
+                          provider: str = "gmail") -> str | None:
+    """Wait for the Greenhouse security-code email and return the code.
+
+    The newest UNREAD "Here's your MyGreenhouse security code" / "Security code for your
+    application" email wins; else the newest one whose code was not used before.
+    `page` is a tab in the mail Chrome (.browser-profile-mail); provider gmail | outlook.
+    """
+    provider = normalize_provider(provider)
+    name = MAIL_LABEL[provider]
+    used = set(_used_codes())
+    end = time.time() + wait_sec
+    first, last_err = True, ""
+    while time.time() < end:
+        try:
+            _refresh_list(page, provider, first)
+            first = False
+            if not mail_logged_in(page, provider):
+                if not wait_mail_login(page, provider,
+                                       timeout_sec=max(30, min(120, int(end - time.time())))):
+                    return None
+                first = True
+                continue
+            rows = _list_rows(page, provider)
+            if not rows:
+                last_err = "no security-code email yet"
+                page.wait_for_timeout(3000)
+                continue
+            # unread code emails first (newest first), then the newest read one
+            order = [i for i, r in enumerate(rows) if r["unread"]] + \
+                    [i for i, r in enumerate(rows) if not r["unread"]][:1]
+            for i in order:
+                # the list preview often shows the whole code already
+                codes = [c for c in code_from_text(rows[i]["text"]) if c not in used]
+                code = next((c for c in codes if len(c) >= 8), None)
+                if not code:
+                    page.locator(f'[data-ab-mail="{i}"]').first.click(timeout=5000)
+                    page.wait_for_timeout(1500)
+                    bodies = page.evaluate(_BODY_JS, provider) or []
+                    codes = [c for b in bodies for c in code_from_text(b) if c not in used]
+                    code = codes[0] if codes else None
+                    if not code and provider == "gmail":
+                        c = copy_code_from_open_email(page)
+                        code = c if c and c not in used else None
+                    if provider == "gmail":
+                        page.go_back(wait_until="domcontentloaded", timeout=30_000)
+                        page.wait_for_timeout(1200)
+                        page.evaluate(_ROWS_JS, _SUBJECT_RE)   # re-mark rows after going back
+                if code:
+                    state = "unread" if rows[i]["unread"] else "newest"
+                    print(f"    {name}: security code from the {state} email → {code}")
+                    mark_code_used(code)
+                    return code
+            last_err = "only already-used codes so far"
+        except Exception as e:
+            last_err = str(e).splitlines()[0][:120]
+        page.wait_for_timeout(3000)
+    print(f"    ! {name}: security code not found ({last_err})")
     return None

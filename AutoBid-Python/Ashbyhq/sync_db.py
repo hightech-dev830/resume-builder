@@ -88,12 +88,18 @@ def write_local(conn, r, content=True):
         conn.execute(f"INSERT INTO jobs (id, {', '.join(values)}) VALUES (?{', ?' * len(values)})",
                      [r["id"], *values.values()])
     if content:
+        # per-job answers from "Prepare answers" are local only: keep them through the pull
+        prepared = {row["id"]: row["prepared"] for row in conn.execute(
+            "SELECT id, prepared FROM questions WHERE job_id=? AND prepared IS NOT NULL",
+            (r["id"],))}
         conn.execute("DELETE FROM questions WHERE job_id=?", (r["id"],))
         for q in r.get("questions") or []:
             conn.execute(f"INSERT OR REPLACE INTO questions (job_id, {', '.join(Q_FIELDS)}) "
                          f"VALUES (?{', ?' * len(Q_FIELDS)})",
                          [r["id"], *[json.dumps(q.get("options") or []) if f == "options" else q.get(f)
                                      for f in Q_FIELDS]])
+        for qid, val in prepared.items():
+            conn.execute("UPDATE questions SET prepared=? WHERE id=?", (val, qid))
 
 
 def _set_hash(conn, job_id):

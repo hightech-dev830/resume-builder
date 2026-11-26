@@ -1031,8 +1031,9 @@ def wait_after_submit(page, url_before: str, timeout_ms: int = 20_000) -> str:
     return "unchanged"
 
 
-def handle_email_verification(page, mail_page, company: str = "", wait_sec: int = 90) -> bool:
-    """If the OTP step is showing, read Gmail (mail Chrome) and submit the code.
+def handle_email_verification(page, mail_page, company: str = "", wait_sec: int = 90,
+                              provider: str = "gmail") -> bool:
+    """If the OTP step is showing, read the code from Gmail / Outlook (mail Chrome) and submit it.
 
     `mail_page` is a tab in `.browser-profile-mail`. Returns True only when the
     URL changes after the code Submit (same rule as the main form).
@@ -1042,11 +1043,13 @@ def handle_email_verification(page, mail_page, company: str = "", wait_sec: int 
     if mail_page is None:
         print("    ! email verification shown but mail Chrome is not open")
         return False
-    print("    email verification — Gmail: open latest mail → Copy code → paste …")
+    from mail_code import MAIL_LABEL, normalize_provider
+    print(f"    email verification — reading the code from {MAIL_LABEL[normalize_provider(provider)]} …")
     from mail_code import fetch_greenhouse_code, looks_like_otp
-    code = fetch_greenhouse_code(mail_page, company=company or "", wait_sec=wait_sec)
+    code = fetch_greenhouse_code(mail_page, company=company or "", wait_sec=wait_sec,
+                                 provider=provider)
     if not code or not looks_like_otp(code):
-        print(f"    ! bad / missing security code from Gmail: {code!r}")
+        print(f"    ! bad / missing security code from the mailbox: {code!r}")
         return False
     print(f"    pasting security code into Greenhouse: {code}")
     if not fill_security_code(page, code):
@@ -1068,8 +1071,9 @@ def handle_email_verification(page, mail_page, company: str = "", wait_sec: int 
         return True
     # Wrong/expired code: try once more with a fresher email (Copy code again)
     if has_email_verification(page) or email_verification_error(page) or outcome == "unchanged":
-        print("    retrying with a newer Gmail Copy code …")
-        code2 = fetch_greenhouse_code(mail_page, company=company or "", wait_sec=45)
+        print("    retrying with a newer security-code email …")
+        code2 = fetch_greenhouse_code(mail_page, company=company or "", wait_sec=45,
+                                      provider=provider)
         if code2 and looks_like_otp(code2) and code2 != code and fill_security_code(page, code2):
             url_before2 = page.url or ""
             if click_submit(page):

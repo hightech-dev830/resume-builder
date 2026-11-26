@@ -539,6 +539,13 @@ def _resolve_rows(rows, bank, by_key):
                     item["value"], item["error"] = str(raw), None
             result.append(item)
             continue
+        prep = prepared_answer(q)
+        if prep is not None:
+            # written for THIS job by "Prepare answers" (edit it in the Answers tab)
+            item["source"] = "job (prepared)"
+            item["value"], item["error"] = to_form_value(q, prep)
+            result.append(item)
+            continue
         pkey = profile_key(q)
         if pkey == "resume_file" and TAILORED_RESUME:
             # made per job by bid.py (common/resume.py) right before filling the form
@@ -555,6 +562,21 @@ def _resolve_rows(rows, bank, by_key):
             item["value"], item["error"] = to_form_value(q, raw)
         result.append(item)
     return result
+
+
+def prepared_answer(q):
+    """The per-job answer saved by Prepare answers (questions.prepared), or None."""
+    try:
+        raw = q["prepared"]
+    except (KeyError, IndexError):
+        return None
+    if raw in (None, ""):
+        return None
+    try:
+        v = json.loads(raw)
+    except Exception:
+        v = raw
+    return None if _is_empty(v) else v
 
 
 def blocking(items):

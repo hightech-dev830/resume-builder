@@ -107,6 +107,10 @@ def connect():
         if col not in cols:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typ}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_relevant ON jobs(relevant, is_active)")
+    qcols = {r["name"] for r in conn.execute("PRAGMA table_info(questions)")}
+    if "prepared" not in qcols:
+        # per-job answer written by "Prepare answers" (JSON); Apply uses it first
+        conn.execute("ALTER TABLE questions ADD COLUMN prepared TEXT")
     return conn
 
 
@@ -321,6 +325,15 @@ def set_status(conn, job_id, status, note=None):
 def save_answer(conn, question_id, value):
     conn.execute("UPDATE questions SET answer=? WHERE id=?",
                  (json.dumps(value, ensure_ascii=False), question_id))
+
+
+def applied_orgs(conn):
+    """Companies (org slugs) with at least one job applied to - applied_at set, or a status
+    of applied or later (1Interview / Offer / ...)."""
+    ph = ",".join("?" * len(APPLIED_STATUSES))
+    return {r[0] for r in conn.execute(
+        f"SELECT DISTINCT org FROM jobs WHERE applied_at IS NOT NULL OR status IN ({ph})",
+        APPLIED_STATUSES)}
 
 
 def applied_recently(conn, org, days):

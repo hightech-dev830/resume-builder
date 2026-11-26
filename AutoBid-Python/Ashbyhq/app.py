@@ -28,6 +28,7 @@ from tkinter.scrolledtext import ScrolledText
 from config import BASE_DIR, BATCH_SIZE, STOP_FLAG, PAUSE_FLAG  # first: puts AutoBid-Python/common on sys.path
 import ai_settings
 import answers as bank_mod
+from prepare_ui import PREPARE_LABEL, PrepareAnswersMixin
 import db
 
 STATUS_COLORS = {"applied": "#1a7f37", "needs_you": "#b35900", "failed": "#c62828",
@@ -241,7 +242,7 @@ class CompanyPicker(tk.Toplevel):
         self.destroy()
 
 
-class App(tk.Tk):
+class App(PrepareAnswersMixin, tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("AutoBid - Ashbyhq")
@@ -393,6 +394,12 @@ class App(tk.Tk):
         self.f_search = ttk.Entry(bar, width=30)
         self.f_search.pack(side="left", padx=4)
         self.f_search.bind("<KeyRelease>", lambda e: self.load_jobs())
+        # One application per company: other jobs at a company already applied to are
+        # marked "company applied" (grey) and Apply skips them.
+        self.f_hide_applied_co = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Hide companies I applied to",
+                        variable=self.f_hide_applied_co,
+                        command=self.load_jobs).pack(side="left", padx=(8, 0))
         self.job_count = ttk.Label(bar, text="", style="Stat.TLabel")
         self.job_count.pack(side="left", padx=12)
         ttk.Button(bar, text="⬆ Sync to DB", command=self.sync_to_db).pack(side="right")
@@ -428,6 +435,7 @@ class App(tk.Tk):
             self.jobs.column(c, width=w, anchor="w", stretch=c in ("title", "location"))
         for st, col in STATUS_COLORS.items():
             self.jobs.tag_configure(st, foreground=col)
+        self.jobs.tag_configure("co_applied", foreground="#9e9e9e")
         # grid, not pack: the scrollbars always keep their place, however wide the columns are
         vsb = ttk.Scrollbar(left, orient="vertical", command=self.jobs.yview)
         hsb = ttk.Scrollbar(left, orient="horizontal", command=self.jobs.xview)
@@ -470,6 +478,8 @@ class App(tk.Tk):
         self.b_answers_sel = ttk.Button(btns2, text="Answers for selected",
                                         command=self.show_answers_for_selected)
         self.b_answers_sel.pack(side="left")
+        ttk.Button(btns2, text="Prepare answers", command=self.prepare_answers_for_jobs).pack(
+            side="left", padx=4)
         stbar = ttk.Frame(right)
         stbar.pack(fill="x", pady=(0, 6))
         ttk.Label(stbar, text="Status").pack(side="left")
@@ -534,6 +544,8 @@ class App(tk.Tk):
                                 (f"{chosen[0][:18]} ▾" if len(chosen) == 1 else f"Companies: {len(chosen)} ▾"))
         keep = self.jobs.selection()
         self.jobs.delete(*self.jobs.get_children())
+        applied_orgs = db.applied_orgs(self.conn)
+        hide_applied_co = self.f_hide_applied_co.get()
         answers_filter = self.f_answers.get()
         max_age = POSTED_WITHIN[self.f_posted.get()]
         today = date.today()
@@ -572,8 +584,14 @@ class App(tk.Tk):
             if (resume_filter == "✓ ready" and not has_resume) or (resume_filter == "not made yet" and has_resume):
                 continue
             rel ={1: "yes", 0: "no"}.get(r["relevant"], "?") + (f" ({r['relevance_by']})" if r["relevance_by"] else "")
-            self.jobs.insert("", "end", iid=r["id"], tags=(r["status"],), values=(
-                "☐", r["status"], company, r["title"], posted_label(posted, today),
+            status_cell, tags = r["status"], (r["status"],)
+            if (r["org"] in applied_orgs and r["status"] not in db.APPLIED_STATUSES
+                    and not r["applied_at"]):
+                if hide_applied_co:
+                    continue
+                status_cell, tags = f"{r['status']} · company applied", ("co_applied",)
+            self.jobs.insert("", "end", iid=r["id"], tags=tags, values=(
+                "☐", status_cell, company, r["title"], posted_label(posted, today),
                 r["team"] or r["department"], r["location"], r["compensation"], ready, has_resume, rel))
         if self.sort_col:
             self.sort_jobs(self.sort_col)
@@ -882,6 +900,8 @@ class App(tk.Tk):
                         command=self.load_bank_list).pack(side="right")
         ttk.Button(top, text="Import from backup…",
                    command=self.import_answers_backup).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="Prepare selected", style="Accent.TButton",
+                   command=self.prepare_answers_for_questions).pack(side="right", padx=(0, 8))
         self.q_kind = ttk.Combobox(top, state="readonly", width=24,
                                    values=["You answer", "AI writes (text / essays)", "All required"])
         self.q_kind.set("You answer")
@@ -919,7 +939,9 @@ class App(tk.Tk):
         self.q_count.pack(anchor="w")
         cols = ("jobs", "type", "question", "answer")
         qframe = ttk.Frame(right)   # packed below, after the Answer box (so the box always fits)
-        self.qlist = ttk.Treeview(qframe, columns=cols, show="headings", selectmode="browse", height=12)
+        # extended: Ctrl/Shift-click several questions for "Prepare selected"
+        self.qlist = ttk.Treeview(qframe, columns=cols, show="headings", selectmode="extended",
+                                  height=12)
         self.q_headings = {
             "jobs": "Required in", "type": "Type", "question": "Question", "answer": "Answer"}
         self.q_sort_col, self.q_sort_desc = "jobs", True   # default: most-required first
@@ -930,6 +952,8 @@ class App(tk.Tk):
             self.qlist.column(c, width=w, anchor="w", stretch=c == "question")
         self._update_q_headings()
         self.qlist.tag_configure("open", foreground="#c62828")
+        # unsaved draft (configured after "open" so the draft colour wins)
+        self.qlist.tag_configure("draft", foreground="#1f4fbf", background="#eef3ff")
         qsb = ttk.Scrollbar(qframe, orient="vertical", command=self.qlist.yview)
         self.qlist.configure(yscrollcommand=qsb.set)
         qsb.pack(side="right", fill="y")
@@ -937,11 +961,17 @@ class App(tk.Tk):
         self.qlist.bind("<<TreeviewSelect>>", lambda e: self.edit_question())
 
         # Answer box docked at the bottom; the question list above takes the space left over.
-        # Changes update the local board immediately; Supabase is multi-saved on tab change / Sync to DB.
-        ed = ttk.LabelFrame(right, text="  Answer (local until Sync / tab change)  ", padding=8)
+        # Edits are drafts in this app only; "Save answers" (or a tab change) writes them all
+        # to Supabase in one request and then refreshes the Jobs board once.
+        ed = ttk.LabelFrame(
+            right, text="  Answer (draft until “Save answers” or a tab change)  ", padding=8)
         ed.pack(side="bottom", fill="x")
         eb = ttk.Frame(ed)
         eb.pack(side="bottom", fill="x")
+        self.save_answers_btn = ttk.Button(
+            eb, text="💾 Save answers", style="Accent.TButton", state="disabled",
+            command=lambda: self.flush_pending_answers(reason="Save answers"))
+        self.save_answers_btn.pack(side="right", padx=(8, 0))
         self.e_saved = ttk.Label(eb, text="", foreground="#1a7f37")
         self.e_saved.pack(side="right", padx=10)
         # shown only after coming here by double-clicking a question in Jobs > Application
@@ -952,6 +982,7 @@ class App(tk.Tk):
         self.e_note.pack(anchor="w")
         self.e_holder = ttk.Frame(ed)
         self.e_holder.pack(fill="x", pady=6)
+        self._build_per_job_frame(ed)       # per-job answers (Prepare answers), under the answer
         self._answer_ignore = False
         self._answer_save_after = None
         qframe.pack(fill="both", expand=True, pady=(6, 6))
@@ -981,6 +1012,10 @@ class App(tk.Tk):
             messagebox.showinfo("Answers for selected",
                                 "Tick one or more jobs first (or select a job on the right).")
             return
+        self.show_answers_for_ids(ids)
+
+    def show_answers_for_ids(self, ids):
+        """Answers tab, listing only the questions these jobs require."""
         # Keep bank in sync so every selected job's required questions are listed
         try:
             bank_mod.sync_bank(self.conn, self.bank)
@@ -1158,7 +1193,8 @@ class App(tk.Tk):
                 jobs_n = int(n or 0)
             rows.append({
                 "iid": str(i),
-                "tags": ("open",) if empty else (),
+                "tags": (("open",) if empty else ()) + (
+                    ("draft",) if q["key"] in self.pending_answers else ()),
                 "values": (jobs_col, q["type"], q["question"], ans[:80]),
                 "jobs_n": jobs_n,
                 "type": q["type"] or "",
@@ -1243,10 +1279,12 @@ class App(tk.Tk):
                 self.e_widget.bind("<KeyRelease>", self._schedule_answer_save)
                 self.e_widget.bind("<FocusOut>", lambda e: self._auto_save_answer(advance=True))
                 if q["type"] in bank_mod.TEXT_TYPES:
-                    ttk.Label(self.e_holder, text="Leave empty to let the AI write it for each job. Auto-saves as you type.",
+                    ttk.Label(self.e_holder, text="Leave empty to let the AI write it for each job. "
+                                                  "Draft until “Save answers”.",
                               style="Stat.TLabel").pack(anchor="w")
         finally:
             self._answer_ignore = False
+        self._show_per_job_answers(q)
 
     def _schedule_answer_save(self, _event=None):
         """Debounce free-text edits so every keystroke is not a Supabase round-trip."""
@@ -1295,32 +1333,65 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Not saved", f"The answer could not be cached:\n{e}")
             return
+        # Draft only: no full board rebuild and no Supabase call per edit. Only this row is
+        # repainted; "Save answers" / a tab change saves all drafts and refreshes the board once.
         self.pending_answers[q["key"]] = None if bank_mod._is_empty(answer) else answer
-        shown = "(cleared)" if answer is None else (", ".join(answer) if isinstance(answer, list) else answer)
-        n_pend = len(self.pending_answers)
-        self.log(f"✓ Local: {q['question'][:70]}  ->  {str(shown)[:60]}  "
-                 f"({n_pend} pending sync)\n")
-        self.refresh_all()
+        self._answers_dirty = True
+        iid = self._update_q_row(q)
+        self._update_draft_ui()
 
-        idx = next((n for n, b in enumerate(self.bank["questions"]) if b["key"] == q["key"]), None)
-        if idx is not None and self.qlist.exists(str(idx)):
-            target, note = str(idx), f"✓ Local ({n_pend} pending)"
-        elif advance:
+        # 'only unanswered': an answered row leaves the list and the next open one is selected
+        if (advance and iid and self.q_only_open.get()
+                and not bank_mod._is_empty(answer) and self.qlist.exists(iid)):
+            self.qlist.delete(iid)
             rows = self.qlist.get_children()
             target = rows[min(pos, len(rows) - 1)] if rows else None
-            note = f"✓ Local - next unanswered ({n_pend} pending)"
-        else:
-            target, note = None, f"✓ Local ({n_pend} pending)"
-        if target and advance:
-            self._answer_ignore = True
-            try:
-                self.qlist.selection_set(target)
-                self.qlist.see(target)
-                if target != (str(idx) if idx is not None else None):
+            if target:
+                self._answer_ignore = True
+                try:
+                    self.qlist.selection_set(target)
+                    self.qlist.see(target)
                     self.edit_question()
-            finally:
-                self._answer_ignore = False
-        self.e_saved.config(text=f"{note}  {datetime.now().strftime('%H:%M:%S')}")
+                finally:
+                    self._answer_ignore = False
+
+    def _update_q_row(self, q):
+        """Repaint one Answers row in place (answer text + draft colour). Returns its iid."""
+        idx = next((n for n, b in enumerate(self.bank["questions"]) if b["key"] == q["key"]), None)
+        iid = None if idx is None else str(idx)
+        if iid is None or not self.qlist.exists(iid):
+            return iid
+        empty = bank_mod._is_empty(q.get("answer"))
+        if empty:
+            ans = "(AI writes per job)" if q["type"] in bank_mod.TEXT_TYPES else ""
+        else:
+            ans = (", ".join(q["answer"]) if isinstance(q["answer"], list) else str(q["answer"]))
+        self.qlist.set(iid, "answer", ans[:80])
+        tags = (("open",) if empty else ()) + (
+            ("draft",) if q["key"] in self.pending_answers else ())
+        self.qlist.item(iid, tags=tags)
+        meta = self._q_row_meta.get(iid)
+        if meta:
+            meta.update(answer=ans, empty=empty)
+        return iid
+
+    def _update_draft_ui(self):
+        n = len(self.pending_answers)
+        if getattr(self, "save_answers_btn", None):
+            self.save_answers_btn.config(
+                text=f"💾 Save answers ({n})" if n else "💾 Save answers",
+                state="normal" if n else "disabled")
+        if getattr(self, "e_saved", None):
+            self.e_saved.config(
+                text=f"✎ {n} draft answer{'s' if n != 1 else ''} not saved yet" if n else "",
+                foreground="#b35900")
+
+    def _refresh_after_answers(self):
+        """Recompute the Jobs board's Answers column once, after drafts were saved."""
+        if not getattr(self, "_answers_dirty", False):
+            return
+        self._answers_dirty = False
+        self.refresh_all()
 
     def flush_pending_answers(self, reason=""):
         """Push all locally cached answer changes to Supabase in one multi-save."""
@@ -1336,6 +1407,7 @@ class App(tk.Tk):
                 self.save_answer(advance=False)
         pending = dict(self.pending_answers)
         if not pending:
+            self._refresh_after_answers()
             return 0
         try:
             bank_mod.flush_answers(pending, self.bank)
@@ -1343,18 +1415,26 @@ class App(tk.Tk):
             messagebox.showerror(
                 "Answers not synced",
                 f"{len(pending)} local answer(s) could not be saved to Supabase:\n{e}\n\n"
-                "They stay on this board; try Sync to DB again.")
+                "They stay as drafts; press Save answers again.")
             self.log(f"! Answer sync failed ({len(pending)} pending): {e}\n")
             return 0
         self.pending_answers.clear()
         why = f" ({reason})" if reason else ""
-        self.log(f"✓ Synced {len(pending)} answer(s) to Supabase{why}\n")
+        self.log(f"✓ Saved {len(pending)} answer(s) to Supabase{why}\n")
+        self._update_draft_ui()
         if getattr(self, "e_saved", None):
             self.e_saved.config(
-                text=f"✓ Synced {len(pending)}  {datetime.now().strftime('%H:%M:%S')}")
+                text=f"✓ Saved {len(pending)}  {datetime.now().strftime('%H:%M:%S')}",
+                foreground="#1a7f37")
+        for iid in self.qlist.get_children():
+            tags = tuple(t for t in self.qlist.item(iid, "tags") if t != "draft")
+            self.qlist.item(iid, tags=tags)
+        self._refresh_after_answers()
         return len(pending)
 
     def _on_tab_changed(self, _event=None):
+        if getattr(self, "_suppress_tab_flush", False):
+            return   # Prepare answers just opened the Answers tab with drafts to review
         self.flush_pending_answers(reason="tab change")
 
     # ------------------------------------------------------------ Run tab
@@ -1698,11 +1778,13 @@ class App(tk.Tk):
                 "Make resumes", f"Write {len(ids)} tailored resumes with the AI?\n"
                                 f"(about 1-2 minutes each, one after another)"):
             return
+        self.flush_pending_answers(reason="before bidding")   # bid.py reads answers from Supabase
         self._flush_ai_settings()
         self.run_script(["make_resume.py", "--jobs-file", self._write_selection(ids)],
                         f"Resume for {self._selection_label(ids)}")
 
     def make_all_resumes(self):
+        self.flush_pending_answers(reason="before bidding")   # bid.py reads answers from Supabase
         self._flush_ai_settings()
         self.run_script(["make_resume.py", "--all"], "Making missing resumes")
 
@@ -1728,6 +1810,7 @@ class App(tk.Tk):
                     f"(Answers: “no details yet”). Fetch details first?"):
                 self.fetch_missing_details()
             return
+        self.flush_pending_answers(reason="before bidding")   # bid.py reads answers from Supabase
         self._flush_ai_settings()
         self.run_script(["bid.py", "--dry-run", "--batch", self.r_batch.get(),
                          "--jobs-file", self._write_selection(ids)],
@@ -1753,8 +1836,11 @@ class App(tk.Tk):
                 + "\n".join(titles) + more + "\n\n"
                 f"Batch mode, {self.r_batch.get()} at a time. Empty text/essay questions are "
                 f"written by the AI per job. Jobs missing profile / yes-no / choice answers are "
-                f"skipped and listed in the log. Company limits (Ashby: 3 in 60 days) apply.")):
+                f"skipped and listed in the log. One application per company: jobs at "
+                f"companies already applied to are skipped, and only one job per company "
+                f"is applied to in this run.")):
             return
+        self.flush_pending_answers(reason="before bidding")   # bid.py reads answers from Supabase
         self._flush_ai_settings()
         self.run_script(["bid.py", "--batch", self.r_batch.get(), "--jobs-file", self._write_selection(ids)],
                         f"Applying: {self._selection_label(ids)}")
@@ -1770,6 +1856,7 @@ class App(tk.Tk):
             args.append("--dry-run")
         elif not messagebox.askyesno("Start bidding", "Dry run is off: applications will be SUBMITTED. Continue?"):
             return
+        self.flush_pending_answers(reason="before bidding")   # bid.py reads answers from Supabase
         self._flush_ai_settings()
         self.run_script(args, "Bidding" + (" (dry run)" if self.r_dry.get() else ""))
 
@@ -2270,9 +2357,17 @@ class App(tk.Tk):
                         self.bank = bank_mod.load_bank()
                         bank_mod.sync_bank(self.conn, self.bank)
                         bank_mod.save_bank(self.bank)
+                        # unsaved drafts stay drafts on top of the fresh bank
+                        for k, v in self.pending_answers.items():
+                            try:
+                                self.bank = bank_mod.set_answer_local(k, v, self.bank)
+                            except KeyError:
+                                pass
                     except Exception as e:
                         self.log(f"!! Answer bank not refreshed from Supabase: {e}\n")
                     self.refresh_all()
+                    if finished_label.startswith(PREPARE_LABEL):
+                        self.after(200, self._prepare_finished)
                     if finished_label.startswith("Collecting"):
                         self._log_collect_result()
                         # Safety net: even if collect.py was killed mid-run ("Stop now"),
@@ -2395,6 +2490,7 @@ class App(tk.Tk):
 
     def destroy(self):
         try:
+            self._answers_dirty = False   # closing: no board refresh needed
             self.flush_pending_answers(reason="app close")
         except Exception:
             pass

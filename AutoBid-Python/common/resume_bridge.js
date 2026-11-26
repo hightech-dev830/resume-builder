@@ -33,11 +33,13 @@ async function settings() {
     template: 'kevin',
     outputDir: DEFAULT_DIR,
     source: 'built-in defaults',
+    coverPrompt: ai.DEFAULT_COVER_PROMPT,
   };
   try {
     const db = require(path.join(ROOT, 'lib', 'db.js'));
     const all = await db.getAllSettings();
     if ((all.prompt_resume || '').trim()) out.prompt = all.prompt_resume.trim();
+    if ((all.prompt_cover || '').trim()) out.coverPrompt = all.prompt_cover.trim();
     if (all.base_resume) out.base = JSON.parse(all.base_resume);
     if (all.default_template) out.template = all.default_template;
     const dir = all[`local_output_dir_${process.platform}`];
@@ -112,14 +114,27 @@ async function build(requestFile) {
   return { pdf: pdfPath, resume };
 }
 
+// Cover letter PDF in the same template as the resume (Resume Builder's renderCoverLetterHtml).
+//   request = { resume, letter, template, job: { company, role }, outDir, fileBase }
+async function cover(requestFile) {
+  const req = JSON.parse(fs.readFileSync(requestFile, 'utf8'));
+  fs.mkdirSync(req.outDir, { recursive: true });
+  const pdfPath = path.join(req.outDir, `${req.fileBase}_CoverLetter.pdf`);
+  const html = await webFontsInline(templates.renderCoverLetterHtml(req.resume, req.letter, req.template, req.job || {}));
+  fs.writeFileSync(pdfPath, await htmlToPdf(html));
+  fs.writeFileSync(path.join(req.outDir, 'cover_letter.txt'), req.letter);
+  return { pdf: pdfPath };
+}
+
 (async () => {
   const [cmd, arg] = process.argv.slice(2);
   let result;
   if (cmd === 'settings') result = await settings();
   else if (cmd === 'build') result = await build(arg);
+  else if (cmd === 'cover') result = await cover(arg);
   else if (cmd === 'save-prompt') result = await savePrompt(arg);
   else if (cmd === 'ai-complete') result = await aiComplete(arg);
-  else throw new Error('usage: node resume_bridge.js settings | build <request.json> | save-prompt <file.txt> | ai-complete <request.json>');
+  else throw new Error('usage: node resume_bridge.js settings | build <request.json> | cover <request.json> | save-prompt <file.txt> | ai-complete <request.json>');
   process.stdout.write(JSON.stringify(result));
   process.exit(0);   // the PDF browser and Supabase client would keep Node alive
 })().catch((err) => {
