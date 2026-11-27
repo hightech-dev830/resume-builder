@@ -22,6 +22,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+import ai_fill
 import answers as bank_mod
 import db
 import gh_fill as gf
@@ -386,8 +387,17 @@ def board_apply_url(job) -> str:
     return raw
 
 
-def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None, mail_provider="gmail"):
-    print(f"\n- {job['title']}  ({job['company'] or job['org']})  [{job['id']}]")
+def fill_form(page, conn, ai, job, items, bank, fill_mode="manual"):
+    """manual: saved answers only (+ AI essays). ai: one AI call for every empty field."""
+    if fill_mode == "ai":
+        return ai_fill.answer_empty_fields_ai(page, conn, ai, job, items, bank, _basics, fill_plan)
+    return answer_empty_fields(page, conn, ai, job, items, bank)
+
+
+def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None, mail_provider="gmail",
+              fill_mode="manual"):
+    print(f"\n- {job['title']}  ({job['company'] or job['org']})  [{job['id']}]"
+          + ("  [AI fill]" if fill_mode == "ai" else ""))
     apply_url = board_apply_url(job)
     if not apply_url:
         print("    ! no Apply link remembered — skip")
@@ -449,7 +459,7 @@ def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None, mail_pro
         gf.prime_autofill(page)
         # 2) Answer only the fields that are still empty
         bank = bank_mod.load_bank()
-        fields, problem = answer_empty_fields(page, conn, ai, job, items, bank)
+        fields, problem = fill_form(page, conn, ai, job, items, bank, fill_mode)
         if problem:
             return needs_you(problem)
         # 3) Resume / cover letter: replace what autofill attached with the generated files
@@ -473,7 +483,7 @@ def apply_one(ctx, conn, ai, job, items, dry_run=False, mail_page=None, mail_pro
         # Validation left us on the same URL (a field still empty): answer the empties, retry once
         if outcome == "unchanged" and _has_required_field_errors(page):
             print("    form still has required-field errors — filling empty fields + Submit again …")
-            _, problem = answer_empty_fields(page, conn, ai, job, items, bank)
+            _, problem = fill_form(page, conn, ai, job, items, bank, fill_mode)
             if problem:
                 return needs_you(problem)
             page.wait_for_timeout(600)
@@ -526,7 +536,11 @@ def main(argv=None):
     parser.add_argument("--model", help="AI model override")
     parser.add_argument("--mail", default="gmail", choices=["gmail", "outlook"],
                         help="mailbox that receives the Greenhouse security codes")
+    parser.add_argument("--fill", default="manual", choices=["manual", "ai"],
+                        help="manual: saved answers only; ai: the AI answers every empty field "
+                             "(using your saved answers, profile, resume and the job)")
     args = parser.parse_args(argv)
+    ai_mode = args.fill == "ai"
 
     ids = list(args.job or [])
     if args.jobs_file:
@@ -544,7 +558,7 @@ def main(argv=None):
     bank_mod.sync_bank(conn, bank)
 
     # AI needed for tailored resumes and/or missing String/LongText answers
-    need_ai = bool(TAILORED_RESUME)
+    need_ai = bool(TAILORED_RESUME) or ai_mode
     for job in jobs:
         items = bank_mod.resolve_job(conn, job["id"], bank)
         if any(bank_mod.ai_writable(i) for i in items):
@@ -552,6 +566,8 @@ def main(argv=None):
             break
     ai = None
     problem = ai_settings.api_key_problem(args.ai or ai_settings.get("resume")[0]) if need_ai else None
+    if problem and ai_mode:
+        sys.exit(f"AI fill mode needs an AI: {problem} (AI tab), or switch Fill to Manual.")
     if problem and need_ai:
         print(f"Note: {problem} — will reuse existing resume_path when present; "
               f"text answers still need AI or Answers/profile.")
@@ -635,7 +651,7 @@ def main(argv=None):
                     print(f"  ! fill Answers / My profile (name + email) before Apply")
                     keep_open = True
                     break
-                blocked = _blocking_non_ai(items)
+                blocked = [] if ai_mode else _blocking_non_ai(items)   # AI mode: AI answers
                 if blocked:
                     why = "; ".join(
                         f"{_qget(i['q'], 'title')[:50]}" for i in blocked[:4])
@@ -644,7 +660,7 @@ def main(argv=None):
                     continue
                 state = apply_one(
                     ctx, conn, ai, job, items, dry_run=args.dry_run, mail_page=mail_page,
-                    mail_provider=mail_provider)
+                    mail_provider=mail_provider, fill_mode=args.fill)
                 if state in ("applied", "needs_you"):
                     # needs_you = submitted or left open for you to finish: still one per company
                     tried_orgs.add(org)

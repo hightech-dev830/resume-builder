@@ -4,9 +4,8 @@
   Answers tab   "Prepare selected"  -> the selected questions (Ctrl/Shift-click for several);
                                        with an "Answers for selected" job filter, for those jobs
 
-When the background run finishes, shared answers become blue DRAFTS in the Answers tab
-(nothing is saved until "Save answers" / leaving the tab) and per-job answers are already
-stored per job. The editor of an "AI writes" question shows each job's own answer to edit.
+When the background run finishes, shared answers are saved to Supabase at once (so those
+questions show as answered) and per-job answers are already stored per job. The editor of an "AI writes" question shows each job's own answer to edit.
 
 The App provides: conn, bank, pending_answers, qlist, tabs, answers_tab, e_perjob (a frame),
 selected_ids(), run_script(), flush_pending_answers(), show_answers_for_ids(),
@@ -19,6 +18,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 PREPARE_LABEL = "Preparing answers"
+LIVE_TAG = "@@AB_PREPARED "          # same as prepare_runner.LIVE_TAG
 TEXT_TYPES = ("String", "LongText")
 
 
@@ -86,8 +86,7 @@ class PrepareAnswersMixin:
             return
         import answers as bank_mod
         ids = getattr(self, "_prepare_ids", [])
-        # Open the Answers tab FIRST: leaving/entering tabs saves drafts, and these new drafts
-        # must stay drafts until you reviewed them.
+        # Open the Answers tab first (with the tab-change save off), then save everything once.
         self._suppress_tab_flush = True
         try:
             if ids:
@@ -97,22 +96,35 @@ class PrepareAnswersMixin:
             self.update_idletasks()
         finally:
             self.after(400, lambda: setattr(self, "_suppress_tab_flush", False))
-        n = 0
-        for key, ans in (res.get("shared") or {}).items():
+        # The run already saved each batch to Supabase; make sure the (reloaded) bank shows all
+        # of them, and retry the ones Supabase refused.
+        shared = res.get("shared") or {}
+        unsaved = res.get("unsaved") or {}
+        for key, ans in shared.items():
             try:
                 self.bank = bank_mod.set_answer_local(key, ans, self.bank)
             except KeyError:
                 continue
-            self.pending_answers[key] = ans
-            n += 1
-        self.resolved = bank_mod.resolve_all(self.conn, self.bank)
-        self._answers_dirty = n > 0
-        self.load_jobs()
+            if key in unsaved:
+                self.pending_answers[key] = ans
+        self._answers_dirty = True
+        if unsaved:
+            self.flush_pending_answers(reason="Prepare answers retry")
+        if self._answers_dirty:
+            self.resolved = bank_mod.resolve_all(self.conn, self.bank)
+            self._answers_dirty = False
+            self.load_jobs()
         self.load_bank_list()
         self._update_draft_ui()
+        if self.selected_q and not self._editor_busy():
+            self.edit_question()
         skipped = res.get("skipped") or []
-        lines = [f"✓ {n} shared answer(s) prepared — the blue rows in this list.\n"
-                 "   Review / edit them, then press “Save answers” (leaving this tab saves them too).",
+        left = sum(1 for k in unsaved if k in self.pending_answers)
+        shared_line = (f"✓ {len(shared)} shared answer(s) prepared and saved to Supabase — "
+                       "edit them in this list as usual." if not left else
+                       f"! {len(shared)} shared answer(s) prepared; {left} NOT saved (Supabase "
+                       "error) — they are the blue drafts, press “Save answers” to retry.")
+        lines = [shared_line,
                  f"✓ {res.get('per_job', 0)} per-job answer(s) saved for {res.get('jobs', 0)} job(s) — "
                  "select an “AI writes” question to see and edit each job's answer."]
         if skipped:
@@ -123,6 +135,64 @@ class PrepareAnswersMixin:
             if len(skipped) > 10:
                 lines.append(f"  … and {len(skipped) - 10} more (see the log)")
         messagebox.showinfo("Prepare answers - done", "\n".join(lines))
+
+    # ------------------------------------------------------------------ live updates
+
+    def _editor_busy(self):
+        """True while you are typing in the answer editor (do not redraw it under you)."""
+        try:
+            w = str(self.focus_get() or "")
+        except Exception:
+            return False
+        holders = [getattr(self, "e_holder", None), getattr(self, "e_perjob", None)]
+        return any(h is not None and w.startswith(str(h)) for h in holders)
+
+    def prepare_live_line(self, line):
+        """A "@@AB_PREPARED {...}" line from the running prepare: show what was just saved.
+        Returns True when the line was one of those (do not print it)."""
+        if not line.startswith(LIVE_TAG):
+            return False
+        try:
+            msg = json.loads(line[len(LIVE_TAG):].strip())
+        except Exception:
+            return True
+        import answers as bank_mod
+        by_key = {q["key"]: q for q in self.bank.get("questions") or []}
+        sel_key = (self.selected_q or {}).get("key") if getattr(self, "selected_q", None) else None
+        redraw = False
+        shared = {k: v for k, v in (msg.get("shared") or {}).items() if k in by_key}
+        for key, ans in shared.items():
+            self.bank = bank_mod.set_answer_local(key, ans, self.bank)
+            if msg.get("saved"):
+                self.pending_answers.pop(key, None)
+            else:
+                self.pending_answers[key] = ans          # Supabase refused: keep as a draft
+            self._update_q_row(by_key[key])
+            redraw = redraw or key == sel_key
+        if shared:
+            self._update_draft_ui()
+            self.log(f"✓ {len(shared)} answer(s) {'saved' if msg.get('saved') else 'prepared'} "
+                     f"— updated in the Answers list\n")
+        if msg.get("job") and sel_key:
+            qids = msg.get("qids") or []
+            if qids and self.conn.execute(
+                    f"SELECT 1 FROM questions WHERE bank_key=? AND id IN "
+                    f"({','.join('?' * len(qids))}) LIMIT 1", [sel_key, *qids]).fetchone():
+                redraw = True
+        self._answers_dirty = True
+        if redraw and not self._editor_busy():
+            self.edit_question()
+        return True
+
+    def _prepared_counts(self):
+        """{bank_key: number of active jobs with a per-job prepared answer} for the list."""
+        try:
+            return {r[0]: r[1] for r in self.conn.execute(
+                "SELECT q.bank_key, COUNT(DISTINCT q.job_id) FROM questions q "
+                "JOIN jobs j ON j.id = q.job_id WHERE q.prepared IS NOT NULL "
+                "AND j.is_active = 1 GROUP BY q.bank_key")}
+        except Exception:
+            return {}
 
     # ------------------------------------------------------------------ per-job editor
 

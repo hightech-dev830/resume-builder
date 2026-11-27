@@ -1,7 +1,7 @@
 {
   "resume": {
-    "provider": "deepseek",
-    "model": ""
+    "provider": "claude_code",
+    "model": "claude-haiku-5-5"
   },
   "relevance": {
     "provider": "deepseek",

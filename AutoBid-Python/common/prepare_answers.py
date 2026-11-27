@@ -176,7 +176,9 @@ def _job_prompt(profile, resume, job, qs, examples):
 
 
 def prepare(ai, profile, answered, shared_qs, job_qs, resume=None, log=print,
-            stop=lambda: False):
+            stop=lambda: False, on_shared=None, on_job=None):
+    # on_shared({key: answer}) / on_job(job_id, {qid: answer}) run after EACH batch / job,
+    # so answers are saved as they come (Stop or an error later keeps what was done).
     """shared_qs: [{key, question, type, choices, note}]
     job_qs:    [{"job": {id, company, role, location, jd}, "questions": [{qid, key, question,
                  type, choices, note}]}]
@@ -203,13 +205,17 @@ def prepare(ai, profile, answered, shared_qs, job_qs, resume=None, log=print,
                 out["skipped"].append({"job": "", "question": q["question"],
                                        "why": f"AI failed: {str(e).splitlines()[0][:120]}"})
             continue
+        got = {}
         for n, q in enumerate(batch):
             ans, why = _clean(q, data.get(str(n)))
             if ans is None:
                 out["skipped"].append({"job": "", "question": q["question"], "why": why})
             else:
-                out["shared"][q["key"]] = ans
+                got[q["key"]] = ans
                 log(f"  · {q['question'][:60]}  ->  {_fmt_answer(ans)[:60]}")
+        out["shared"].update(got)
+        if got and on_shared:
+            on_shared(got)
 
     for n, entry in enumerate(job_qs, 1):
         if stop():
@@ -231,11 +237,16 @@ def prepare(ai, profile, answered, shared_qs, job_qs, resume=None, log=print,
                 out["skipped"].append({"job": label, "question": q["question"],
                                        "why": f"AI failed: {str(e).splitlines()[0][:120]}"})
             continue
+        got = {}
         for i, q in enumerate(qs):
             ans, why = _clean(q, data.get(str(i)))
             if ans is None:
                 out["skipped"].append({"job": label, "question": q["question"], "why": why})
             else:
-                out["per_job"].setdefault(job["id"], {})[q["qid"]] = ans
+                got[q["qid"]] = ans
                 log(f"  · {q['question'][:60]}  ->  {_fmt_answer(ans)[:60]}")
+        if got:
+            out["per_job"].setdefault(job["id"], {}).update(got)
+            if on_job:
+                on_job(job["id"], got)
     return out

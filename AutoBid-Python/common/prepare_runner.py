@@ -8,9 +8,10 @@ calls run() with its own answers + db modules).
                one shared answer each
   --out        result for the app: {"shared": {key: answer}, "per_job": n, "skipped": [...]}
 
-Shared answers are NOT saved here: the app shows them as drafts to review. Per-job answers are
-saved in the local job database (questions.prepared) and used by Apply instead of writing them
-at submit time; edit them in the Answers tab.
+Answers are saved as each AI batch comes back: shared answers to Supabase (the answer bank),
+per-job answers in the local job database (questions.prepared, used by Apply instead of
+writing them at submit time). After each save a "@@AB_PREPARED {json}" line tells the app to
+show them in the Answers tab right away; edit them there as usual.
 """
 from __future__ import annotations
 
@@ -90,6 +91,43 @@ def collect_targets(conn, db, bank_mod, bank, job_ids, keys):
     return list(shared.values()), job_qs, skipped
 
 
+def _ensure_in_bank(conn, bank, keys, platform):
+    """Questions the local jobs ask but Supabase's answer bank does not have yet (the app adds
+    them in memory and uploads them later): add them here, so their answers can be saved."""
+    have = {q["key"] for q in bank["questions"]}
+    for key in keys:
+        if key in have:
+            continue
+        row = conn.execute("SELECT * FROM questions WHERE bank_key=? LIMIT 1", (key,)).fetchone()
+        if not row:
+            continue
+        n = conn.execute("SELECT COUNT(DISTINCT job_id) FROM questions WHERE bank_key=?",
+                         (key,)).fetchone()[0]
+        try:
+            opts = json.loads(_qval(row, "options", "[]") or "[]")
+        except Exception:
+            opts = []
+        if platform != "greenhouse":       # Ashby's bank keeps plain labels
+            opts = [o if isinstance(o, str) else (o.get("label") or "") for o in opts]
+        entry = {"key": key, "question": _qval(row, "title", ""),
+                 "type": _qval(row, "type", "String"),
+                 "form": _qval(row, "form", "") or ("application" if platform == "greenhouse" else ""),
+                 "asked_in_jobs": int(n or 0), "answer": None}
+        if opts:
+            entry["choices"] = opts
+        if _qval(row, "description", ""):
+            entry["note"] = _qval(row, "description", "")
+        bank["questions"].append(entry)
+        have.add(key)
+
+
+LIVE_TAG = "@@AB_PREPARED "
+
+
+def _tell_app(**msg):
+    print(LIVE_TAG + json.dumps(msg, ensure_ascii=False), flush=True)
+
+
 def run(bank_mod, db, open_ctx, stop_requested, platform):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -128,6 +166,33 @@ def run(bank_mod, db, open_ctx, stop_requested, platform):
         except Exception as e:
             print(f"  ! base resume not loaded ({str(e)[:100]}); answers use the profile only")
 
+    unsaved = {}
+
+    def on_shared(got):
+        try:
+            _ensure_in_bank(conn, bank, got, platform)
+            bank_mod.flush_answers(got, bank)
+        except Exception as e:
+            unsaved.update(got)
+            print(f"  ! {len(got)} answer(s) not saved to Supabase ({str(e)[:120]}) - "
+                  "the app keeps them as drafts")
+            _tell_app(shared=got, saved=False)
+            return
+        for k, v in got.items():
+            try:
+                bank_mod.set_answer_local(k, v, bank)
+            except KeyError:
+                pass
+        print(f"  ✓ saved {len(got)} answer(s) to Supabase")
+        _tell_app(shared=got, saved=True)
+
+    def on_job(job_id, got):
+        for qid, ans in got.items():
+            conn.execute("UPDATE questions SET prepared=? WHERE id=?",
+                         (json.dumps(ans, ensure_ascii=False), qid))
+        conn.commit()
+        _tell_app(job=job_id, qids=list(got))
+
     started = time.time()
     from web_ai import PROVIDERS
     if provider in PROVIDERS:          # web chat AI needs the bot's Chrome
@@ -137,7 +202,7 @@ def run(bank_mod, db, open_ctx, stop_requested, platform):
             try:
                 ai = ai_settings.make_ai("resume", ctx)
                 out = prepare(ai, bank["profile"], answered, shared_qs, job_qs, resume=resume,
-                              stop=stop_requested)
+                              stop=stop_requested, on_shared=on_shared, on_job=on_job)
                 ai.finish_web_chat()
             finally:
                 ctx.close()
@@ -145,19 +210,13 @@ def run(bank_mod, db, open_ctx, stop_requested, platform):
         ai = ai_settings.make_ai("resume")
         print(f"Answers are written by {ai.label}")
         out = prepare(ai, bank["profile"], answered, shared_qs, job_qs, resume=resume,
-                      stop=stop_requested)
+                      stop=stop_requested, on_shared=on_shared, on_job=on_job)
 
-    # per-job answers: saved locally for Apply (questions.prepared)
-    n = 0
-    for jid, answers in out["per_job"].items():
-        for qid, ans in answers.items():
-            conn.execute("UPDATE questions SET prepared=? WHERE id=?",
-                         (json.dumps(ans, ensure_ascii=False), qid))
-            n += 1
-    conn.commit()
-    result.update(shared=out["shared"], per_job=n, skipped=skipped + out["skipped"])
+    n = sum(len(a) for a in out["per_job"].values())          # already saved by on_job
+    result.update(shared=out["shared"], unsaved=unsaved, per_job=n,
+                  skipped=skipped + out["skipped"])
     Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"\nPrepared {len(out['shared'])} shared answer(s) (drafts for you to review) and "
+    print(f"\nPrepared {len(out['shared'])} shared answer(s) ({len(out['shared']) - len(unsaved)} saved to Supabase) and "
           f"{n} per-job answer(s) in {time.time() - started:.0f}s; "
           f"{len(result['skipped'])} left for you.")
     for s in result["skipped"][:30]:

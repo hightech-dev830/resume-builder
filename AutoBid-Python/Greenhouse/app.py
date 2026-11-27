@@ -313,6 +313,15 @@ class App(PrepareAnswersMixin, tk.Tk):
         self.mail_pick.set("Outlook" if self.settings.get("mail_provider") == "outlook" else "Gmail")
         self.mail_pick.bind("<<ComboboxSelected>>", lambda e: self._save_mail_provider())
         self.mail_pick.pack(side="left")
+        # How Apply answers the form: Manual = saved answers only; AI = the AI answers every
+        # empty field at once (reads all dropdown options; uses saved answers + profile + JD)
+        ttk.Label(top, text="Fill").pack(side="left", padx=(12, 4))
+        self.fill_pick = ttk.Combobox(top, width=18, state="readonly",
+                                      values=["Manual (saved answers)", "AI (auto)"])
+        self.fill_pick.set("AI (auto)" if self.settings.get("fill_mode") == "ai"
+                           else "Manual (saved answers)")
+        self.fill_pick.bind("<<ComboboxSelected>>", lambda e: self._save_fill_mode())
+        self.fill_pick.pack(side="left")
         self.stats = ttk.Label(top, text="", foreground="#444")
         self.stats.pack(side="right")
         self.auto_hdr = ttk.Label(top, text="", foreground="#1a7f37")
@@ -1351,6 +1360,17 @@ class App(PrepareAnswersMixin, tk.Tk):
         save_settings(self.settings)
         self.log(f"Security codes will be read from {self.mail_pick.get()}.\n")
 
+    def _fill_mode(self):
+        return "ai" if self.fill_pick.get().startswith("AI") else "manual"
+
+    def _save_fill_mode(self):
+        self.settings["fill_mode"] = self._fill_mode()
+        save_settings(self.settings)
+        self.log("Apply fills forms with "
+                 + ("AI: every empty field in one AI call (dropdown options read first; your "
+                    "saved answers, profile, resume and the job as reference).\n"
+                    if self._fill_mode() == "ai" else "your saved answers only (Manual).\n"))
+
     def open_mail_browser(self):
         if self.proc and self.proc.poll() is None:
             messagebox.showwarning("Busy", "Stop the current task first.")
@@ -1392,7 +1412,7 @@ class App(PrepareAnswersMixin, tk.Tk):
         self._flush_ai_settings()
         path = self._write_selection(ids)
         args = ["bid.py", "--jobs-file", str(path), "--batch", str(BATCH_SIZE),
-                "--mail", self._mail_provider()]
+                "--mail", self._mail_provider(), "--fill", self._fill_mode()]
         if dry:
             args.append("--dry-run")
         self.run_script(args, f"{'Dry run' if dry else 'Applying'}: {len(ids)} jobs")
@@ -1719,7 +1739,7 @@ class App(PrepareAnswersMixin, tk.Tk):
                         self.after(500, lambda k=pending: self._run_collect(k, auto=False))
                     elif self.settings.get("auto_collect") and self._due_slot() is not None:
                         self.after(500, lambda: self._auto_tick(reschedule=False))
-                else:
+                elif not self.prepare_live_line(line):
                     self.log(line)
         except queue.Empty:
             pass
@@ -1795,6 +1815,7 @@ class App(PrepareAnswersMixin, tk.Tk):
         self._q_row_meta = {}
         shown = open_n = 0
         rows = []
+        prepared_n = self._prepared_counts()
         for i, q in enumerate(self.bank.get("questions") or []):
             if filt is not None:
                 if q["key"] not in filt:
@@ -1809,7 +1830,10 @@ class App(PrepareAnswersMixin, tk.Tk):
             empty = bank_mod._is_empty(q.get("answer"))
             ans = "" if empty else (
                 ", ".join(q["answer"]) if isinstance(q["answer"], list) else str(q["answer"]))
-            if empty and is_ai:
+            if empty and is_ai and prepared_n.get(q["key"]):
+                ans = f"(prepared for {prepared_n[q['key']]} job(s))"
+                empty = False                     # answered per job by Prepare answers
+            elif empty and is_ai:
                 ans = "(AI writes per job)"
             elif empty:
                 ans = "(need your answer)"

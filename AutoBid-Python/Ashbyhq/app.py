@@ -1162,6 +1162,7 @@ class App(PrepareAnswersMixin, tk.Tk):
         self._q_row_meta = {}
         shown = open_n = 0
         rows = []
+        prepared_n = self._prepared_counts()
         for i, q in enumerate(self.bank["questions"]):
             if filt is not None:
                 if q["key"] not in filt:
@@ -1173,7 +1174,10 @@ class App(PrepareAnswersMixin, tk.Tk):
                 continue
             empty = bank_mod._is_empty(q["answer"])
             ans = "" if empty else (", ".join(q["answer"]) if isinstance(q["answer"], list) else str(q["answer"]))
-            if empty and is_text:
+            if empty and is_text and prepared_n.get(q["key"]):
+                ans = f"(prepared for {prepared_n[q['key']]} job(s))"
+                empty = False                     # answered per job by Prepare answers
+            elif empty and is_text:
                 ans = "(AI writes per job)"
             if needle:
                 blob = f"{q.get('question') or ''} {ans} {q.get('type') or ''}".lower()
@@ -2391,7 +2395,7 @@ class App(PrepareAnswersMixin, tk.Tk):
                         self.after(500, lambda k=pending: self._run_collect(k, auto=False))
                     elif self.settings.get("auto_collect") and self._due_slot() is not None:
                         self.after(500, lambda: self._auto_tick(reschedule=False))
-                else:
+                elif not self.prepare_live_line(line):
                     self.log(line)
         except queue.Empty:
             pass
